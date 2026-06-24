@@ -5,5 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "datasets>=5.0.0",
+    "huggingface-hub>=1.20.1",
+    "matplotlib>=3.11.0",
+    "numpy>=2.5.0",
+    "opencv-python>=4.13.0.92",
     "torch>=2.12.1",
+    "ultralytics>=8.4.75",
 ]
