@@ -1,3 +1,5 @@
+from sympy.plotting.series import flat
+from matplotlib.pylab import axis
 from PIL.ImageOps import crop
 from huggingface_hub import HfApi, hf_hub_download, login
 from datasets import load_dataset, Dataset, load_from_disk
@@ -7,7 +9,9 @@ import numpy as np
 import torch 
 import cv2
 import io
+import open3d as o3d
 from PIL import Image
+
 
 def load_hf_dataset():
     hf_repo = "uitraviolet/cart_dataset"
@@ -66,7 +70,7 @@ def yolo_mask(result, depth_tensor) -> [torch.Tensor] :
 
     idx, _ = max(enumerate(result.boxes.xywh), key=lambda pair: compute_bbox_area(pair[1]))
 
-    bbox =result.boxes.xyxy[0].round().int() # Extract the rounded integer coordinates of the bounding box [Num_Instances, 4]
+    bbox =result.boxes.xyxy[idx].round().int() # Extract the rounded integer coordinates of the bounding box [Num_Instances, 4]
     # Now output the cropped rgb and the segmentation mask
     xmin, ymin, xmax, ymax = bbox.tolist()
     rgb_cropped = orig_img[ymin:ymax, xmin:xmax, :]
@@ -86,27 +90,7 @@ def yolo_mask(result, depth_tensor) -> [torch.Tensor] :
     cropped_depth = depth_tensor[ymin:ymax, xmin:xmax]
     blacked_out_cropped_depth = torch.where(cropped_mask, cropped_depth, 0)
 
-    return blacked_out_rgb_cropped, blacked_out_cropped_depth
-
-def extract_depth_mask(depth_tensor, mask) -> torch.Tensor:
-    """
-    this function takes a torch.tensor (depth_array) and a torch.tensor (mask) e.g. produced by yolo_mask
-    and extracts the corresponding depth patch to the mask as torch.tensor
-    """
-    return depth_tensor[mask[0]]
-    # ok so here we've learned something important, 
-    # since mask is torch.size([1280, 800]) but the 1 values inside it are a chaotic shape, when you try to do mask indexing
-    # the result is not a [1280, 800] shape, otherwise what values would be the masked out coordinates? 
-    # the best solution, to me is the following
-    # for best efficiency first, crop the image to the cart bounding box size
-    # extract the cart segmentation mask
-    # crop the depth map to the bounding box value
-    # extract the cart segmentation mask from the cropped depth map
-    # this allows two things :
-    # 1. more efficiency by dealing with lower resolution tensor (a fraction of the original (1280, 800) shape) 
-    # 2. to still be able to manipulate a regular depth image and use classic algorithms on it 
-
-# todo: note that there is a big limitation which is that currently the model is not robust to input with more than 1 cart
+    return blacked_out_rgb_cropped, blacked_out_cropped_depth, xmin, ymin
 
 def instance_detected(result):
     """
@@ -118,7 +102,76 @@ def instance_detected(result):
     else:
         return False
 
+
+class context:
+    def __init__(self, xmin, ymin, orig_H, orig_W):
+        self.xmin = xmin
+        self.ymin = ymin 
+        self.orig_H = orig_H
+        self.orig_W = orig_W
+
+def point_cloud_processing(rgb, depth, ctx):
+    """
+    This function takes as an input two numpy array of the same shape
+    For now I'll try something naive, I'll just get the inverse matrix, for the rgb, and consider the associated pixel depth value as the Z value, 
+    I won't try to use the depth camera's instrinsic parameters' yet. 
+    """
+
+    rgb_width, rgb_height = rgb.shape[1], rgb.shape[0]
+    rgb_fx, rgb_fy = 639.99768, 639.99768
+    rgb_cx, rgb_cy = 640.0, 400.0
+
+
+    # Here we're creating the coordinate matrix of the rgb input, this will allow us to back project it 
+    # But in fact I'm really confused as to what I'm doing here, it feels like the rgb input is useless, we only need its shapes
+    # Which I kind of understand since the rgb channel (the main info of the rgb input) is only useful if we want to make a colored point cloud...
+    # Now I need to better understand how to remap the c_x and c_y variable to the new cropped image.
+    # Saying that the (0,0) coordinates where the top-left corner of the original image, then the image center is located at (c_x, c_y)
+    # Cropping the image results in a translation of the origin from (0, 0) to (xmin, ymin)
+    # Thus, the translated camera center (c'_x, c'_y) verifies : 
+    # c'_x = c_x - xmin
+    # c'_y = c_y - ymin
+    crop_cx = rgb_cx - ctx.xmin
+    crop_cy = rgb_cy - ctx.ymin
+
+    K_inv = np.array([
+        [1/rgb_fx, 0, -crop_cx/rgb_fx],
+        [0, 1/rgb_fy, -crop_cy/rgb_fy],
+        [0, 0, 1]
+    ])
+
+    # To backproject everything, we'll need the indice matrix of the input images
+    x_col_coord = np.arange(rgb.shape[1])
+    y_row_coord = np.arange(rgb.shape[0])
+
+    xx_coord, yy_coord = np.meshgrid(x_col_coord, y_row_coord)
+
+    xx_coord = xx_coord[..., np.newaxis]
+    yy_coord = yy_coord[..., np.newaxis]
+
+    rgb_coordinates = np.concatenate((xx_coord, yy_coord, np.ones_like(xx_coord)), axis=-1)
+
+
+
+    # We use the meshgrid function to create this with the correct indexing : 
+    rgb_coordinates = rgb_coordinates[..., np.newaxis]
+
+    # Now each coordinate is going to be point-wise multiplied by the corresponding depth and by K_inv
+    back_proj = K_inv @ rgb_coordinates
+    back_proj = back_proj.squeeze(-1)
+
+    depth = depth[..., np.newaxis]
+    point_cloud = depth * back_proj
+
+    return point_cloud
+
+
 if __name__ == "__main__":
+    """
+    Global context infos :
+    The input images have a dimension of (H, W, C) = (1280, 800, 3) for the rgb input and (H, W) = (1200, 800) for the depht input !
+    """
+
     model = load_hf_model()
 
     local_dataset = load_from_disk("./train")
@@ -132,17 +185,25 @@ if __name__ == "__main__":
     result = model(img, retina_masks=True)
 
     if instance_detected(result):
-        cropped_rgb, cropped_depth = yolo_mask(result, depth_tensor)
+        cropped_rgb, cropped_depth, xmin, ymin = yolo_mask(result, depth_tensor)
         numpy_depth_mask = cropped_depth.numpy()
         numpy_cropped_rgb = cropped_rgb.numpy()
         plt.figure(figsize=(10,16))
         plt.imshow(numpy_cropped_rgb)
         plt.show()
 
+        ctx = context(xmin, ymin, np.array(img).shape[0], np.array(img).shape[1])
 
+        point_cloud = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx)
 
-    # print(local_dataset)
-    # 
-    # # ok great so now, we have to extract the segment mask from the input picture with the model
-    # # and apply this mask to the depth map
-    # mask = yolo_mask(input_rgb)
+        flat_cloud = point_cloud.reshape(-1, 3)
+        valid_mask = (flat_cloud[:, 2] > 0) & (flat_cloud[:, 2] < 10) # The depth values are in meters
+        flat_cloud = flat_cloud[valid_mask]
+        flat_color = (numpy_cropped_rgb.reshape(-1, 3)/255.0)[valid_mask]
+
+        pcd = o3d.geometry.PointCloud()
+
+        pcd.points = o3d.utility.Vector3dVector(flat_cloud)
+        pcd.colors= o3d.utility.Vector3dVector(flat_color)
+
+        o3d.visualization.draw_geometries([pcd])
