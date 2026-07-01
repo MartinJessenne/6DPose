@@ -1,17 +1,10 @@
-from sympy.plotting.series import flat
-from matplotlib.pylab import axis
-from PIL.ImageOps import crop
 from huggingface_hub import HfApi, hf_hub_download, login
 from datasets import load_dataset, Dataset, load_from_disk
 from ultralytics import YOLO
-import matplotlib.pyplot as plt
 import numpy as np
 import torch 
-import cv2
-import io
 import open3d as o3d
-from PIL import Image
-
+import cv2
 
 def load_hf_dataset():
     hf_repo = "uitraviolet/cart_dataset"
@@ -103,67 +96,60 @@ def instance_detected(result):
         return False
 
 
-class context:
-    def __init__(self, xmin, ymin, orig_H, orig_W):
+class Context:
+    def __init__(self, camera, xmin, ymin, width_orig, height_orig, width_crop, height_crop):
+        self.camera = camera
         self.xmin = xmin
         self.ymin = ymin 
-        self.orig_H = orig_H
-        self.orig_W = orig_W
+        self.width_orig = width_orig
+        self.height_orig = height_orig
+        self.width_crop = width_crop
+        self.height_crop = height_crop
+
+        self.crop_cx = self.camera.cx - self.xmin
+        self.crop_cy = self.camera.cy - self.ymin
+
+class Camera:
+    def __init__(self, fx, fy, cx, cy):
+        self.fx = fx
+        self.fy = fy
+        self.cx = cx
+        self.cy = cy
 
 def point_cloud_processing(rgb, depth, ctx):
     """
     This function takes as an input two numpy array of the same shape
     For now I'll try something naive, I'll just get the inverse matrix, for the rgb, and consider the associated pixel depth value as the Z value, 
-    I won't try to use the depth camera's instrinsic parameters' yet. 
+    Return a point cloud in the camera's frame
     """
 
-    rgb_width, rgb_height = rgb.shape[1], rgb.shape[0]
-    rgb_fx, rgb_fy = 639.99768, 639.99768
-    rgb_cx, rgb_cy = 640.0, 400.0
+    color_o3d = o3d.geometry.Image(rgb)
+    depth_o3d = o3d.geometry.Image(depth)
+    
+    rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        color_o3d, depth_o3d, depth_scale=1., convert_rgb_to_intensity=False
+    )
+
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(
+        width=ctx.width_crop, height=ctx.height_crop,
+        fx=ctx.camera.fx, fy=ctx.camera.fy, cx=ctx.crop_cx, cy=ctx.crop_cy
+    )
+
+    pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
+    return pcd
 
 
-    # Here we're creating the coordinate matrix of the rgb input, this will allow us to back project it 
-    # But in fact I'm really confused as to what I'm doing here, it feels like the rgb input is useless, we only need its shapes
-    # Which I kind of understand since the rgb channel (the main info of the rgb input) is only useful if we want to make a colored point cloud...
-    # Now I need to better understand how to remap the c_x and c_y variable to the new cropped image.
-    # Saying that the (0,0) coordinates where the top-left corner of the original image, then the image center is located at (c_x, c_y)
-    # Cropping the image results in a translation of the origin from (0, 0) to (xmin, ymin)
-    # Thus, the translated camera center (c'_x, c'_y) verifies : 
-    # c'_x = c_x - xmin
-    # c'_y = c_y - ymin
-    crop_cx = rgb_cx - ctx.xmin
-    crop_cy = rgb_cy - ctx.ymin
-
-    K_inv = np.array([
-        [1/rgb_fx, 0, -crop_cx/rgb_fx],
-        [0, 1/rgb_fy, -crop_cy/rgb_fy],
-        [0, 0, 1]
-    ])
-
-    # To backproject everything, we'll need the indice matrix of the input images
-    x_col_coord = np.arange(rgb.shape[1])
-    y_row_coord = np.arange(rgb.shape[0])
-
-    xx_coord, yy_coord = np.meshgrid(x_col_coord, y_row_coord)
-
-    xx_coord = xx_coord[..., np.newaxis]
-    yy_coord = yy_coord[..., np.newaxis]
-
-    rgb_coordinates = np.concatenate((xx_coord, yy_coord, np.ones_like(xx_coord)), axis=-1)
-
-
-
-    # We use the meshgrid function to create this with the correct indexing : 
-    rgb_coordinates = rgb_coordinates[..., np.newaxis]
-
-    # Now each coordinate is going to be point-wise multiplied by the corresponding depth and by K_inv
-    back_proj = K_inv @ rgb_coordinates
-    back_proj = back_proj.squeeze(-1)
-
-    depth = depth[..., np.newaxis]
-    point_cloud = depth * back_proj
-
-    return point_cloud
+def o3d_to_ppf_format(pcd):
+    """Extracts position and normals into an Nx6 array required by PPF."""
+    # If normals do not exist we estimate them
+    if not pcd.has_normals():
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
+        )
+    
+    pts = np.array(pcd.points, dtype=np.float32)
+    normals= np.asarray(pcd.normals, dtype=np.float32)
+    return np.hstack((pts, normals))
 
 
 if __name__ == "__main__":
@@ -173,6 +159,16 @@ if __name__ == "__main__":
     """
 
     model = load_hf_model()
+    
+    # Initiate the camera struct, a helper struct to access the intrinsic parameters of the camera
+    camera = Camera(fx=639.99768, fy=639.99768, cx=400., cy=640.0)
+
+    T_robot_camera = np.array([
+        [0.5, 0., 0.866, 0.439],
+        [0.0, 1.0, -0., 0.],
+        [-0.866, 0., 0.5, 0.304],
+        [0., 0., 0., 1.]
+    ])
 
     local_dataset = load_from_disk("./train")
 
@@ -188,22 +184,94 @@ if __name__ == "__main__":
         cropped_rgb, cropped_depth, xmin, ymin = yolo_mask(result, depth_tensor)
         numpy_depth_mask = cropped_depth.numpy()
         numpy_cropped_rgb = cropped_rgb.numpy()
-        plt.figure(figsize=(10,16))
-        plt.imshow(numpy_cropped_rgb)
-        plt.show()
 
-        ctx = context(xmin, ymin, np.array(img).shape[0], np.array(img).shape[1])
+        ctx = Context(camera=camera, xmin=xmin, ymin=ymin, width_orig=np.array(img).shape[0], height_orig=np.array(img).shape[1], width_crop=numpy_cropped_rgb.shape[0], height_crop=numpy_cropped_rgb.shape[1])
 
-        point_cloud = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx)
+        pcd = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx)
 
-        flat_cloud = point_cloud.reshape(-1, 3)
-        valid_mask = (flat_cloud[:, 2] > 0) & (flat_cloud[:, 2] < 10) # The depth values are in meters
-        flat_cloud = flat_cloud[valid_mask]
-        flat_color = (numpy_cropped_rgb.reshape(-1, 3)/255.0)[valid_mask]
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
+        )
+        pcd.orient_normals_towards_camera_location(camera_location=np.zeros(3))
 
-        pcd = o3d.geometry.PointCloud()
+        pcd.transform(T_robot_camera)
 
-        pcd.points = o3d.utility.Vector3dVector(flat_cloud)
-        pcd.colors= o3d.utility.Vector3dVector(flat_color)
+        cad_mesh = o3d.io.read_triangle_mesh("meshes/picanol.ply")
+        cad_mesh.compute_vertex_normals()
 
-        o3d.visualization.draw_geometries([pcd])
+        model_pc = cad_mesh.sample_points_uniformly(number_of_points=1_000)
+
+        ppf_model = o3d_to_ppf_format(model_pc)
+        ppf_scene = o3d_to_ppf_format(pcd)
+
+        detector = cv2.ppf_match_3d_PPF3DDetector(relativeSamplingStep=0.05, relativeDistanceStep=0.05)
+
+        print("Training PPF Hash Table from CAD model...")
+        detector.trainModel(ppf_model)
+
+        print("Running PPF Match on cropped D455 cloud...")
+
+        result = detector.match(ppf_scene, 0.05, 0.03)
+
+        best_match = result[0]
+        T_ppf = best_match.pose
+        score = best_match.numVotes
+
+        print(f"PPF Alignment Complete. Best match votes: {score}")
+
+        T_init = np.asarray(T_ppf, dtype=np.float64).reshape(4,4)
+
+        threshold = 0.1
+        criteria = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
+
+        icp_result = o3d.pipelines.registration.registration_icp(
+            model_pc,
+            pcd,
+            threshold,
+            T_init,
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            criteria
+        )
+
+        T_final = icp_result.transformation
+        print("Final 6D Pose Matrix (Refined via ICP): \n", T_final)
+        T_ground_truth = np.asarray(local_dataset["bbox_3d_transform"][0][0]).reshape(4,4).T
+        print("Ground Truth 6D Pose Matrix : \n", T_ground_truth)
+
+        # =================================================================
+        # VISUALIZATION & DEBUGGING BLOCK
+        # =================================================================
+        import copy
+
+        print("\n--- Launching 3D Debug Visualizer ---")
+        print("Controls: Use your mouse to rotate/pan. Press 'N' to toggle surface normals.")
+        
+        # 1. Create a coordinate axis at the Robot Base Origin (0,0,0)
+        # Red = X axis, Green = Y axis, Blue = Z axis
+        world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+
+        # 2. Color your scene point cloud grey so it acts as a neutral background
+        pcd_vis = copy.deepcopy(pcd)
+        pcd_vis.paint_uniform_color([0.6, 0.6, 0.6])
+
+        # 3. Create a point cloud copy for your Predicted Pose (Paint it GREEN)
+        predicted_mesh = copy.deepcopy(cad_mesh)
+        predicted_mesh.transform(T_final)
+        predicted_mesh.paint_uniform_color([0.0, 1.0, 0.0]) # Solid Green
+
+        # 4. Create a point cloud copy for Isaac Sim Ground Truth (Paint it BLUE)
+        # We handle the Column-Major transposition explicitly here (.T)
+        T_gt_robot = np.asarray(local_dataset["bbox_3d_transform"][0][0]).reshape(4,4).T
+        
+        gt_mesh = copy.deepcopy(cad_mesh)
+        gt_mesh.transform(T_gt_robot)
+        gt_mesh.paint_uniform_color([0.0, 0.0, 1.0]) # Solid Blue
+
+        # 5. Render everything together in a single interactive window
+        o3d.visualization.draw_geometries(
+            [world_frame, pcd_vis, predicted_mesh, gt_mesh],
+            window_name="6D Pose Debugger: Green=Prediction, Blue=Ground Truth",
+            width=1280,
+            height=720
+        )
+

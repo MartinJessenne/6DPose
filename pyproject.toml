@@ -10,7 +10,9 @@ dependencies = [
     "matplotlib>=3.11.0",
     "numpy>=2.5.0",
     "open3d>=0.19.0",
+    "opencv-contrib-python>=4.13.0.92",
     "opencv-python>=4.13.0.92",
+    "pyrealsense2>=2.58.2.10647",
     "torch>=2.12.1",
     "ultralytics>=8.4.75",
 ]
