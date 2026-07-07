@@ -41,43 +41,17 @@ class Config:
     TEST_PARQUET_GLOB = "dataset/data/test-*-of-00016.parquet"
     NUM_SAMPLES_TO_LOAD = 100
     NUM_SAMPLES_TO_TEST = 10
+    DEFAULT_DEPTH_TRUNC = 3.2
     OUTPUT_DIR = "debug_output/"
+
 
 
 # =====================================================================
 # 1b. METHOD-SPECIFIC HYPERPARAMETERS
 # =====================================================================
-class PPFICPParams:
-    """Hyperparameters specific to the PPF + ICP matching method."""
-    def __init__(
-        self,
-        ppf_sampling_step: float = 0.04,
-        ppf_distance_step: float = 0.03,
-        ppf_match_threshold: float = 0.03,
-        ppf_match_tolerance: float = 0.01,
-        icp_max_correspondence_distance: float = 0.09915124703931394,
-        icp_max_iterations: int = 50
-    ):
-        """
-        Initializes hyperparameters for PPF and ICP alignment.
-        
-        Args:
-            ppf_sampling_step (float): Sampling step for training model and scene.
-            ppf_distance_step (float): Distance step for training.
-            ppf_match_threshold (float): Match threshold for PPF.
-            ppf_match_tolerance (float): Match tolerance angle.
-            icp_max_correspondence_distance (float): Max distance threshold for ICP correspondence.
-            icp_max_iterations (int): Max number of iterations for ICP refinement.
-            
-        Example:
-            >>> params = PPFICPParams(ppf_sampling_step=0.03, icp_max_iterations=100)
-        """
-        self.ppf_sampling_step = ppf_sampling_step
-        self.ppf_distance_step = ppf_distance_step
-        self.ppf_match_threshold = ppf_match_threshold
-        self.ppf_match_tolerance = ppf_match_tolerance
-        self.icp_max_correspondence_distance = icp_max_correspondence_distance
-        self.icp_max_iterations = icp_max_iterations
+# Imported from methods for backward compatibility
+from methods import PPFICPParams
+
 
 
 # =====================================================================
@@ -312,7 +286,13 @@ class Context:
         self.crop_cy = self.camera.cy - self.ymin
 
 
-def point_cloud_processing(rgb: np.ndarray, depth: np.ndarray, ctx: Context) -> o3d.geometry.PointCloud:
+def point_cloud_processing(
+    rgb: np.ndarray,
+    depth: np.ndarray,
+    ctx: Context,
+    depth_trunc: float = Config.DEFAULT_DEPTH_TRUNC
+) -> o3d.geometry.PointCloud:
+
     """
     Converts RGB and depth arrays into an Open3D PointCloud object using the cropped intrinsics.
     
@@ -328,8 +308,14 @@ def point_cloud_processing(rgb: np.ndarray, depth: np.ndarray, ctx: Context) -> 
     depth_o3d = o3d.geometry.Image(depth)
     
     rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        color_o3d, depth_o3d, depth_scale=1.0, convert_rgb_to_intensity=False
+        color_o3d, 
+        depth_o3d, 
+        depth_scale=1.0,
+        depth_trunc=depth_trunc, 
+        convert_rgb_to_intensity=False,
     )
+
+
     
     # Generate crop-adjusted camera intrinsics
     intrinsics = ctx.camera.get_o3d_intrinsics(
@@ -342,25 +328,7 @@ def point_cloud_processing(rgb: np.ndarray, depth: np.ndarray, ctx: Context) -> 
     return o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
 
 
-def o3d_to_ppf_format(pcd: o3d.geometry.PointCloud) -> np.ndarray:
-    """
-    Extracts 3D coordinates and surface normals from an Open3D point cloud
-    into a stacked array format required by OpenCV's PPF matching detector.
-    
-    Args:
-        pcd (o3d.geometry.PointCloud): Point cloud object.
-        
-    Returns:
-        np.ndarray: Array of shape [N, 6] containing [x, y, z, nx, ny, nz].
-    """
-    if not pcd.has_normals():
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
-        )
-    
-    pts = np.array(pcd.points, dtype=np.float32)
-    normals = np.asarray(pcd.normals, dtype=np.float32)
-    return np.hstack((pts, normals))
+
 
 
 # =====================================================================
@@ -399,78 +367,12 @@ def SixDPoseEstimation(
     params: PPFICPParams = None
 ) -> np.ndarray:
     """
-    Performs 6D Pose estimation of a CAD model against a reconstructed scene point cloud.
-    Steps include:
-      1. Estimating normals and transforming the scene to the robot base frame.
-      2. Uniformly sampling points from the CAD mesh.
-      3. Training a PPF (Point Pair Features) detector and executing matching.
-      4. Running ICP (Iterative Closest Point) refinement to compute the final 4x4 pose.
-      
-    Args:
-        pcd (o3d.geometry.PointCloud): Reconstructed camera-frame point cloud.
-        cad_mesh (o3d.geometry.TriangleMesh): The reference CAD model mesh.
-        params (PPFICPParams, optional): Specific hyperparameters for PPF and ICP.
-        
-    Returns:
-        np.ndarray: The 4x4 homogeneous transformation matrix aligning CAD model to robot base.
-        
-    Example:
-        >>> params = PPFICPParams(icp_max_iterations=100)
-        >>> T_final = SixDPoseEstimation(pcd, picanol_mesh, params=params)
+    Legacy wrapper around the modular PPFICPEstimator for backward compatibility.
     """
-    if params is None:
-        params = PPFICPParams()
+    from methods import PPFICPEstimator
+    estimator = PPFICPEstimator(params=params)
+    return estimator.estimate_pose(pcd, cad_mesh)
 
-    # Prepare scene point cloud (estimate normals & transform to robot base frame)
-    pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
-    )
-    pcd.orient_normals_towards_camera_location(camera_location=np.zeros(3))
-    pcd.transform(Config.T_ROBOT_CAMERA)
-    
-    # Prepare CAD model
-    cad_mesh.compute_vertex_normals()
-    model_pc = cad_mesh.sample_points_uniformly(number_of_points=1000)
-    
-    # Convert geometries to PPF stacked formats [N, 6]
-    ppf_model = o3d_to_ppf_format(model_pc)
-    ppf_scene = o3d_to_ppf_format(pcd)
-    
-    # Initialize PPF 3D Detector (Notice the legacy underscore convention used by cv2)
-    detector = cv2.ppf_match_3d_PPF3DDetector(
-        relativeSamplingStep=params.ppf_sampling_step,
-        relativeDistanceStep=params.ppf_distance_step
-    )
-    
-    print("Training PPF Hash Table from CAD model...")
-    detector.trainModel(ppf_model)
-    
-    print("Running PPF Match on scene...")
-    match_results = detector.match(
-        ppf_scene,
-        params.ppf_match_threshold,
-        params.ppf_match_tolerance
-    )
-    
-    # Retrieve the best match result
-    best_match = match_results[0]
-    T_init = np.asarray(best_match.pose, dtype=np.float64).reshape(4, 4)
-    print(f"PPF Alignment Complete. Best match votes: {best_match.numVotes}")
-    
-    # ICP Refinement (Point-to-Plane registration)
-    criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
-        max_iteration=params.icp_max_iterations
-    )
-    icp_result = o3d.pipelines.registration.registration_icp(
-        model_pc,
-        pcd,
-        params.icp_max_correspondence_distance,
-        T_init,
-        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-        criteria
-    )
-    
-    return icp_result.transformation
 
 
 # =====================================================================
@@ -480,8 +382,10 @@ def process_and_reconstruct(
     img: np.ndarray,
     depth_bytes: bytes,
     result,
-    camera: Camera
+    camera: Camera,
+    depth_trunc: float = Config.DEFAULT_DEPTH_TRUNC
 ) -> tuple[str, o3d.geometry.PointCloud]:
+
     """
     Extracts the target cart segmentation mask, crops depth and RGB data,
     and reconstructs the 3D point cloud of the target instance in the camera frame.
@@ -520,7 +424,8 @@ def process_and_reconstruct(
         width_orig=np.array(img).shape[1], height_orig=np.array(img).shape[0],
         width_crop=numpy_cropped_rgb.shape[1], height_crop=numpy_cropped_rgb.shape[0]
     )
-    pcd = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx)
+    pcd = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx, depth_trunc=depth_trunc)
+
     
     return cart_type, pcd
 
@@ -587,65 +492,6 @@ def export_debug_scene(
 # 6. ORCHESTRATION PIPELINE (MAIN EXECUTION BLOCK)
 # =====================================================================
 if __name__ == "__main__":
-    # Initialize model, camera, and dataset configurations
-    model = load_hf_model()
-    camera = Camera(
-        fx=Config.CAMERA_FX, fy=Config.CAMERA_FY,
-        cx=Config.CAMERA_CX, cy=Config.CAMERA_CY
-    )
-    local_dataset = load_parquet_dataset()
-    method_params = PPFICPParams()
-    
-    # Recreate the output directory to clear old runs
-    if os.path.exists(Config.OUTPUT_DIR):
-        shutil.rmtree(Config.OUTPUT_DIR)
-    os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
-    
-    # Setup loop indices
-    total_samples = len(local_dataset)
-    num_samples_to_test = min(Config.NUM_SAMPLES_TO_TEST, total_samples)
-    random_indices = np.random.choice(total_samples, num_samples_to_test, replace=False)
-    
-    print(f"Starting test run on {num_samples_to_test} random test samples: {random_indices}")
-    
-    for loop_idx, random_sample_idx in enumerate(random_indices):
-        print(f"\n--- Processing Sample {loop_idx + 1}/{num_samples_to_test} (Index {random_sample_idx}) ---")
-        
-        # Load sample raw data
-        img = local_dataset["rgb"][random_sample_idx]
-        depth_bytes = local_dataset["depth"][random_sample_idx]
-        
-        # Run YOLO inference
-        result = model(img, retina_masks=True)
-        if not instance_detected(result):
-            print(f"Skipping Sample (Index {random_sample_idx}): No cart instance detected.")
-            continue
-            
-        # 1. Segment and Reconstruct Point Cloud
-        cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera)
-        print(f"Recognized class: {cart_type}")
-        
-        # Load reference CAD mesh
-        mesh_file = f"meshes/{cart_type}.ply"
-        if not os.path.exists(mesh_file):
-            print(f"Skipping Sample (Index {random_sample_idx}): CAD file {mesh_file} not found.")
-            continue
-        cad_mesh = o3d.io.read_triangle_mesh(mesh_file)
-        
-        # 2. Run 6D Pose Estimation
-        T_final = SixDPoseEstimation(pcd, cad_mesh, params=method_params)
-        if T_final is None:
-            print(f"Skipping Sample (Index {random_sample_idx}): Pose estimation failed.")
-            continue
-        print("Final 6D Pose Matrix (Refined via ICP):\n", T_final)
-        
-        # 3. Calculate Ground Truth pose
-        T_ground_truth = compute_ground_truth_pose(local_dataset, random_sample_idx)
-        print("Ground Truth 6D Pose Matrix:\n", T_ground_truth)
-        
-        # 4. Assemble and Export Debugging Scene to Disk
-        output_file = os.path.join(Config.OUTPUT_DIR, f"combined_scene_sample_{loop_idx}.glb")
-        export_debug_scene(pcd, cad_mesh, T_final, T_ground_truth, output_file)
-        
-    print(f"\nAll operations completed. Results saved in the '{Config.OUTPUT_DIR}' directory.")
+    print("main.py is now a utility module. To run the pose estimation and inspection scripts, please run inspect_pose.py or benchmark.py instead.")
+
 

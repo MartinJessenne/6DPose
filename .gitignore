@@ -22,3 +22,5 @@ debug_output/
 debug_yolo_checks/
 
 *.db
+
+*debug*
