@@ -12,3 +12,11 @@ wheels/
 train/
 
 *.pth
+
+dataset/
+
+debug/
+
+debug_output/
+
+debug_yolo_checks/

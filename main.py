@@ -1,3 +1,4 @@
+import os
 from huggingface_hub import HfApi, hf_hub_download, login
 from datasets import load_dataset, Dataset, load_from_disk
 from ultralytics import YOLO
@@ -5,32 +6,28 @@ import numpy as np
 import torch 
 import open3d as o3d
 import cv2
+import trimesh
 
-def load_hf_dataset():
-    hf_repo = "uitraviolet/cart_dataset"
+def load_parquet_dataset():
 
-    login()
-    api = HfApi()
+    dataset_stream = load_dataset(
+        "parquet",
+        data_files={
+            "train": "dataset/data/train-*-of-00127.parquet",
+            "validation": "dataset/data/validation-*-of-00016.parquet",
+            "test": "dataset/data/test-*-of-00016.parquet"
+        },
+        streaming=True,
+        )
+        
+    head = Dataset.from_list(list(dataset_stream["train"].take(10)))
 
-    print(f"downloading first 10 samples from the {hf_repo} hf repo!")
-    
-    dataset_stream = load_dataset(hf_repo, split='train', streaming=True)
-
-    head = dataset_stream.take(10)
-
-    local_train = Dataset.from_generator(
-        lambda: (yield from head),
-        features=head.features
-    )
-
-    local_train.save_to_disk("./train")
-
-    print("managed to save the 10 samples")
+    return head
 
 
 def load_hf_model():
     # first load the model from hugging face
-    model_str = hf_hub_download("uitraviolet/yolo_cart_seg", "best.pt")
+    model_str = hf_hub_download("UItraviolet/yolo_multicart", "runs/segment/train-2/weights/best.pt")
 
     model = YOLO(model_str)
 
@@ -44,45 +41,55 @@ def compute_bbox_area(bbox: torch.Tensor):
     """
     return bbox[-1] * bbox[-2]
 
-def yolo_mask(result, depth_tensor) -> [torch.Tensor] :
+def select_target_detection(result):
     """
-    this function takes as input an ultralytics.engine.results.Results and a depth_tensor of shape [H, W]
-    and outputs one torch.Tensor that corresponds to original image c torch.tensor (1, 1280, 800) of bools corresponding to a picture mask of the cart instance
-    by applying the trained yolo segmentation model
+    Selects the detection with the largest bounding box area from the YOLO result.
+    Returns:
+        class_name (str): The recognized class name.
+        bbox (list): [xmin, ymin, xmax, ymax] coordinates.
+        mask (torch.Tensor): The segmentation mask of shape [H, W] on CPU.
     """
-
     result = result[0]
-        
-    # Get the initial rgb image : 
-    orig_img = torch.tensor(result.orig_img, dtype=torch.uint8) # [H, W, C] 
-
     
-    # here we make an OPINIONATED choice : we only keep the bbox with the largest area
-    # The intuitive but risky choice is that it should correspond to the closest cart, which is the one we're interested in for docking
-    # There are tons of scenario in which that might fail, e.g. one of the bbox flickers and gets downsized or upsized, this is a failing point to take into account
-
+    # Select the bounding box with the largest area
     idx, _ = max(enumerate(result.boxes.xywh), key=lambda pair: compute_bbox_area(pair[1]))
+    
+    # Get the class name
+    class_id = int(result.boxes.cls[idx].item())
+    class_name = result.names[class_id]
+    
+    # Get coordinates
+    bbox = result.boxes.xyxy[idx].round().int().tolist()
+    
+    # Get pixel mask
+    mask = result.masks[idx].data.bool().squeeze(0).cpu()
+    
+    return class_name, bbox, mask
 
-    bbox =result.boxes.xyxy[idx].round().int() # Extract the rounded integer coordinates of the bounding box [Num_Instances, 4]
-    # Now output the cropped rgb and the segmentation mask
-    xmin, ymin, xmax, ymax = bbox.tolist()
+
+def crop_and_mask_inputs(orig_img, mask, depth_tensor, bbox):
+    """
+    Crops the original image, depth tensor, and mask, and zeroes out the background pixels.
+    Returns:
+        blacked_out_rgb_cropped (torch.Tensor)
+        blacked_out_cropped_depth (torch.Tensor)
+        xmin (int)
+        ymin (int)
+    """
+    xmin, ymin, xmax, ymax = bbox
+    
+    # Convert orig_img to torch.Tensor if it is a numpy array
+    if not isinstance(orig_img, torch.Tensor):
+        orig_img = torch.tensor(orig_img, dtype=torch.uint8)
+        
     rgb_cropped = orig_img[ymin:ymax, xmin:xmax, :]
-
-    # Now extract the pixel mask 
-    mask = result.masks[idx].data.bool().squeeze(0) # [H, W]
-
-    mask = mask.cpu()
-
-    # Crop the pixel mask
     cropped_mask = mask[ymin:ymax, xmin:xmax]
-
-    # Black away the pixels of the cropped rgb not belonging to the pixel mask
+    
     blacked_out_rgb_cropped = torch.where(cropped_mask.unsqueeze(-1), rgb_cropped, 0)
-
-    # Crop the depth tensor 
+    
     cropped_depth = depth_tensor[ymin:ymax, xmin:xmax]
     blacked_out_cropped_depth = torch.where(cropped_mask, cropped_depth, 0)
-
+    
     return blacked_out_rgb_cropped, blacked_out_cropped_depth, xmin, ymin
 
 def instance_detected(result):
@@ -151,11 +158,88 @@ def o3d_to_ppf_format(pcd):
     normals= np.asarray(pcd.normals, dtype=np.float32)
     return np.hstack((pts, normals))
 
+def combine_geometries(meshes, point_clouds):
+    combined = o3d.geometry.TriangleMesh()
+    for m in meshes:
+        combined += m  # merges vertices/faces/colors, offsetting face indices automatically
+
+    # Ensure combined mesh has vertex colors before appending point cloud colors
+    if not combined.has_vertex_colors():
+        combined.vertex_colors = o3d.utility.Vector3dVector(
+            np.ones((len(combined.vertices), 3)) * 0.7  # default gray
+        )
+
+    verts = np.asarray(combined.vertices)
+    colors = np.asarray(combined.vertex_colors)
+
+    for pcd in point_clouds:
+        pts = np.asarray(pcd.points)
+        if pcd.has_colors():
+            cols = np.asarray(pcd.colors)
+        else:
+            cols = np.ones((len(pts), 3)) * 0.5  # default gray if uncolored
+
+        verts = np.vstack([verts, pts])
+        colors = np.vstack([colors, cols])
+
+    combined.vertices = o3d.utility.Vector3dVector(verts)
+    combined.vertex_colors = o3d.utility.Vector3dVector(colors)
+    return combined
+
+def SixDPoseEstimation(pcd, cad_mesh):
+
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30))
+    
+    pcd.orient_normals_towards_camera_location(camera_location=np.zeros(3))
+
+    pcd.transform(T_robot_camera)
+
+    cad_mesh.compute_vertex_normals()
+
+    model_pc = cad_mesh.sample_points_uniformly(number_of_points=1_000)
+
+    ppf_model = o3d_to_ppf_format(model_pc)
+    ppf_scene = o3d_to_ppf_format(pcd)
+
+    detector = cv2.ppf_match_3d_PPF3DDetector(relativeSamplingStep=0.05, relativeDistanceStep=0.05)
+
+    print("Training PPF Hash Table from CAD model...")
+    detector.trainModel(ppf_model)
+
+    print("Running PPF Match on cropped D455 cloud...")
+
+    result = detector.match(ppf_scene, 0.05, 0.03)
+
+    best_match = result[0]
+    T_ppf = best_match.pose
+    score = best_match.numVotes
+
+    print(f"PPF Alignment Complete. Best match votes: {score}")
+
+    T_init = np.asarray(T_ppf, dtype=np.float64).reshape(4,4)
+
+    threshold = 0.1
+    criteria = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
+
+    icp_result = o3d.pipelines.registration.registration_icp(
+        model_pc,
+        pcd,
+        threshold,
+        T_init,
+        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+        criteria
+    )
+
+    T_final = icp_result.transformation
+    return T_final
+
+
 
 if __name__ == "__main__":
     """
     Global context infos :
-    The input images have a dimension of (H, W, C) = (1280, 800, 3) for the rgb input and (H, W) = (1200, 800) for the depht input !
+    The input images have a landscape aspect ratio with a dimension of (H, W, C) = (800, 1280, 3) for the rgb input and (H, W) = (800, 1280) for the depht input !
     """
 
     model = load_hf_model()
@@ -170,18 +254,26 @@ if __name__ == "__main__":
         [0., 0., 0., 1.]
     ])
 
-    local_dataset = load_from_disk("./train")
+    local_dataset = load_parquet_dataset()
 
     img= local_dataset["rgb"][0]
+
     depth_bytes = local_dataset["depth"][0]
     depth_1d = np.frombuffer(depth_bytes, np.float32)
-    depth_tensor = torch.tensor(depth_1d.reshape((1280, 800)).copy())
+    depth_tensor = torch.tensor(depth_1d.reshape((800, 1280)).copy())
 
     # run the inference on the sample
     result = model(img, retina_masks=True)
 
     if instance_detected(result):
-        cropped_rgb, cropped_depth, xmin, ymin = yolo_mask(result, depth_tensor)
+        cart_type, bbox, mask = select_target_detection(result)
+        
+        ### IMPORTANT CAVEAT : I MESSED UP THE TRAINING AND INVERTED THE PICANOL AND COLRUYT LABELS, SO THEY ARE CHANGED HERE, THIS IS A MINOR CHANGE SINCE IT'S JUST A LABEL. 
+        print(f"Recognized class: {cart_type}")
+
+        cropped_rgb, cropped_depth, xmin, ymin = crop_and_mask_inputs(
+            result[0].orig_img, mask, depth_tensor, bbox
+        )
         numpy_depth_mask = cropped_depth.numpy()
         numpy_cropped_rgb = cropped_rgb.numpy()
 
@@ -189,51 +281,10 @@ if __name__ == "__main__":
 
         pcd = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx)
 
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
-        )
-        pcd.orient_normals_towards_camera_location(camera_location=np.zeros(3))
+        cad_mesh = o3d.io.read_triangle_mesh(f"meshes/{cart_type}.ply")
 
-        pcd.transform(T_robot_camera)
+        T_final = SixDPoseEstimation(pcd, cad_mesh)
 
-        cad_mesh = o3d.io.read_triangle_mesh("meshes/picanol.ply")
-        cad_mesh.compute_vertex_normals()
-
-        model_pc = cad_mesh.sample_points_uniformly(number_of_points=1_000)
-
-        ppf_model = o3d_to_ppf_format(model_pc)
-        ppf_scene = o3d_to_ppf_format(pcd)
-
-        detector = cv2.ppf_match_3d_PPF3DDetector(relativeSamplingStep=0.05, relativeDistanceStep=0.05)
-
-        print("Training PPF Hash Table from CAD model...")
-        detector.trainModel(ppf_model)
-
-        print("Running PPF Match on cropped D455 cloud...")
-
-        result = detector.match(ppf_scene, 0.05, 0.03)
-
-        best_match = result[0]
-        T_ppf = best_match.pose
-        score = best_match.numVotes
-
-        print(f"PPF Alignment Complete. Best match votes: {score}")
-
-        T_init = np.asarray(T_ppf, dtype=np.float64).reshape(4,4)
-
-        threshold = 0.1
-        criteria = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
-
-        icp_result = o3d.pipelines.registration.registration_icp(
-            model_pc,
-            pcd,
-            threshold,
-            T_init,
-            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            criteria
-        )
-
-        T_final = icp_result.transformation
         print("Final 6D Pose Matrix (Refined via ICP): \n", T_final)
         T_ground_truth = np.asarray(local_dataset["bbox_3d_transform"][0][0]).reshape(4,4).T
         print("Ground Truth 6D Pose Matrix : \n", T_ground_truth)
@@ -267,11 +318,27 @@ if __name__ == "__main__":
         gt_mesh.transform(T_gt_robot)
         gt_mesh.paint_uniform_color([0.0, 0.0, 1.0]) # Solid Blue
 
-        # 5. Render everything together in a single interactive window
-        o3d.visualization.draw_geometries(
-            [world_frame, pcd_vis, predicted_mesh, gt_mesh],
-            window_name="6D Pose Debugger: Green=Prediction, Blue=Ground Truth",
-            width=1280,
-            height=720
-        )
+        # 5. Save everything to disk instead of drawing live
+        output_dir = "debug_output/"
+        os.makedirs(output_dir, exist_ok=True)
+
+        scene = trimesh.Scene()
+        for name, m in [("frame", world_frame), ("pred", predicted_mesh), ("gt", gt_mesh)]:
+            tm = trimesh.Trimesh(
+                vertices=np.asarray(m.vertices),
+                faces=np.asarray(m.triangles),
+                vertex_colors=(np.asarray(m.vertex_colors) * 255).astype(np.uint8)
+                            if m.has_vertex_colors() else None,
+            )
+            scene.add_geometry(tm, geom_name=name)
+
+        pts = np.asarray(pcd_vis.points)
+        cols = (np.asarray(pcd_vis.colors) * 255).astype(np.uint8) if pcd_vis.has_colors() else None
+        scene.add_geometry(trimesh.PointCloud(vertices=pts, colors=cols), geom_name="scene")
+
+        scene.export(f"{output_dir}/combined_scene.glb")
+
+        print(f"Saved 4 files to {output_dir}")
+
+
 
