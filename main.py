@@ -20,16 +20,23 @@ def load_parquet_dataset():
         streaming=True,
         )
         
-    head = Dataset.from_list(list(dataset_stream["train"].take(10)))
+    head = Dataset.from_list(list(dataset_stream["test"].take(100)))
 
     return head
 
 
 def load_hf_model():
-    # first load the model from hugging face
-    model_str = hf_hub_download("UItraviolet/yolo_multicart", "runs/segment/train-2/weights/best.pt")
+    local_path = "best.pt"
+    if not os.path.exists(local_path):
+        print("Downloading model from Hugging Face...")
+        cached_path = hf_hub_download("UItraviolet/yolo_multicart", "runs/segment/train-2/weights/best.pt")
+        import shutil
+        shutil.copy(cached_path, local_path)
+        print(f"Model saved locally to {local_path}")
+    else:
+        print(f"Loading model from local path: {local_path}")
 
-    model = YOLO(model_str)
+    model = YOLO(local_path)
 
     print("finished loading the model")
     return model 
@@ -245,7 +252,7 @@ if __name__ == "__main__":
     model = load_hf_model()
     
     # Initiate the camera struct, a helper struct to access the intrinsic parameters of the camera
-    camera = Camera(fx=639.99768, fy=639.99768, cx=400., cy=640.0)
+    camera = Camera(fx=639.99768, fy=639.99768, cx=640.0, cy=400.0)
 
     T_robot_camera = np.array([
         [0.5, 0., 0.866, 0.439],
@@ -256,16 +263,35 @@ if __name__ == "__main__":
 
     local_dataset = load_parquet_dataset()
 
-    img= local_dataset["rgb"][0]
+    # Overwrite/recreate the debug_output directory at the start of the script
+    output_dir = "debug_output/"
+    import shutil
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
-    depth_bytes = local_dataset["depth"][0]
-    depth_1d = np.frombuffer(depth_bytes, np.float32)
-    depth_tensor = torch.tensor(depth_1d.reshape((800, 1280)).copy())
+    # Select 10 random unique indices from the test set
+    total_samples = len(local_dataset)
+    num_samples_to_test = min(10, total_samples)
+    random_indices = np.random.choice(total_samples, num_samples_to_test, replace=False)
+    
+    print(f"Starting test run on {num_samples_to_test} random test samples: {random_indices}")
 
-    # run the inference on the sample
-    result = model(img, retina_masks=True)
+    for loop_idx, random_sample_idx in enumerate(random_indices):
+        print(f"\n--- Processing Sample {loop_idx + 1}/{num_samples_to_test} (Index {random_sample_idx}) ---")
+        img = local_dataset["rgb"][random_sample_idx]
 
-    if instance_detected(result):
+        depth_bytes = local_dataset["depth"][random_sample_idx]
+        depth_1d = np.frombuffer(depth_bytes, np.float32)
+        depth_tensor = torch.tensor(depth_1d.reshape((800, 1280)).copy())
+
+        # run the inference on the sample
+        result = model(img, retina_masks=True)
+
+        if not instance_detected(result):
+            print(f"Skipping Sample (Index {random_sample_idx}): No cart instance detected.")
+            continue
+
         cart_type, bbox, mask = select_target_detection(result)
         
         ### IMPORTANT CAVEAT : I MESSED UP THE TRAINING AND INVERTED THE PICANOL AND COLRUYT LABELS, SO THEY ARE CHANGED HERE, THIS IS A MINOR CHANGE SINCE IT'S JUST A LABEL. 
@@ -277,7 +303,7 @@ if __name__ == "__main__":
         numpy_depth_mask = cropped_depth.numpy()
         numpy_cropped_rgb = cropped_rgb.numpy()
 
-        ctx = Context(camera=camera, xmin=xmin, ymin=ymin, width_orig=np.array(img).shape[0], height_orig=np.array(img).shape[1], width_crop=numpy_cropped_rgb.shape[0], height_crop=numpy_cropped_rgb.shape[1])
+        ctx = Context(camera=camera, xmin=xmin, ymin=ymin, width_orig=np.array(img).shape[1], height_orig=np.array(img).shape[0], width_crop=numpy_cropped_rgb.shape[1], height_crop=numpy_cropped_rgb.shape[0])
 
         pcd = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx)
 
@@ -285,8 +311,15 @@ if __name__ == "__main__":
 
         T_final = SixDPoseEstimation(pcd, cad_mesh)
 
+        if T_final is None:
+            print(f"Skipping Sample (Index {random_sample_idx}): Pose estimation failed.")
+            continue
+
         print("Final 6D Pose Matrix (Refined via ICP): \n", T_final)
-        T_ground_truth = np.asarray(local_dataset["bbox_3d_transform"][0][0]).reshape(4,4).T
+        T_world_camera = np.asarray(local_dataset["camera_view_transform"][random_sample_idx]).reshape(4,4).T
+        T_world_cart = np.asarray(local_dataset["bbox_3d_transform"][random_sample_idx][0]).reshape(4,4).T
+        T_usd_to_cv = np.diag([1, -1, -1, 1])
+        T_ground_truth = T_robot_camera @ T_usd_to_cv @ T_world_camera @ T_world_cart
         print("Ground Truth 6D Pose Matrix : \n", T_ground_truth)
 
         # =================================================================
@@ -294,9 +327,6 @@ if __name__ == "__main__":
         # =================================================================
         import copy
 
-        print("\n--- Launching 3D Debug Visualizer ---")
-        print("Controls: Use your mouse to rotate/pan. Press 'N' to toggle surface normals.")
-        
         # 1. Create a coordinate axis at the Robot Base Origin (0,0,0)
         # Red = X axis, Green = Y axis, Blue = Z axis
         world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
@@ -312,16 +342,13 @@ if __name__ == "__main__":
 
         # 4. Create a point cloud copy for Isaac Sim Ground Truth (Paint it BLUE)
         # We handle the Column-Major transposition explicitly here (.T)
-        T_gt_robot = np.asarray(local_dataset["bbox_3d_transform"][0][0]).reshape(4,4).T
+        T_gt_robot = T_ground_truth
         
         gt_mesh = copy.deepcopy(cad_mesh)
         gt_mesh.transform(T_gt_robot)
         gt_mesh.paint_uniform_color([0.0, 0.0, 1.0]) # Solid Blue
 
-        # 5. Save everything to disk instead of drawing live
-        output_dir = "debug_output/"
-        os.makedirs(output_dir, exist_ok=True)
-
+        # 5. Save everything to disk
         scene = trimesh.Scene()
         for name, m in [("frame", world_frame), ("pred", predicted_mesh), ("gt", gt_mesh)]:
             tm = trimesh.Trimesh(
@@ -336,9 +363,9 @@ if __name__ == "__main__":
         cols = (np.asarray(pcd_vis.colors) * 255).astype(np.uint8) if pcd_vis.has_colors() else None
         scene.add_geometry(trimesh.PointCloud(vertices=pts, colors=cols), geom_name="scene")
 
-        scene.export(f"{output_dir}/combined_scene.glb")
+        output_file = f"{output_dir}/combined_scene_sample_{loop_idx}.glb"
+        scene.export(output_file)
 
-        print(f"Saved 4 files to {output_dir}")
+        print(f"Saved GLB for sample {loop_idx + 1} to {output_file}")
 
-
-
+    print(f"\nAll operations completed. Results saved in the '{output_dir}' directory.")
