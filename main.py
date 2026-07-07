@@ -601,18 +601,24 @@ if __name__ == "__main__":
         shutil.rmtree(Config.OUTPUT_DIR)
     os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
     
-    print(f"Starting test run on the test set : {len(local_dataset["test"])} test samples")
+    # Setup loop indices
+    total_samples = len(local_dataset)
+    num_samples_to_test = min(Config.NUM_SAMPLES_TO_TEST, total_samples)
+    random_indices = np.random.choice(total_samples, num_samples_to_test, replace=False)
     
-    for sample_idx, sample in enumerate(local_dataset["test"]):
+    print(f"Starting test run on {num_samples_to_test} random test samples: {random_indices}")
+    
+    for loop_idx, random_sample_idx in enumerate(random_indices):
+        print(f"\n--- Processing Sample {loop_idx + 1}/{num_samples_to_test} (Index {random_sample_idx}) ---")
         
         # Load sample raw data
-        img = local_dataset["rgb"][sample_idx]
-        depth_bytes = local_dataset["depth"][sample_idx]
+        img = local_dataset["rgb"][random_sample_idx]
+        depth_bytes = local_dataset["depth"][random_sample_idx]
         
         # Run YOLO inference
         result = model(img, retina_masks=True)
         if not instance_detected(result):
-            print(f"Skipping Sample (Index {sample_idx}): No cart instance detected.")
+            print(f"Skipping Sample (Index {random_sample_idx}): No cart instance detected.")
             continue
             
         # 1. Segment and Reconstruct Point Cloud
@@ -622,23 +628,24 @@ if __name__ == "__main__":
         # Load reference CAD mesh
         mesh_file = f"meshes/{cart_type}.ply"
         if not os.path.exists(mesh_file):
-            print(f"Skipping Sample (Index {sample_idx}): CAD file {mesh_file} not found.")
+            print(f"Skipping Sample (Index {random_sample_idx}): CAD file {mesh_file} not found.")
             continue
         cad_mesh = o3d.io.read_triangle_mesh(mesh_file)
         
         # 2. Run 6D Pose Estimation
         T_final = SixDPoseEstimation(pcd, cad_mesh, params=method_params)
         if T_final is None:
-            print(f"Skipping Sample (Index {sample_idx}): Pose estimation failed.")
+            print(f"Skipping Sample (Index {random_sample_idx}): Pose estimation failed.")
             continue
         print("Final 6D Pose Matrix (Refined via ICP):\n", T_final)
         
         # 3. Calculate Ground Truth pose
-        T_ground_truth = compute_ground_truth_pose(local_dataset, sample_idx)
+        T_ground_truth = compute_ground_truth_pose(local_dataset, random_sample_idx)
         print("Ground Truth 6D Pose Matrix:\n", T_ground_truth)
         
         # 4. Assemble and Export Debugging Scene to Disk
-        output_file = os.path.join(Config.OUTPUT_DIR, f"combined_scene_sample_{sample_idx}.glb")
+        output_file = os.path.join(Config.OUTPUT_DIR, f"combined_scene_sample_{loop_idx}.glb")
         export_debug_scene(pcd, cad_mesh, T_final, T_ground_truth, output_file)
         
     print(f"\nAll operations completed. Results saved in the '{Config.OUTPUT_DIR}' directory.")
+
