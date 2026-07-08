@@ -10,10 +10,10 @@ class RansacParams:
     """Hyperparameters specific to the FPFH + RANSAC + ICP matching method."""
     def __init__(
         self,
-        voxel_size: float = 0.05,
+        voxel_size: float = 0.06,
         ransac_max_iterations: int = 100000,
         icp_max_correspondence_distance: float = 0.15,
-        icp_max_iterations: int = 50
+        icp_max_iterations: int = 100
     ):
         """
         Initializes hyperparameters for RANSAC global registration and ICP.

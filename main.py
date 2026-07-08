@@ -4,7 +4,6 @@ import copy
 import numpy as np
 import torch
 import open3d as o3d
-import cv2
 import trimesh
 from datasets import load_dataset, Dataset
 from huggingface_hub import hf_hub_download
@@ -13,7 +12,7 @@ from ultralytics import YOLO
 # =====================================================================
 # 1. CENTRALIZED PIPELINE CONFIGURATION
 # =====================================================================
-class Config:
+class Config: 
     """Centralized parameters, paths, and transformation matrices for the pipeline."""
     # Hugging Face Repository Settings
     HF_REPO = "UItraviolet/yolo_multicart"
@@ -39,10 +38,11 @@ class Config:
     TRAIN_PARQUET_GLOB = "dataset/data/train-*-of-00127.parquet"
     VAL_PARQUET_GLOB = "dataset/data/validation-*-of-00016.parquet"
     TEST_PARQUET_GLOB = "dataset/data/test-*-of-00016.parquet"
-    NUM_SAMPLES_TO_LOAD = 100
-    NUM_SAMPLES_TO_TEST = 10
-    DEFAULT_DEPTH_TRUNC = 3.2
-    OUTPUT_DIR = "debug_output/"
+    NUM_SAMPLES_TO_LOAD = 100 # AGENT: remove this, the whole test dataset should be loaded to evaluate the algorithm
+    NUM_SAMPLES_TO_TEST = 10 # AGENT: same, I don't know where it's used now, since testing / inspecting / debugging is now in @inspect_pose.py, main is just a common utility file now
+    DEFAULT_DEPTH_TRUNC = 3.0 # AGENT: I think this should be moved also, each method should get its own parameter config set with all the hyperparams it needs as well as some global param such as DEFAULT_DEPTH_TRUNC, indeed, ransac might need a different truncation than PPF, while this main.py file should be agnostic to the method we use. 
+    OUTPUT_DIR = "debug_output/" # AGENT: again, I think this information is linked to @inspect_pose.py and @inspect_pose.py should the only script that writes to debug_ouptut/
+
 
 
 
@@ -50,10 +50,19 @@ class Config:
 # 1b. METHOD-SPECIFIC HYPERPARAMETERS
 # =====================================================================
 # Imported from methods for backward compatibility
-from methods import PPFICPParams
+# AGENT: we don't need backward compatiblity, breaking change are encouraged are we're still in prototyping phase
+from methods import PPFICPParams # AGENT: remove this 
 
+# The parameter organisation should be something similar to that (don't hesistate to criticize it, and propose better alternatives):
+# methods/
+#       -ppf/
+#           -model.py # the model file
+#           -presets/
+#                   -realtime.toml # or any other convenient markup language
+#                   -precision.toml 
+#                   -balanced.toml
 
-
+# where for each model, presets is a folder of sets of pareto optimal parameters found after a parameter sweep. 
 # =====================================================================
 # 2. DATASET AND MODEL LIFECYCLE HELPERS
 # =====================================================================
