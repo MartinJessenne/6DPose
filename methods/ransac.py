@@ -2,6 +2,9 @@ import numpy as np
 import open3d as o3d
 from methods.base import BasePoseEstimator
 
+# AGENT: Same instruction, can we put here or in the documentation a thorough explanation of how the models works in depth. 
+# Also clear out all the current implementation hypothesis / algorithms choices, because we're going to implement several version of ransac eventually. 
+# Maybe also put a summary ASCII diagram of how does the algorithm works at a higher level. 
 
 # =====================================================================
 # 1. PARAMETER CLASS
@@ -35,6 +38,7 @@ class RansacParams:
 # =====================================================================
 class RansacEstimator(BasePoseEstimator):
     """6D Pose Estimator using FPFH features, RANSAC Global Registration, and Dual ICP refinement."""
+    # AGENT: again to me this is too concise there are three big parts in this one sentence that deserve extensive developments
 
     def __init__(self, params: RansacParams = None):
         """
@@ -63,6 +67,8 @@ class RansacEstimator(BasePoseEstimator):
                         or None if registration fails.
         """
         # Prepare scene point cloud (estimate normals & transform to robot base frame)
+        # AGENT: again this would deserve to be more explained
+        # And can this even be factored out and simplified, because I feel that @ppf_icp.py is performing similar steps
         from main import Config
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
@@ -79,6 +85,7 @@ class RansacEstimator(BasePoseEstimator):
         voxel_size = self.params.voxel_size
         
         # 1. Downsample point clouds for fast descriptor calculation
+        # AGENT: this step is interesting and should be explained further. It also raises a question, can this voxel downsampling also be used in the PPF algorithm? 
         pcd_down = pcd.voxel_down_sample(voxel_size)
         model_down = model_pc.voxel_down_sample(voxel_size)
         
@@ -98,6 +105,8 @@ class RansacEstimator(BasePoseEstimator):
         )
         
         # 3. Perform RANSAC Global Registration based on feature matching
+        # AGENT: This is a big API that should be developed as well. 
+        # And some hardcoded values are feeling like hidden assumption that should be clarified, and why not optimized through a parameter sweep... 
         distance_threshold = voxel_size * 1.5
         print("Running RANSAC global registration...")
         result_ransac = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
@@ -125,6 +134,7 @@ class RansacEstimator(BasePoseEstimator):
             print("RANSAC global registration failed to find a valid transformation.")
             return None
             
+        # AGENT: the ICP refinement below seems pretty identical to the one in PPF, that why I also feel like this could be simplified and factored out. 
         # 4. ICP Refinement (Dual-Hypothesis point-to-plane)
         criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
             max_iteration=self.params.icp_max_iterations

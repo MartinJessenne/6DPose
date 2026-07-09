@@ -9,6 +9,14 @@ from datasets import load_dataset, Dataset
 from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
 
+# AGENT: Maybe put here an extensive and explanatory ASCII diagram of the program, what's the dataflow, how do the different components interact with each others
+# Just to have a comprehensive view quickly of the organization of the whole program
+# Well in fact, now that I think about this, what are the options to provide a genuine documentation support in python ?
+# Putting everything in the documentation, along with Getting Started + Tutorial sections could make things easier. 
+
+
+# AGENT: I'm currently performing a code review by putting comments scattered across the codebase, I don't think this is the ideal workflow, what are the classic methods? 
+
 # =====================================================================
 # SYSTEM ARCHITECTURE AND DATAFLOW DIAGRAM
 # =====================================================================
@@ -179,8 +187,11 @@ from methods import PPFICPParams # AGENT: remove this
 #                   -realtime.toml # or any other convenient markup language
 #                   -precision.toml 
 #                   -balanced.toml
+#                   -default.toml
+#                   -random.toml
 
 # where for each model, presets is a folder of sets of pareto optimal parameters found after a parameter sweep. 
+# Those parameters files includes all hyper parameters needed for the model, even global parameters such as depth truncation 
 # =====================================================================
 # 2. DATASET AND MODEL LIFECYCLE HELPERS
 # =====================================================================
@@ -196,6 +207,8 @@ def load_parquet_dataset() -> Dataset:
         >>> first_sample = dataset[0]
         >>> print(first_sample.keys())
     """
+    #AGENT: everything needs to be overhauled here, since I think loading the full test set is more interesting and doable with the current ressources
+    # switching from an interable dataset to a map style dataset composed of the full test split
     dataset_stream = load_dataset(
         Config.DATASET_PATH,
         data_files={
@@ -207,7 +220,7 @@ def load_parquet_dataset() -> Dataset:
     )
     
     # Extract the test split and materialize the first N samples
-    samples = list(dataset_stream["test"].take(Config.NUM_SAMPLES_TO_LOAD))
+    samples = list(dataset_stream["test"].take(Config.NUM_SAMPLES_TO_LOAD)) #AGENT: Now we're going to take the full split
     return Dataset.from_list(samples)
 
 
@@ -224,11 +237,12 @@ def load_hf_model() -> YOLO:
         >>> result = model("test_image.png")
     """
     local_path = Config.LOCAL_MODEL_PATH
+    # AGENT: provide a comment to explain clearly and quickly this branching (if the model is not found, we download it...)
     if not os.path.exists(local_path):
         print(f"Model not found locally at {local_path}. Downloading from Hugging Face...")
         cached_path = hf_hub_download(Config.HF_REPO, Config.HF_FILE)
-        import shutil
-        shutil.copy(cached_path, local_path)
+        import shutil # AGENT: what is shutil? provide an explanatory comment in the code 
+        shutil.copy(cached_path, local_path) 
         print(f"Model saved locally to {local_path}")
     else:
         print(f"Loading model from local path: {local_path}")
@@ -262,6 +276,10 @@ def compute_bbox_area(bbox: torch.Tensor) -> float:
 def select_target_detection(result) -> tuple[str, list[int], torch.Tensor]:
     """
     Selects the YOLO prediction with the largest bounding box area from the result.
+    This is the initial opinionated choice we make. Later on, we might compose that with a lookup_cart variable, e.g. if the model detects a picanol and a colruyt cart, while lookup_cart = picanol, 
+    It will only recognize and output the detected picanol and ignore all other carts class.
+    And if there are 2 picanols it will fallback to the current mechanism, retaining the one with the largest bounding box area, 
+    even there need to consider the edge case where the two bounding boxes have the exact same area. 
     
     Args:
         result: The YOLO Results object for a single image.
@@ -276,7 +294,7 @@ def select_target_detection(result) -> tuple[str, list[int], torch.Tensor]:
         >>> results = model(img)
         >>> class_name, bbox, mask = select_target_detection(results)
     """
-    result_img = result[0]
+    result_img = result[0] #AGENT: explain the assumption here, it works only for a single image inference, in realtime setup we'll need to ensure that this is robust
     
     # Enumerate the bounding boxes and select the index with the largest area
     idx, _ = max(
@@ -308,7 +326,7 @@ def crop_and_mask_inputs(
     and masks out any background pixels (pixels not covered by the segmentation mask).
     
     Args:
-        orig_img: The original RGB image array.
+        orig_img: The original RGB image array. #AGENT: precise the datatype and shape
         mask (torch.Tensor): Binary segmentation mask of shape [H, W].
         depth_tensor (torch.Tensor): Raw depth tensor of shape [H, W].
         bbox (list[int]): Coordinates [xmin, ymin, xmax, ymax].
@@ -325,7 +343,7 @@ def crop_and_mask_inputs(
     """
     xmin, ymin, xmax, ymax = bbox
     
-    if not isinstance(orig_img, torch.Tensor):
+    if not isinstance(orig_img, torch.Tensor): #AGENT: well I feel like this shouldn't be there, the function should have a clear contract and assume a particular type of input, it's the caller's responsability to respect it
         orig_img = torch.tensor(orig_img, dtype=torch.uint8)
         
     # Crop RGB image and segmentation mask
@@ -446,7 +464,7 @@ def point_cloud_processing(
     
     # Generate crop-adjusted camera intrinsics
     intrinsics = ctx.camera.get_o3d_intrinsics(
-        width=ctx.width_crop,
+        width=ctx.width_crop, # AGENT: this feels suboptimal, like the logic is brittle: I have to ensure that the images are indeed cropped, and that in parallel I've ensured that the camera's intrinsic are updated to this cropped. As someone used with rust type system, I'd like to see if there's a similar mechanism to enforce that cropped images <=> cropped_instrinsics. Maybe put everything in a struct?
         height=ctx.height_crop,
         xmin=ctx.xmin,
         ymin=ctx.ymin
@@ -469,7 +487,7 @@ def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int) -> np.nda
     
     Args:
         local_dataset (Dataset): The materialized local dataset.
-        sample_idx (int): The index of the sample.
+        sample_idx (int): The index of the sample. # AGENT: Maybe we can think of way to optimize this, if we have for each pass to make a lookup in the dataset it's going to take an eternity, can we think of a batching / dataloader mechanism? Like given the number of samples we're considering (known at call time, we load all labels and ensure a faster look-up when the algorithm is running)
         
     Returns:
         np.ndarray: A 4x4 homogeneous transformation matrix in the robot's base frame.
@@ -491,10 +509,10 @@ def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int) -> np.nda
 def SixDPoseEstimation(
     pcd: o3d.geometry.PointCloud,
     cad_mesh: o3d.geometry.TriangleMesh,
-    params: PPFICPParams = None
+    params: PPFICPParams = None # AGENT: I think this isn't needed anymore
 ) -> np.ndarray:
     """
-    Legacy wrapper around the modular PPFICPEstimator for backward compatibility.
+    Legacy wrapper around the modular PPFICPEstimator for backward compatibility. # AGENT: I'm allergic to backward compatibility
     """
     from methods import PPFICPEstimator
     estimator = PPFICPEstimator(params=params)
@@ -533,7 +551,7 @@ def process_and_reconstruct(
     """
     # Prepare depth tensor
     depth_1d = np.frombuffer(depth_bytes, np.float32)
-    depth_tensor = torch.tensor(depth_1d.reshape((800, 1280)).copy())
+    depth_tensor = torch.tensor(depth_1d.reshape((800, 1280)).copy()) # AGENT: This hardcoded shape (800, 1280) should be removed and fetched from a global constant / config parameter instead 
     
     # Select target mask and crop parameters
     cart_type, bbox, mask = select_target_detection(result)
@@ -542,13 +560,15 @@ def process_and_reconstruct(
     cropped_rgb, cropped_depth, xmin, ymin = crop_and_mask_inputs(
         result[0].orig_img, mask, depth_tensor, bbox
     )
-    numpy_depth_mask = cropped_depth.numpy()
+    
+    # Why are the two naming convention below different? Are they representing the same step of transformation of the original input (crop + mask)? If yes they should have the same naming convention
+    numpy_depth_mask = cropped_depth.numpy() # AGENT: maybe crop_mask_depth_np or something similar and explicit
     numpy_cropped_rgb = cropped_rgb.numpy()
     
     # Reconstruct 3D Point Cloud using camera properties and context
     ctx = Context(
-        camera=camera, xmin=xmin, ymin=ymin,
-        width_orig=np.array(img).shape[1], height_orig=np.array(img).shape[0],
+        camera=camera, xmin=xmin, ymin=ymin, # AGENT: This is what I was talking about earlier, if point_cloud_processing is called somewhere else, we have no control on the correctness of the correspondance between image <=> camera's intrinsic. Right now I'm still thinking about a unified struct that contains the image and the associated camera's intrinsics, but tell me if that would incur too much performance overhead. 
+        width_orig=np.array(img).shape[1], height_orig=np.array(img).shape[0], # AGENT: here there is a lack of taste, this access doesn't look clean, is there a better way to do that? 
         width_crop=numpy_cropped_rgb.shape[1], height_crop=numpy_cropped_rgb.shape[0]
     )
     pcd = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx, depth_trunc=depth_trunc)
@@ -557,6 +577,7 @@ def process_and_reconstruct(
     return cart_type, pcd
 
 
+# AGENT: I don't think the function below should belong here, since this is a debugging utility it should be moved closer to @inspect_pose.py...
 def export_debug_scene(
     pcd: o3d.geometry.PointCloud,
     cad_mesh: o3d.geometry.TriangleMesh,
@@ -579,24 +600,25 @@ def export_debug_scene(
     Example:
         >>> export_debug_scene(pcd, cad_mesh, T_final, T_gt, "debug_output/scene.glb")
     """
-    # 1. Create origin coordinate axes (Red=X, Green=Y, Blue=Z)
+    # 1. Create origin coordinate axes (Red=X, Green=Y, Blue=Z) # AGENT: you need to explain that further, indeed, I don't think I clearly understand what is happening here, are we talking about an arbitrary reference world frame for the debugging view? If that's the case, why not making the robot's frame directly the reference frame?  
     world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
     
     # 2. Create neutral background color for point cloud
-    pcd_vis = copy.deepcopy(pcd)
+    pcd_vis = copy.deepcopy(pcd) # AGENT: why do we need a deepcopy here? (that's a very minor consideration, just out off curiosity)
     pcd_vis.paint_uniform_color([0.6, 0.6, 0.6])
     
     # 3. Transform CAD mesh for predicted pose (GREEN)
     predicted_mesh = copy.deepcopy(cad_mesh)
     predicted_mesh.transform(T_final)
-    predicted_mesh.paint_uniform_color([0.0, 1.0, 0.0])
+    predicted_mesh.paint_uniform_color([0.0, 1.0, 0.0]) # GREEN
     
     # 4. Transform CAD mesh for ground truth pose (BLUE)
     gt_mesh = copy.deepcopy(cad_mesh)
     gt_mesh.transform(T_ground_truth)
-    gt_mesh.paint_uniform_color([0.0, 0.0, 1.0])
+    gt_mesh.paint_uniform_color([0.0, 0.0, 1.0]) # BLUE
     
     # 5. Build trimesh scene and export
+    # AGENT: this would benefit from a more extensive documentation / even a minor recall of how the trimesh api behaves. 
     scene = trimesh.Scene()
     for name, m in [("frame", world_frame), ("pred", predicted_mesh), ("gt", gt_mesh)]:
         tm = trimesh.Trimesh(
@@ -613,12 +635,3 @@ def export_debug_scene(
     
     scene.export(output_path)
     print(f"Saved GLB scene to {output_path}")
-
-
-# =====================================================================
-# 6. ORCHESTRATION PIPELINE (MAIN EXECUTION BLOCK)
-# =====================================================================
-if __name__ == "__main__":
-    print("main.py is now a utility module. To run the pose estimation and inspection scripts, please run inspect_pose.py or benchmark.py instead.")
-
-

@@ -2,7 +2,7 @@
 Unified 6D Pose Validation & Inspection Utility.
 
 This script acts as the main execution and debugging interface for the 6D Pose Estimation
-pipeline. It loads the streaming Parquet dataset (test split), runs YOLO segmentation,
+pipeline. It loads the streaming Parquet dataset (test split), runs YOLO segmentation, 
 reconstructs 3D point clouds from RGB-D inputs, aligns reference CAD models using PPF or RANSAC,
 and compares predictions against Isaac Sim ground truths.
 
@@ -78,11 +78,11 @@ def run_random_inspection(
         model: The initialized YOLO segmentation model.
         camera (Camera): The pinhole camera model.
         dataset (Dataset): The Hugging Face dataset containing test samples.
-        params (PPFICPParams): Optimized hyperparameters for PPF + ICP matching.
+        params (PPFICPParams): Optimized hyperparameters for PPF + ICP matching. # AGENT: This needs to be adapted to the new design
         
     Example:
         >>> # To evaluate 5 random samples using the CLI:
-        >>> # python inspect_pose.py --random --num-samples 5
+        >>> # python inspect_pose.py --random --num-samples 5 # AGENT: again update this, there is no num-samples flag anymore
         >>> run_random_inspection(5, model, camera, dataset, params)
     """
     output_dir = Config.OUTPUT_DIR
@@ -92,7 +92,7 @@ def run_random_inspection(
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
-    total_samples = len(dataset)
+    total_samples = len(dataset) # AGENT: I'm not 100% sure of what's happening here, are we loading the full dataset at each function call? Wouldn't it be easier to just load the dataset path, and metadata, select upfront the random indices and then load them ? 
     num_samples = min(num_samples, total_samples)
     
     # Select unique random indices without replacement so we don't inspect the same sample twice
@@ -102,6 +102,8 @@ def run_random_inspection(
     
     for loop_idx, sample_idx in enumerate(random_indices):
         print(f"\n--- Processing Sample {loop_idx + 1}/{num_samples} (Index {sample_idx}) ---")
+        
+        # AGENT: without even reading what's happening below, to which extent is it refactorable? Like I feel we're doing the same exact thing we're usually doing in main.py here  
         
         # Load raw PIL images and binary depth buffers
         img = dataset["rgb"][sample_idx]
@@ -113,7 +115,7 @@ def run_random_inspection(
             print(f"Skipping Index {sample_idx}: No cart instance detected.")
             continue
             
-        # 2. Segment and Reconstruct 3D Point Cloud (with new 20.0m depth threshold)
+        # 2. Segment and Reconstruct 3D Point Cloud (with new 20.0m depth threshold) # AGENT: what is this outdated mention of the 20.0m depth threshold?
         # This isolates the cart points and projects them to camera-frame 3D coordinates.
         cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera)
         print(f"Recognized class: {cart_type}")
@@ -142,6 +144,8 @@ def run_random_inspection(
         # Saves the scene as combined_scene_sample_{sample_idx}.glb using the actual dataset index
         output_file = os.path.join(output_dir, f"combined_scene_sample_{sample_idx}.glb")
         export_debug_scene(pcd, cad_mesh, T_final, T_ground_truth, output_file)
+
+        # AGENT: I even think that what's in main could be removed and only developed here since this is the only interface that will be plotting things
         
     print(f"\nAll operations completed. GLB scenes saved to: '{output_dir}/'")
 
@@ -187,9 +191,11 @@ def run_targeted_inspection(
             print(f"Skipping Index {idx}: Index is out of range for the loaded dataset split.")
             continue
             
-        img = dataset["rgb"][idx]
+        img = dataset["rgb"][idx] # AGENT: is there an utility that allows from a dataset on disk to only fetch a given set of rows and columns? Without loading all the dataset at any moment? 
         depth_bytes = dataset["depth"][idx]
         
+        # AGENT: Could all the code below be further refactored and simplified? 
+
         # 1. Run YOLO and save 2D overlays
         # Plots bounding boxes and instance segmentation boundaries for 2D mask validation
         result = model(img, retina_masks=True, verbose=False)
@@ -242,7 +248,7 @@ def main():
     parser = argparse.ArgumentParser(description="Unified 6D Pose Validation & Inspection Utility")
     
     # Establish mutually exclusive execution modes (cannot run both at the same time)
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group(required=True) # AGENT: explain how do you deal with that, since indeed random and indices are mutually exclusive arguments, however --method is a common argument 
     group.add_argument(
         "--random", 
         type=int, 
@@ -277,6 +283,7 @@ def main():
     dataset = load_parquet_dataset()
     
     # Instantiate chosen estimator and parameters
+    # AGENT: So this might need to be refactored to include a combination of method + preset. But this needs to be done in the most elegant way possible so let's think about that and explore the different alternatives. 
     from methods import get_estimator
     if args.method == "ppf_icp":
         from methods import PPFICPParams

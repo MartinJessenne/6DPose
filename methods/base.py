@@ -17,7 +17,7 @@ class BasePoseEstimator(ABC):
 
         Args:
             pcd (o3d.geometry.PointCloud): Reconstructed scene point cloud in robot frame.
-            cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model.
+            cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model. # AGENT: is this the most agnostic class we can think of ? I feel that some 0 shot method won't even need the CAD mesh file
             **kwargs: Method-specific inputs (e.g., rgb_crop, depth_crop, camera intrinsics).
 
         Returns:
