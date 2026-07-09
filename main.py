@@ -10,6 +10,124 @@ from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
 
 # =====================================================================
+# SYSTEM ARCHITECTURE AND DATAFLOW DIAGRAM
+# =====================================================================
+#
+# MODULE INTERACTION & DEPENDENCY GRAPH
+# ------------------------------------
+#
+#       [ inspect_pose.py ]               [ benchmark.py ]
+#        (CLI Inspection)                 (CLI Benchmarking)
+#                |                                |
+#                +---------------+----------------+
+#                                |
+#                                v
+#                           [ main.py ] <---+
+#                 (Config, PCD, Math Utilities) |
+#                                |          | (Imported for
+#                                v          |  T_ROBOT_CAMERA)
+#                          [ methods/ ] ----+
+#                     (Modular Estimators)
+#                               |
+#         +---------------------+---------------------+
+#         |                     |                     |
+#         v                     v                     v
+#     [ base.py ]        [ ppf_icp.py ]         [ ransac.py ]
+#   (Base Estimator)    (PPF + Dual ICP)      (RANSAC + Dual ICP)
+#
+#
+# PIPELINE DATAFLOW
+# -----------------
+#
+#        +-------------------------------------------+
+#        |           Parquet Test Dataset            |
+#        +---------------------+---------------------+
+#                              |
+#              +---------------+---------------+
+#              |                               |
+#              v (PIL Image)                   v (Binary Depth Bytes)
+#      [ rgb_image ]                    [ depth_bytes ]
+#              |                               |
+#              v                               v
+#   +----------------------+               +----------------------+
+#   |  YOLO Segmentation   |               |   Reshape & Convert  |
+#   |  (best.pt model)     |               |   to float32 Tensor  |
+#   +----------+-----------+               +-----------+----------+
+#              |                                       |
+#              | [class, bbox, mask]                   | [depth_tensor]
+#              +-------------------+   +---------------+
+#                                  |   |
+#                                  v   v
+#                      +---------------------------+
+#                      |   crop_and_mask_inputs    |
+#                      | - Crop image/depth        |
+#                      | - Keep only mask region   |
+#                      +-------------+-------------+
+#                                    |
+#                                    v [cropped & masked rgb/depth]
+#                      +---------------------------+
+#                      |  point_cloud_processing   |
+#                      | - Shift camera principal  |
+#                      |   point by crop offset    |
+#                      | - Open3D PCD generation   |
+#                      +-------------+-------------+
+#                                    |
+#                                    v [PCD in camera frame]
+#                      +---------------------------+
+#                      |    BasePoseEstimator      |
+#                      |      (estimate_pose)      |
+#                      +-------------+-------------+
+#                                    |
+#          +-------------------------+-------------------------+
+#          |                                                   |
+#          v                                                   v
+#   +---------------------------------+                 +---------------------------------+
+#   |         PPFICPEstimator         |                 |         RansacEstimator         |
+#   |                                 |                 |                                 |
+#   | 1. Normal Estimation            |                 | 1. Normal Estimation            |
+#   | 2. Transform to Robot Frame     |                 | 2. Transform to Robot Frame     |
+#   |    (T_ROBOT_CAMERA)             |                 |    (T_ROBOT_CAMERA)             |
+#   | 3. Uniform CAD Mesh Sampling    |                 | 3. Uniform CAD Mesh Sampling    |
+#   | 4. Train opencv_ppf hash table  |                 | 4. Voxel Downsample both PCDs   |
+#   | 5. cv2 PPF 3D Match on Scene    |                 | 5. Compute FPFH descriptors     |
+#   | 6. Dual ICP Alignment:          |                 | 6. RANSAC Feature Matching      |
+#   |    - Hyp 1: Raw PPF pose        |                 | 7. Dual ICP Alignment:          |
+#   |    - Hyp 2: 180° rotation along |                 |    - Hyp 1: Raw RANSAC pose     |
+#   |             local Z-axis        |                 |    - Hyp 2: 180° rotation along |
+#   | 7. Evaluate Overlap & Fitness   |                 |             local Z-axis        |
+#   | 8. Select Best Pose (T_final)   |                 | 8. Evaluate Overlap & Fitness   |
+#   +---------------------------------+                 | 9. Select Best Pose (T_final)   |
+#                                     |                 +---------------------------------+
+#                                     |                                 |
+#                                     +----------------+----------------+
+#                                                      |
+#                                                      v [T_final (Predicted Pose)]
+#                                                      |
+#                      +-------------------------------+---------------+
+#                      |                                               |
+#                      |                   +---------------------------+
+#                      |                   |
+#                      |                   v
+#                      |       +---------------------------------------+
+#                      |       |       compute_ground_truth_pose       |
+#                      |       | - Extract USD-based matrix from data  |
+#                      |       | - Transform USD coordinates to OpenCV |
+#                      |       | - Transform OpenCV to Robot Frame     |
+#                      |       +-------------------+-------------------+
+#                      |                           |
+#                      |                           v [T_ground_truth]
+#                      |                           |
+#                      v                           v
+#        +-------------------------------------------+
+#        |            export_debug_scene             |
+#        | - Re-color Point Cloud to Gray            |
+#        | - Transform CAD Mesh to Pred Pose (Green) |
+#        | - Transform CAD Mesh to GT Pose (Blue)    |
+#        | - Write composite 3D Scene to GLB File    |
+#        +-------------------------------------------+
+#
+
+# =====================================================================
 # 1. CENTRALIZED PIPELINE CONFIGURATION
 # =====================================================================
 class Config: 
