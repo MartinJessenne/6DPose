@@ -38,7 +38,7 @@ def main():
             print(f"[YOLO Model] Error downloading model: {e}")
 
     # 3. Download Parquet Dataset
-    dataset_repo = "UItraviolet/yolo_multicart"
+    dataset_repo = "UItraviolet/industrial_cart"
     local_dataset_dir = "dataset/data"
     
     # Check if we already have parquet files locally
