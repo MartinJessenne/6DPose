@@ -1,13 +1,9 @@
 import numpy as np
 import cv2
 import open3d as o3d
-from methods.base import BasePoseEstimator
+from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
 
-# AGENT: Here or later in the documentation, add extensive documentation about the algorithm, the maths behind it and the methods used.
-# Each theoretical step of the PPF variant implemented in this file should be extensively detailed. 
-# We'll work that out together by designing a markdown 'textbook explanatory note' based on my prior knowledge and what I still need to be explained. 
-# We could also inclue a diagram of the different components, steps and dataflow of the algorithm so to better understand how do they interact between each others
-# What are the performance bottlenecks...
+
 
 
 # =====================================================================
@@ -42,15 +38,17 @@ def o3d_to_ppf_format(pcd: o3d.geometry.PointCloud) -> np.ndarray:
     """
     Extracts 3D coordinates and surface normals from an Open3D point cloud
     into a stacked array format required by OpenCV's PPF matching detector.
+
+    OpenCV's PPF matching detector expects a float32 array of shape [N, 6]
+    where each row contains [x, y, z, nx, ny, nz] representing the point coordinate
+    and its associated surface normal vector.
     """
-    
-    # AGENT: Maybe detail a bit what's happening below. What is the PPF model expecting as a data format. 
     if not pcd.has_normals():
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
         )
     
-    pts = np.array(pcd.points, dtype=np.float32)
+    pts = np.asarray(pcd.points, dtype=np.float32)
     normals = np.asarray(pcd.normals, dtype=np.float32)
     return np.hstack((pts, normals))
 
@@ -87,23 +85,15 @@ class PPFICPEstimator(BasePoseEstimator):
             np.ndarray: 4x4 homogeneous transformation matrix in robot frame, 
                         or None if registration fails.
         """
-        # Prepare scene point cloud (estimate normals & transform to robot base frame)
-        # AGENT: This should be more detailed, I don't really think this is trivial, and I think that even there some assumptions are made that should be clarified. 
-        # Just a clear explanation of the o3d API in this context, why do we need to call them, what action are they performing, what are the expected results, and what are the failure modes of those operations. 
+        # Prepare scene point cloud using factored-out utility function
         from main import Config
-        pcd.estimate_normals(
-            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
-        )
-        pcd.orient_normals_towards_camera_location(camera_location=np.zeros(3))
-        pcd.transform(Config.T_ROBOT_CAMERA)
+        pcd = prepare_scene_point_cloud(pcd, Config.T_ROBOT_CAMERA)
 
-        
         # Prepare CAD model
         cad_mesh.compute_vertex_normals()
         model_pc = cad_mesh.sample_points_uniformly(number_of_points=1000)
         
         # Convert geometries to PPF stacked formats [N, 6]
-        # Again quick and clear explanation of the expected format 
         ppf_model = o3d_to_ppf_format(model_pc)
         ppf_scene = o3d_to_ppf_format(pcd)
         
@@ -133,60 +123,13 @@ class PPFICPEstimator(BasePoseEstimator):
         T_init = np.asarray(best_match.pose, dtype=np.float64).reshape(4, 4)
         print(f"PPF Alignment Complete. Best match votes: {best_match.numVotes}")
         
-        # ICP Refinement (Point-to-Plane registration)
-        # AGENT: This ICP refinement step deserves a whole separate and factored out implementation in itself, with a clear description of how the current algorithm is working, and what
-        # tweaks we are additionnaly performing
-        criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
-            max_iteration=self.params.icp_max_iterations
+        # Refine pose using factored-out dual-hypothesis point-to-plane ICP
+        T_refined = refine_pose_dual_hypothesis(
+            model_pc=model_pc,
+            scene_pcd=pcd,
+            T_init=T_init,
+            icp_max_correspondence_distance=self.params.icp_max_correspondence_distance,
+            icp_max_iterations=self.params.icp_max_iterations
         )
         
-        # Hypothesis 1: Original PPF alignment guess
-        icp_result_1 = o3d.pipelines.registration.registration_icp(
-            model_pc,
-            pcd,
-            self.params.icp_max_correspondence_distance,
-            T_init,
-            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            criteria
-        )
-        
-        # Hypothesis 2: 180-degree rotation along local Z-axis (handles vertical symmetry)
-        # AGENT: Not really a code review comment, but rather a todo item: I think we should constrain the horizontal orientation of the cart during the algorithm. Indeed, in practice we're never
-        # going to tow an upside-down cart. I think we should allow for a minimal pitch value (-\epsilon, +\epsilon) since the cart is mostly always going to be laid on a flat floor, and always upside up.  
-        # So the deal is more to check for a possible a YZ plane symmetry inversion, and eventually a XZ plane inversion, but we can safely rule out a XZ plane inversion. 
-        T_flip = np.array([
-            [-1.0,  0.0,  0.0,  0.0],
-            [ 0.0, -1.0,  0.0,  0.0],
-            [ 0.0,  0.0,  1.0,  0.0],
-            [ 0.0,  0.0,  0.0,  1.0]
-        ])
-        T_init_flipped = T_init @ T_flip
-        
-        # AGENT: Again I think we need to be more explicit here about what is the o3d.pipelines.registration.registration_icp API doing. 
-        # Just so that we can better understand the hidden execution costs, the hidden assumption made so that we can update them later on if we find additionnal assumptions. 
-        icp_result_2 = o3d.pipelines.registration.registration_icp(
-            model_pc,
-            pcd,
-            self.params.icp_max_correspondence_distance,
-            T_init_flipped,
-            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            criteria
-        )
-        
-        # Select the hypothesis that maximizes point cloud overlap (fitness)
-        if icp_result_1.fitness > icp_result_2.fitness:
-            best_result = icp_result_1
-            print(f"Orientation selected: Original (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})")
-        elif icp_result_2.fitness > icp_result_1.fitness:
-            best_result = icp_result_2
-            print(f"Orientation selected: Flipped 180° (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})")
-        else:
-            # Tie breaker: pick the one with lower RMSE
-            if icp_result_1.inlier_rmse <= icp_result_2.inlier_rmse:
-                best_result = icp_result_1
-                print(f"Orientation selected: Original [Tie breaker] (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})")
-            else:
-                best_result = icp_result_2
-                print(f"Orientation selected: Flipped 180° [Tie breaker] (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})")
-                
-        return best_result.transformation
+        return T_refined

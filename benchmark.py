@@ -197,7 +197,7 @@ def run_parameter_sweep(dataset, model, camera, study_name, method_name: str, sw
         # Define hyperparameter search space dynamically based on the method name
         depth_trunc = trial.suggest_float("depth_trunc", 2.0, 7.0, step=0.1)
         
-        if method_name == "ppf_icp":
+        if method_name in ("ppf", "ppf_icp"):
             ppf_sampling_step = trial.suggest_float("ppf_sampling_step", 0.02, 0.10, step=0.01)
             ppf_distance_step = trial.suggest_float("ppf_distance_step", 0.02, 0.10, step=0.01)
             ppf_match_threshold = trial.suggest_float("ppf_match_threshold", 0.02, 0.10, step=0.01)
@@ -290,9 +290,9 @@ def main():
     parser.add_argument(
         "--method",
         type=str,
-        default="ppf_icp",
-        choices=["ppf_icp", "ransac"],
-        help="The 6D pose estimation method to benchmark (default: 'ppf_icp')"
+        default="ppf",
+        choices=["ppf", "ppf_icp", "ransac"],
+        help="The 6D pose estimation method to benchmark (default: 'ppf')"
     )
     args = parser.parse_args()
     
@@ -324,10 +324,10 @@ def main():
         
         # Initialize estimator based on selected method
         from methods import get_estimator
-        if args.method == "ppf_icp":
+        if args.method in ("ppf", "ppf_icp"):
             from methods import PPFICPParams
             default_params = PPFICPParams()
-            estimator = get_estimator("ppf_icp", params=default_params)
+            estimator = get_estimator("ppf", params=default_params)
         elif args.method == "ransac":
             from methods import RansacParams
             default_params = RansacParams()

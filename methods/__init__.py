@@ -21,7 +21,7 @@ def get_estimator(method_name: str, **kwargs) -> BasePoseEstimator:
         >>> estimator = get_estimator("ransac")
     """
     name_clean = method_name.lower().strip()
-    if name_clean == "ppf_icp": # AGENT: just a personal preference, but I feel that ppf would be a more adapted name since, ICP is common component of most algorithms, so not very discriminative yet. 
+    if name_clean in ("ppf", "ppf_icp"):
         return PPFICPEstimator(**kwargs)
     elif name_clean == "ransac":
         return RansacEstimator(**kwargs)
