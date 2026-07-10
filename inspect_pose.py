@@ -46,6 +46,8 @@ import argparse
 import shutil
 import numpy as np
 import cv2
+import copy
+import trimesh
 
 import open3d as o3d
 from datasets import Dataset
@@ -54,9 +56,74 @@ from datasets import Dataset
 from main import (
     Config, Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
-    export_debug_scene, instance_detected
+    instance_detected
 )
 from methods.base import BasePoseEstimator
+
+
+# =====================================================================
+# 0. DEBUGGING VISUALIZATION UTILITIES
+# =====================================================================
+def export_debug_scene(
+    pcd: o3d.geometry.PointCloud,
+    cad_mesh: o3d.geometry.TriangleMesh,
+    T_final: np.ndarray,
+    T_ground_truth: np.ndarray,
+    output_path: str
+) -> None:
+    """
+    Constructs a debugging 3D scene containing the reconstructed point cloud, the 
+    predicted pose mesh (green), the ground truth pose mesh (blue), and the origin 
+    coordinate frame. Exports the combined geometries as a GLB file.
+
+    Coordinate Frames & Reference System:
+    --------------------------------------
+    The debugging view is plotted in the Robot Base Frame ('base_link'). The origin [0, 0, 0] 
+    corresponds to the physical center of the robot base. The X-axis (Red) points forward 
+    from the robot, the Y-axis (Green) points left, and the Z-axis (Blue) points straight up.
+    
+    Setting the robot's base frame as the reference frame makes it intuitive to verify if 
+    the cart rests correctly on the floor (Z ~= 0) and is in front of the robot.
+    """
+    # 1. Create origin coordinate axes (Red=X, Green=Y, Blue=Z)
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+    
+    # 2. Paint the point cloud a neutral gray. We use deepcopy here to avoid modifying
+    # the original point cloud object in memory, preserving its original colors for
+    # any callers or subsequent tasks in the pipeline.
+    pcd_vis = copy.deepcopy(pcd)
+    pcd_vis.paint_uniform_color([0.6, 0.6, 0.6])
+    
+    # 3. Transform CAD mesh for predicted pose (GREEN)
+    predicted_mesh = copy.deepcopy(cad_mesh)
+    predicted_mesh.transform(T_final)
+    predicted_mesh.paint_uniform_color([0.0, 1.0, 0.0]) # GREEN
+    
+    # 4. Transform CAD mesh for ground truth pose (BLUE)
+    gt_mesh = copy.deepcopy(cad_mesh)
+    gt_mesh.transform(T_ground_truth)
+    gt_mesh.paint_uniform_color([0.0, 0.0, 1.0]) # BLUE
+    
+    # 5. Build trimesh scene and export
+    # Trimesh expects vertex colors as uint8 [0..255], whereas Open3D specifies them as
+    # float32 [0..1]. We convert between the two by multiplying by 255. We iterate over
+    # the geometries, wrap them in trimesh objects, and add them to a trimesh.Scene.
+    scene = trimesh.Scene()
+    for name, m in [("frame", world_frame), ("pred", predicted_mesh), ("gt", gt_mesh)]:
+        tm = trimesh.Trimesh(
+            vertices=np.asarray(m.vertices),
+            faces=np.asarray(m.triangles),
+            vertex_colors=(np.asarray(m.vertex_colors) * 255).astype(np.uint8)
+                          if m.has_vertex_colors() else None
+        )
+        scene.add_geometry(tm, geom_name=name)
+        
+    pts = np.asarray(pcd_vis.points)
+    cols = (np.asarray(pcd_vis.colors) * 255).astype(np.uint8) if pcd_vis.has_colors() else None
+    scene.add_geometry(trimesh.PointCloud(vertices=pts, colors=cols), geom_name="scene")
+    
+    scene.export(output_path)
+    print(f"Saved GLB scene to {output_path}")
 
 
 # =====================================================================
@@ -78,12 +145,12 @@ def run_random_inspection(
         model: The initialized YOLO segmentation model.
         camera (Camera): The pinhole camera model.
         dataset (Dataset): The Hugging Face dataset containing test samples.
-        params (PPFICPParams): Optimized hyperparameters for PPF + ICP matching. # AGENT: This needs to be adapted to the new design
+        estimator (BasePoseEstimator): The pose estimator instance.
         
     Example:
         >>> # To evaluate 5 random samples using the CLI:
-        >>> # python inspect_pose.py --random --num-samples 5 # AGENT: again update this, there is no num-samples flag anymore
-        >>> run_random_inspection(5, model, camera, dataset, params)
+        >>> # python inspect_pose.py --random 5
+        >>> run_random_inspection(5, model, camera, dataset, estimator)
     """
     output_dir = Config.OUTPUT_DIR
     
@@ -92,7 +159,8 @@ def run_random_inspection(
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
     
-    total_samples = len(dataset) # AGENT: I'm not 100% sure of what's happening here, are we loading the full dataset at each function call? Wouldn't it be easier to just load the dataset path, and metadata, select upfront the random indices and then load them ? 
+    # Get total samples from map-style dataset (O(1) lookup)
+    total_samples = len(dataset)
     num_samples = min(num_samples, total_samples)
     
     # Select unique random indices without replacement so we don't inspect the same sample twice
@@ -102,8 +170,6 @@ def run_random_inspection(
     
     for loop_idx, sample_idx in enumerate(random_indices):
         print(f"\n--- Processing Sample {loop_idx + 1}/{num_samples} (Index {sample_idx}) ---")
-        
-        # AGENT: without even reading what's happening below, to which extent is it refactorable? Like I feel we're doing the same exact thing we're usually doing in main.py here  
         
         # Load raw PIL images and binary depth buffers
         img = dataset["rgb"][sample_idx]
@@ -115,7 +181,7 @@ def run_random_inspection(
             print(f"Skipping Index {sample_idx}: No cart instance detected.")
             continue
             
-        # 2. Segment and Reconstruct 3D Point Cloud (with new 20.0m depth threshold) # AGENT: what is this outdated mention of the 20.0m depth threshold?
+        # 2. Segment and Reconstruct 3D Point Cloud
         # This isolates the cart points and projects them to camera-frame 3D coordinates.
         cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera)
         print(f"Recognized class: {cart_type}")
@@ -144,8 +210,6 @@ def run_random_inspection(
         # Saves the scene as combined_scene_sample_{sample_idx}.glb using the actual dataset index
         output_file = os.path.join(output_dir, f"combined_scene_sample_{sample_idx}.glb")
         export_debug_scene(pcd, cad_mesh, T_final, T_ground_truth, output_file)
-
-        # AGENT: I even think that what's in main could be removed and only developed here since this is the only interface that will be plotting things
         
     print(f"\nAll operations completed. GLB scenes saved to: '{output_dir}/'")
 
@@ -170,12 +234,12 @@ def run_targeted_inspection(
         model: The initialized YOLO segmentation model.
         camera (Camera): The pinhole camera model.
         dataset (Dataset): The Hugging Face dataset.
-        params (PPFICPParams): Optimized hyperparameters.
+        estimator (BasePoseEstimator): The pose estimator instance.
         
     Example:
         >>> # To debug indices 37 and 52 using the CLI:
         >>> # python inspect_pose.py --indices 37 52
-        >>> run_targeted_inspection([37, 52], model, camera, dataset, params)
+        >>> run_targeted_inspection([37, 52], model, camera, dataset, estimator)
     """
     output_dir = "debug_failures"
     if os.path.exists(output_dir):
@@ -191,10 +255,9 @@ def run_targeted_inspection(
             print(f"Skipping Index {idx}: Index is out of range for the loaded dataset split.")
             continue
             
-        img = dataset["rgb"][idx] # AGENT: is there an utility that allows from a dataset on disk to only fetch a given set of rows and columns? Without loading all the dataset at any moment? 
+        # The dataset is map-style; indexing here loads only the specific row on-demand
+        img = dataset["rgb"][idx]
         depth_bytes = dataset["depth"][idx]
-        
-        # AGENT: Could all the code below be further refactored and simplified? 
 
         # 1. Run YOLO and save 2D overlays
         # Plots bounding boxes and instance segmentation boundaries for 2D mask validation
@@ -247,8 +310,9 @@ def run_targeted_inspection(
 def main():
     parser = argparse.ArgumentParser(description="Unified 6D Pose Validation & Inspection Utility")
     
-    # Establish mutually exclusive execution modes (cannot run both at the same time)
-    group = parser.add_mutually_exclusive_group(required=True) # AGENT: explain how do you deal with that, since indeed random and indices are mutually exclusive arguments, however --method is a common argument 
+    # Establish mutually exclusive execution modes (the user must select exactly one: --random OR --indices).
+    # --method is added directly to the parser (not the group), so it is a common argument usable by both modes.
+    group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--random", 
         type=int, 
@@ -265,9 +329,9 @@ def main():
     parser.add_argument(
         "--method",
         type=str,
-        default="ppf_icp",
-        choices=["ppf_icp", "ransac"],
-        help="The 6D pose estimation method to use (default: 'ppf_icp')"
+        default="ppf",
+        choices=["ppf", "ppf_icp", "ransac"],
+        help="The 6D pose estimation method to use (default: 'ppf')"
     )
 
     
@@ -283,12 +347,11 @@ def main():
     dataset = load_parquet_dataset()
     
     # Instantiate chosen estimator and parameters
-    # AGENT: So this might need to be refactored to include a combination of method + preset. But this needs to be done in the most elegant way possible so let's think about that and explore the different alternatives. 
     from methods import get_estimator
-    if args.method == "ppf_icp":
+    if args.method in ("ppf", "ppf_icp"):
         from methods import PPFICPParams
         method_params = PPFICPParams()
-        estimator = get_estimator("ppf_icp", params=method_params)
+        estimator = get_estimator("ppf", params=method_params)
     elif args.method == "ransac":
         from methods import RansacParams
         method_params = RansacParams()

@@ -4,18 +4,10 @@ import copy
 import numpy as np
 import torch
 import open3d as o3d
-import trimesh
 from datasets import load_dataset, Dataset
 from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
 
-# AGENT: Maybe put here an extensive and explanatory ASCII diagram of the program, what's the dataflow, how do the different components interact with each others
-# Just to have a comprehensive view quickly of the organization of the whole program
-# Well in fact, now that I think about this, what are the options to provide a genuine documentation support in python ?
-# Putting everything in the documentation, along with Getting Started + Tutorial sections could make things easier. 
-
-
-# AGENT: I'm currently performing a code review by putting comments scattered across the codebase, I don't think this is the ideal workflow, what are the classic methods? 
 
 # =====================================================================
 # SYSTEM ARCHITECTURE AND DATAFLOW DIAGRAM
@@ -164,20 +156,13 @@ class Config:
     TRAIN_PARQUET_GLOB = "dataset/data/train-*-of-00127.parquet"
     VAL_PARQUET_GLOB = "dataset/data/validation-*-of-00016.parquet"
     TEST_PARQUET_GLOB = "dataset/data/test-*-of-00016.parquet"
-    NUM_SAMPLES_TO_LOAD = 100 # AGENT: remove this, the whole test dataset should be loaded to evaluate the algorithm
-    NUM_SAMPLES_TO_TEST = 10 # AGENT: same, I don't know where it's used now, since testing / inspecting / debugging is now in @inspect_pose.py, main is just a common utility file now
-    DEFAULT_DEPTH_TRUNC = 3.0 # AGENT: I think this should be moved also, each method should get its own parameter config set with all the hyperparams it needs as well as some global param such as DEFAULT_DEPTH_TRUNC, indeed, ransac might need a different truncation than PPF, while this main.py file should be agnostic to the method we use. 
-    OUTPUT_DIR = "debug_output/" # AGENT: again, I think this information is linked to @inspect_pose.py and @inspect_pose.py should the only script that writes to debug_ouptut/
-
-
+    DEFAULT_DEPTH_TRUNC = 3.0
+    OUTPUT_DIR = "debug_output/"
 
 
 # =====================================================================
 # 1b. METHOD-SPECIFIC HYPERPARAMETERS
 # =====================================================================
-# Imported from methods for backward compatibility
-# AGENT: we don't need backward compatiblity, breaking change are encouraged are we're still in prototyping phase
-from methods import PPFICPParams # AGENT: remove this 
 
 # The parameter organisation should be something similar to that (don't hesistate to criticize it, and propose better alternatives):
 # methods/
@@ -197,31 +182,24 @@ from methods import PPFICPParams # AGENT: remove this
 # =====================================================================
 def load_parquet_dataset() -> Dataset:
     """
-    Loads the parquet dataset splits, streams them, and returns a local slice of the test set.
+    Loads the parquet test dataset split directly in Map-style format (non-streaming).
     
     Returns:
-        Dataset: A Hugging Face Dataset containing sample rows from the test set.
+        Dataset: The loaded Hugging Face test split.
         
     Example:
         >>> dataset = load_parquet_dataset()
         >>> first_sample = dataset[0]
         >>> print(first_sample.keys())
     """
-    #AGENT: everything needs to be overhauled here, since I think loading the full test set is more interesting and doable with the current ressources
-    # switching from an interable dataset to a map style dataset composed of the full test split
-    dataset_stream = load_dataset(
+    dataset = load_dataset(
         Config.DATASET_PATH,
         data_files={
-            "train": Config.TRAIN_PARQUET_GLOB,
-            "validation": Config.VAL_PARQUET_GLOB,
             "test": Config.TEST_PARQUET_GLOB
         },
-        streaming=True,
+        streaming=False,
     )
-    
-    # Extract the test split and materialize the first N samples
-    samples = list(dataset_stream["test"].take(Config.NUM_SAMPLES_TO_LOAD)) #AGENT: Now we're going to take the full split
-    return Dataset.from_list(samples)
+    return dataset["test"]
 
 
 def load_hf_model() -> YOLO:
@@ -237,11 +215,12 @@ def load_hf_model() -> YOLO:
         >>> result = model("test_image.png")
     """
     local_path = Config.LOCAL_MODEL_PATH
-    # AGENT: provide a comment to explain clearly and quickly this branching (if the model is not found, we download it...)
+    # Check if the YOLO model exists locally. If not, download it from Hugging Face
+    # and copy it to the local project path.
     if not os.path.exists(local_path):
         print(f"Model not found locally at {local_path}. Downloading from Hugging Face...")
         cached_path = hf_hub_download(Config.HF_REPO, Config.HF_FILE)
-        import shutil # AGENT: what is shutil? provide an explanatory comment in the code 
+        # shutil is a standard Python library used here to copy the cached model file to the local directory
         shutil.copy(cached_path, local_path) 
         print(f"Model saved locally to {local_path}")
     else:
@@ -293,8 +272,10 @@ def select_target_detection(result) -> tuple[str, list[int], torch.Tensor]:
     Example:
         >>> results = model(img)
         >>> class_name, bbox, mask = select_target_detection(results)
-    """
-    result_img = result[0] #AGENT: explain the assumption here, it works only for a single image inference, in realtime setup we'll need to ensure that this is robust
+    # Assumption: The input `result` list contains detection results for a single image.
+    # For a real-time/streaming multi-image batch pipeline, this indexing must be updated
+    # to iterate over the batch elements robustly.
+    result_img = result[0]
     
     # Enumerate the bounding boxes and select the index with the largest area
     idx, _ = max(
@@ -315,37 +296,84 @@ def select_target_detection(result) -> tuple[str, list[int], torch.Tensor]:
     return class_name, bbox, mask
 
 
+class MaskedImageFrame:
+    """
+    Encapsulates cropped and masked sensor observations alongside their matching camera model.
+
+    Design Choice Rationale:
+    ------------------------
+    This class is introduced to enforce coordinate alignment safety at the type/class level (a pattern
+    common in systems languages like Rust).
+    In the previous implementation, cropped image buffers and camera principal point offsets were handled
+    independently. If point cloud reconstruction was called elsewhere, there was no structural guarantee
+    that the camera intrinsics were shifted by the correct crop offsets matching the image shape.
+    By packaging the cropped RGB-D data, the original camera, and the bounding box offsets into a single
+    immutable-like frame, we guarantee that the correct crop-adjusted camera intrinsics are always computed
+    dynamically in get_o3d_intrinsics().
+    """
+    def __init__(
+        self,
+        rgb: torch.Tensor,
+        depth: torch.Tensor,
+        camera: Camera,
+        xmin: int,
+        ymin: int,
+        width_orig: int,
+        height_orig: int
+    ):
+        self.rgb = rgb
+        self.depth = depth
+        self.camera = camera
+        self.xmin = xmin
+        self.ymin = ymin
+        self.width_orig = width_orig
+        self.height_orig = height_orig
+
+    @property
+    def width(self) -> int:
+        return self.rgb.shape[1]
+
+    @property
+    def height(self) -> int:
+        return self.rgb.shape[0]
+
+    def get_o3d_intrinsics(self) -> o3d.camera.PinholeCameraIntrinsic:
+        """
+        Generates Open3D camera intrinsics, shifting the principal point to account
+        for cropping offsets.
+        """
+        crop_cx = self.camera.cx - self.xmin
+        crop_cy = self.camera.cy - self.ymin
+        return o3d.camera.PinholeCameraIntrinsic(
+            width=self.width, height=self.height,
+            fx=self.camera.fx, fy=self.camera.fy,
+            cx=crop_cx, cy=crop_cy
+        )
+
+
 def crop_and_mask_inputs(
-    orig_img: np.ndarray | torch.Tensor,
+    orig_img: torch.Tensor,
     mask: torch.Tensor,
     depth_tensor: torch.Tensor,
-    bbox: list[int]
-) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    bbox: list[int],
+    camera: Camera
+) -> MaskedImageFrame:
     """
     Crops the original RGB image, depth tensor, and segmentation mask using the bounding box,
-    and masks out any background pixels (pixels not covered by the segmentation mask).
-    
+    and masks out any background pixels. Returns a packaged MaskedImageFrame.
+
     Args:
-        orig_img: The original RGB image array. #AGENT: precise the datatype and shape
+        orig_img (torch.Tensor): Original RGB image tensor of shape [H, W, 3].
         mask (torch.Tensor): Binary segmentation mask of shape [H, W].
         depth_tensor (torch.Tensor): Raw depth tensor of shape [H, W].
-        bbox (list[int]): Coordinates [xmin, ymin, xmax, ymax].
-        
+        bbox (list[int]): Bounding box coordinates [xmin, ymin, xmax, ymax].
+        camera (Camera): Original camera model for intrinsics calculation.
+
     Returns:
-        tuple containing:
-            - blacked_out_rgb_cropped (torch.Tensor): The cropped, masked RGB image.
-            - blacked_out_cropped_depth (torch.Tensor): The cropped, masked depth tensor.
-            - xmin (int): Bounding box horizontal crop offset.
-            - ymin (int): Bounding box vertical crop offset.
-            
-    Example:
-        >>> cropped_rgb, cropped_depth, xmin, ymin = crop_and_mask_inputs(img, mask, depth_tensor, bbox)
+        MaskedImageFrame: Packaged crop and mask results.
     """
     xmin, ymin, xmax, ymax = bbox
     
-    if not isinstance(orig_img, torch.Tensor): #AGENT: well I feel like this shouldn't be there, the function should have a clear contract and assume a particular type of input, it's the caller's responsability to respect it
-        orig_img = torch.tensor(orig_img, dtype=torch.uint8)
-        
     # Crop RGB image and segmentation mask
     rgb_cropped = orig_img[ymin:ymax, xmin:xmax, :]
     cropped_mask = mask[ymin:ymax, xmin:xmax]
@@ -357,7 +385,15 @@ def crop_and_mask_inputs(
     cropped_depth = depth_tensor[ymin:ymax, xmin:xmax]
     blacked_out_cropped_depth = torch.where(cropped_mask, cropped_depth, 0)
     
-    return blacked_out_rgb_cropped, blacked_out_cropped_depth, xmin, ymin
+    return MaskedImageFrame(
+        rgb=blacked_out_rgb_cropped,
+        depth=blacked_out_cropped_depth,
+        camera=camera,
+        xmin=xmin,
+        ymin=ymin,
+        width_orig=orig_img.shape[1],
+        height_orig=orig_img.shape[0]
+    )
 
 
 def instance_detected(result) -> bool:
@@ -390,19 +426,6 @@ class Camera:
         """
         Generates Open3D camera intrinsics, shifting the principal point to account
         for cropping offsets.
-        
-        Args:
-            width (int): Width of the cropped image.
-            height (int): Height of the cropped image.
-            xmin (int): Horizontal crop offset.
-            ymin (int): Vertical crop offset.
-            
-        Returns:
-            o3d.camera.PinholeCameraIntrinsic: Shipped camera intrinsics.
-            
-        Example:
-            >>> camera = Camera(640.0, 640.0, 320.0, 240.0)
-            >>> intrinsics = camera.get_o3d_intrinsics(100, 100, 50, 50)
         """
         crop_cx = self.cx - xmin
         crop_cy = self.cy - ymin
@@ -412,45 +435,26 @@ class Camera:
         )
 
 
-class Context:
-    """Holds geometric context information about the original and cropped views."""
-    def __init__(
-        self, camera: Camera, xmin: int, ymin: int,
-        width_orig: int, height_orig: int,
-        width_crop: int, height_crop: int
-    ):
-        self.camera = camera
-        self.xmin = xmin
-        self.ymin = ymin
-        self.width_orig = width_orig
-        self.height_orig = height_orig
-        self.width_crop = width_crop
-        self.height_crop = height_crop
-
-        self.crop_cx = self.camera.cx - self.xmin
-        self.crop_cy = self.camera.cy - self.ymin
-
-
 def point_cloud_processing(
-    rgb: np.ndarray,
-    depth: np.ndarray,
-    ctx: Context,
+    frame: MaskedImageFrame,
     depth_trunc: float = Config.DEFAULT_DEPTH_TRUNC
 ) -> o3d.geometry.PointCloud:
-
     """
-    Converts RGB and depth arrays into an Open3D PointCloud object using the cropped intrinsics.
+    Converts a MaskedImageFrame into an Open3D PointCloud object using the cropped intrinsics.
     
     Args:
-        rgb (np.ndarray): Cropped and masked RGB image array.
-        depth (np.ndarray): Cropped and masked depth image array.
-        ctx (Context): The geometric cropping context.
+        frame (MaskedImageFrame): Packaged cropped and masked image frame.
+        depth_trunc (float): Max depth to include in the point cloud.
         
     Returns:
         o3d.geometry.PointCloud: Reconstructed point cloud in the camera's local coordinate frame.
     """
-    color_o3d = o3d.geometry.Image(rgb)
-    depth_o3d = o3d.geometry.Image(depth)
+    # Convert PyTorch tensors back to numpy for Open3D integration
+    rgb_np = frame.rgb.numpy()
+    depth_np = frame.depth.numpy()
+
+    color_o3d = o3d.geometry.Image(rgb_np)
+    depth_o3d = o3d.geometry.Image(depth_np)
     
     rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
         color_o3d, 
@@ -459,16 +463,8 @@ def point_cloud_processing(
         depth_trunc=depth_trunc, 
         convert_rgb_to_intensity=False,
     )
-
-
     
-    # Generate crop-adjusted camera intrinsics
-    intrinsics = ctx.camera.get_o3d_intrinsics(
-        width=ctx.width_crop, # AGENT: this feels suboptimal, like the logic is brittle: I have to ensure that the images are indeed cropped, and that in parallel I've ensured that the camera's intrinsic are updated to this cropped. As someone used with rust type system, I'd like to see if there's a similar mechanism to enforce that cropped images <=> cropped_instrinsics. Maybe put everything in a struct?
-        height=ctx.height_crop,
-        xmin=ctx.xmin,
-        ymin=ctx.ymin
-    )
+    intrinsics = frame.get_o3d_intrinsics()
     
     return o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
 
@@ -486,8 +482,7 @@ def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int) -> np.nda
     it into the robot's base_link frame.
     
     Args:
-        local_dataset (Dataset): The materialized local dataset.
-        sample_idx (int): The index of the sample. # AGENT: Maybe we can think of way to optimize this, if we have for each pass to make a lookup in the dataset it's going to take an eternity, can we think of a batching / dataloader mechanism? Like given the number of samples we're considering (known at call time, we load all labels and ensure a faster look-up when the algorithm is running)
+        sample_idx (int): The index of the sample.
         
     Returns:
         np.ndarray: A 4x4 homogeneous transformation matrix in the robot's base frame.
@@ -506,20 +501,6 @@ def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int) -> np.nda
     return Config.T_ROBOT_CAMERA @ T_usd_to_cv @ T_world_camera @ T_world_cart
 
 
-def SixDPoseEstimation(
-    pcd: o3d.geometry.PointCloud,
-    cad_mesh: o3d.geometry.TriangleMesh,
-    params: PPFICPParams = None # AGENT: I think this isn't needed anymore
-) -> np.ndarray:
-    """
-    Legacy wrapper around the modular PPFICPEstimator for backward compatibility. # AGENT: I'm allergic to backward compatibility
-    """
-    from methods import PPFICPEstimator
-    estimator = PPFICPEstimator(params=params)
-    return estimator.estimate_pose(pcd, cad_mesh)
-
-
-
 # =====================================================================
 # 5b. HIGH-LEVEL PROCESS AND EXPORT UTILITIES
 # =====================================================================
@@ -530,7 +511,6 @@ def process_and_reconstruct(
     camera: Camera,
     depth_trunc: float = Config.DEFAULT_DEPTH_TRUNC
 ) -> tuple[str, o3d.geometry.PointCloud]:
-
     """
     Extracts the target cart segmentation mask, crops depth and RGB data,
     and reconstructs the 3D point cloud of the target instance in the camera frame.
@@ -540,98 +520,38 @@ def process_and_reconstruct(
         depth_bytes (bytes): The raw depth buffer bytes.
         result: The YOLO Results object.
         camera (Camera): The Camera intrinsics instance.
+        depth_trunc (float): Max depth to include in the point cloud.
         
     Returns:
         tuple containing:
-            - cart_type (str): The recognized class name.
+            - cart_type (str): The recognized class name (e.g., 'picanol').
             - pcd (o3d.geometry.PointCloud): Reconstructed 3D point cloud in camera frame.
-            
-    Example:
-        >>> cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera)
     """
-    # Prepare depth tensor
+    # Prepare depth tensor dynamically using the shape of the original image
     depth_1d = np.frombuffer(depth_bytes, np.float32)
-    depth_tensor = torch.tensor(depth_1d.reshape((800, 1280)).copy()) # AGENT: This hardcoded shape (800, 1280) should be removed and fetched from a global constant / config parameter instead 
+    img_np = np.array(img)
+    height, width = img_np.shape[:2]
+    depth_tensor = torch.tensor(depth_1d.reshape((height, width)).copy())
     
     # Select target mask and crop parameters
     cart_type, bbox, mask = select_target_detection(result)
     
-    # Crop and mask inputs
-    cropped_rgb, cropped_depth, xmin, ymin = crop_and_mask_inputs(
-        result[0].orig_img, mask, depth_tensor, bbox
+    # Convert original RGB image from YOLO result to a PyTorch tensor on CPU
+    orig_img_tensor = torch.from_numpy(np.array(result[0].orig_img))
+    
+    # Crop and mask inputs, producing the type-safe MaskedImageFrame
+    frame = crop_and_mask_inputs(
+        orig_img=orig_img_tensor,
+        mask=mask,
+        depth_tensor=depth_tensor,
+        bbox=bbox,
+        camera=camera
     )
     
-    # Why are the two naming convention below different? Are they representing the same step of transformation of the original input (crop + mask)? If yes they should have the same naming convention
-    numpy_depth_mask = cropped_depth.numpy() # AGENT: maybe crop_mask_depth_np or something similar and explicit
-    numpy_cropped_rgb = cropped_rgb.numpy()
-    
-    # Reconstruct 3D Point Cloud using camera properties and context
-    ctx = Context(
-        camera=camera, xmin=xmin, ymin=ymin, # AGENT: This is what I was talking about earlier, if point_cloud_processing is called somewhere else, we have no control on the correctness of the correspondance between image <=> camera's intrinsic. Right now I'm still thinking about a unified struct that contains the image and the associated camera's intrinsics, but tell me if that would incur too much performance overhead. 
-        width_orig=np.array(img).shape[1], height_orig=np.array(img).shape[0], # AGENT: here there is a lack of taste, this access doesn't look clean, is there a better way to do that? 
-        width_crop=numpy_cropped_rgb.shape[1], height_crop=numpy_cropped_rgb.shape[0]
-    )
-    pcd = point_cloud_processing(numpy_cropped_rgb, numpy_depth_mask, ctx, depth_trunc=depth_trunc)
-
+    # Reconstruct 3D Point Cloud using camera properties and MaskedImageFrame
+    pcd = point_cloud_processing(frame, depth_trunc=depth_trunc)
     
     return cart_type, pcd
 
 
-# AGENT: I don't think the function below should belong here, since this is a debugging utility it should be moved closer to @inspect_pose.py...
-def export_debug_scene(
-    pcd: o3d.geometry.PointCloud,
-    cad_mesh: o3d.geometry.TriangleMesh,
-    T_final: np.ndarray,
-    T_ground_truth: np.ndarray,
-    output_path: str
-) -> None:
-    """
-    Constructs a debugging 3D scene containing the reconstructed point cloud, the 
-    predicted pose mesh (green), the ground truth pose mesh (blue), and the origin 
-    coordinate frame. Exports the combined geometries as a GLB file.
-    
-    Args:
-        pcd (o3d.geometry.PointCloud): Reconstructed scene point cloud (in robot base frame).
-        cad_mesh (o3d.geometry.TriangleMesh): Reference CAD mesh.
-        T_final (np.ndarray): Final 4x4 predicted transformation matrix.
-        T_ground_truth (np.ndarray): Ground truth 4x4 transformation matrix.
-        output_path (str): File path to save the GLB export.
-        
-    Example:
-        >>> export_debug_scene(pcd, cad_mesh, T_final, T_gt, "debug_output/scene.glb")
-    """
-    # 1. Create origin coordinate axes (Red=X, Green=Y, Blue=Z) # AGENT: you need to explain that further, indeed, I don't think I clearly understand what is happening here, are we talking about an arbitrary reference world frame for the debugging view? If that's the case, why not making the robot's frame directly the reference frame?  
-    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
-    
-    # 2. Create neutral background color for point cloud
-    pcd_vis = copy.deepcopy(pcd) # AGENT: why do we need a deepcopy here? (that's a very minor consideration, just out off curiosity)
-    pcd_vis.paint_uniform_color([0.6, 0.6, 0.6])
-    
-    # 3. Transform CAD mesh for predicted pose (GREEN)
-    predicted_mesh = copy.deepcopy(cad_mesh)
-    predicted_mesh.transform(T_final)
-    predicted_mesh.paint_uniform_color([0.0, 1.0, 0.0]) # GREEN
-    
-    # 4. Transform CAD mesh for ground truth pose (BLUE)
-    gt_mesh = copy.deepcopy(cad_mesh)
-    gt_mesh.transform(T_ground_truth)
-    gt_mesh.paint_uniform_color([0.0, 0.0, 1.0]) # BLUE
-    
-    # 5. Build trimesh scene and export
-    # AGENT: this would benefit from a more extensive documentation / even a minor recall of how the trimesh api behaves. 
-    scene = trimesh.Scene()
-    for name, m in [("frame", world_frame), ("pred", predicted_mesh), ("gt", gt_mesh)]:
-        tm = trimesh.Trimesh(
-            vertices=np.asarray(m.vertices),
-            faces=np.asarray(m.triangles),
-            vertex_colors=(np.asarray(m.vertex_colors) * 255).astype(np.uint8)
-                          if m.has_vertex_colors() else None
-        )
-        scene.add_geometry(tm, geom_name=name)
-        
-    pts = np.asarray(pcd_vis.points)
-    cols = (np.asarray(pcd_vis.colors) * 255).astype(np.uint8) if pcd_vis.has_colors() else None
-    scene.add_geometry(trimesh.PointCloud(vertices=pts, colors=cols), geom_name="scene")
-    
-    scene.export(output_path)
-    print(f"Saved GLB scene to {output_path}")
+
