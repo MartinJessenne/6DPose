@@ -1,54 +1,57 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# download_dataset.sh
+set -uo pipefail
 
-echo "===================================================="
-echo "6D Pose Project Initialization & Asset Downloader"
-echo "===================================================="
+PERSIST=/marimo
+PROJECT="$PERSIST/6DPose"
+DATASET="UItraviolet/industrial_cart"
+DEST="$PROJECT/dataset/data"
 
-# Load .env file if it exists
-if [ -f .env ]; then
-    echo "Loading environment variables from .env file..."
-    export $(grep -v '^#' .env | xargs)
-fi
+export HOME="$PERSIST"
+export HF_HOME="$PERSIST/.cache/huggingface"
+export TMPDIR="$PERSIST/tmp"
+mkdir -p "$TMPDIR" "$DEST"
 
-# 1. Hugging Face Login
-if [ -n "$HF_TOKEN" ]; then
-    echo "Logging into Hugging Face using HF_TOKEN..."
-    hf auth login --token "$HF_TOKEN"
-else
-    echo "HF_TOKEN not detected in environment or .env file."
-    # Prompt the user to paste their token directly in the terminal
-    read -sp "Please paste your Hugging Face Access Token: " HF_TOKEN_INPUT
-    echo "" # Print newline after hidden input
-    if [ -n "$HF_TOKEN_INPUT" ]; then
-        hf auth login --token "$HF_TOKEN_INPUT"
-    else
-        echo "No token provided. Proceeding with public download access..."
-    fi
-fi
+# The two suspects: Xet reconstruction and hf_transfer's parallel buffers.
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_ENABLE_HF_TRANSFER=0
 
-# 2. Download YOLO Model Weights
-if [ -f best.pt ]; then
-    echo -e "\n[YOLO Model] Found locally at 'best.pt'. Skipping download."
-else
-    echo -e "\n[YOLO Model] Downloading best.pt from Hugging Face..."
-    # Download file to a temp folder, copy it to the root path, and clean up
-    hf download UItraviolet/yolo_multicart runs/segment/train-2/weights/best.pt --local-dir temp_weights
-    mv temp_weights/runs/segment/train-2/weights/best.pt best.pt
-    rm -rf temp_weights
-    echo "[YOLO Model] Successfully saved to 'best.pt'"
-fi
+cd "$PROJECT"
 
-# 3. Download Parquet Dataset
-local_dataset_dir="dataset/data"
-if [ -d "$local_dataset_dir" ] && ls "$local_dataset_dir"/*.parquet &>/dev/null; then
-    echo -e "\n[Dataset] Parquet files already exist in '$local_dataset_dir'. Skipping download."
-else
-    echo -e "\n[Dataset] Downloading dataset parquet files..."
-    mkdir -p "$local_dataset_dir"
-    hf download UItraviolet/industrial_cart --repo-type dataset --include "*.parquet" --local-dir "$local_dataset_dir"
-    echo "[Dataset] Successfully downloaded dataset parquet files to '$local_dataset_dir'"
-fi
+# --- black box recorder: survives the crash, tells us what died -------------
+(
+  while true; do
+    printf '%s rss_kb=%s disk=%s\n' \
+      "$(date +%T)" \
+      "$(ps -eo rss,comm --sort=-rss | awk '/hf|python/ {s+=$1} END {print s+0}')" \
+      "$(df -BG --output=used "$PERSIST" | tail -1 | tr -dc '0-9')" \
+      >> "$PERSIST/dl_monitor.log"
+    sleep 5
+  done
+) &
+MON=$!
+trap 'kill $MON 2>/dev/null' EXIT
 
-echo -e "\nInitialization finished. You can now run the project using:"
-echo "  uv run --python 3.12 inspect_pose.py --random 5 --method ransac"
+mapfile -t FILES < <(python3 - <<PY
+from huggingface_hub import HfApi
+for f in HfApi().list_repo_files("$DATASET", repo_type="dataset"):
+    if f.endswith(".parquet"):
+        print(f)
+PY
+)
+total=${#FILES[@]}
+echo "[Dataset] $total parquet files."
+
+BATCH=10
+for ((i=0; i<total; i+=BATCH)); do
+  batch=("${FILES[@]:i:BATCH}")
+  n=$((i/BATCH + 1))
+  echo "== Batch $n ($((i+1))-$((i+${#batch[@]})) of $total) =="
+  hf download "$DATASET" --repo-type dataset \
+      --local-dir "$DEST" --max-workers 2 "${batch[@]}" || {
+        echo "!! batch $n failed; re-run to resume" >&2; exit 1; }
+  sync
+  echo "   $(du -sh "$DEST" | cut -f1) on disk"
+done
+
+echo "[Dataset] Complete: $(du -sh "$DEST" | cut -f1)"
