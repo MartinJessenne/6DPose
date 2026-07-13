@@ -447,7 +447,7 @@ def point_cloud_processing(
         depth_trunc (float): Max depth to include in the point cloud.
         
     Returns:
-        o3d.geometry.PointCloud: Reconstructed point cloud in the camera's local coordinate frame.
+        o3d.geometry.PointCloud: Reconstructed point cloud in the cameras local coordinate frame.
     """
     # Convert PyTorch tensors back to numpy for Open3D integration
     rgb_np = frame.rgb.numpy()
