@@ -27,6 +27,7 @@ nav:
     - Overview: tutorials/index.md
     - Visualizing the 3D Pipeline: tutorials/01_pose_estimation.md
     - Comparing RANSAC vs PPF: tutorials/02_method_comparison.md
+    - Configuration with Hydra: tutorials/03_config_system.md
   - How-to Guides:
     - Overview: how-to/index.md
     - Add a New Model: how-to/add_estimator.md
