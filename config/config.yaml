@@ -1,5 +1,5 @@
 defaults:
-  - model: ppf_icp
+  - model: ppf
   - dataset: default
   - camera: default
   - _self_

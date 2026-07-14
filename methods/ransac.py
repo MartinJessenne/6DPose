@@ -1,7 +1,10 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import numpy as np
 import open3d as o3d
 from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
+
+if TYPE_CHECKING:
+    import optuna
 
 
 # =====================================================================
@@ -61,6 +64,15 @@ class RansacEstimator(BasePoseEstimator):
                 [-0.866, 0.0, 0.5, 0.304],
                 [0.0, 0.0,  0.0,   1.0  ]
             ])
+
+    @classmethod
+    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
+        """Suggests parameters for RANSAC + ICP registration."""
+        return {
+            "voxel_size": trial.suggest_float("voxel_size", 0.02, 0.10, step=0.01),
+            "icp_max_correspondence_distance": trial.suggest_float("icp_max_correspondence_distance", 0.05, 0.25),
+            "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10)
+        }
 
     def estimate_pose(
         self,

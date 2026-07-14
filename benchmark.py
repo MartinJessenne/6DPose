@@ -168,6 +168,10 @@ def evaluate_pipeline(
         elapsed_time = time.time() - start_time
             
         # 4. Calculate Ground Truth pose and compare
+        # We explicitly pass the estimator's extrinsic matrix (T_robot_camera) to ensure the 
+        # ground truth calculation uses the same coordinate transform alignment as the estimator.
+        # This prevents mismatches if extrinsics are overridden dynamically via Hydra configs,
+        # which would otherwise fall back to the old hardcoded defaults in main.py.
         extrinsic = getattr(estimator, "extrinsic", None)
         T_ground_truth = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=extrinsic)
         
@@ -184,58 +188,44 @@ def evaluate_pipeline(
 # =====================================================================
 # 3. OPTUNA SWEEP STUDY (MULTI-OBJECTIVE OPTIMIZATION)
 # =====================================================================
-def run_parameter_sweep(dataset, model, camera, study_name, method_name: str, sweep_size: int, n_trials: int, extrinsic: np.ndarray = None):
+def run_parameter_sweep(
+    dataset, model, camera, study_name, estimator_cls: type[BasePoseEstimator], 
+    sweep_size: int, n_trials: int, extrinsic: np.ndarray = None
+):
     """
     Launches a Multi-Objective Bayesian Optimization sweep using Optuna
     to find the Pareto Front of optimal accuracy vs. speed trade-offs.
+
+    Args:
+        dataset: The Parquet dataset stream.
+        model: The 2D YOLO segment model.
+        camera: The camera model configuration.
+        study_name: SQLite study file identifier.
+        estimator_cls: Concrete estimator class type to tune.
+        sweep_size: Validation subset sample count.
+        n_trials: Bayesian optimization iteration count.
+        extrinsic (np.ndarray, optional): 4x4 camera-to-robot extrinsics matrix. Explicitly passed
+                                         here so that trial estimator instances are evaluated under
+                                         the correct configuration-configured coordinate alignment.
     """
     # Select a fixed validation subset for the sweep to ensure consistent comparisons
     total_samples = len(dataset)
     sweep_indices = np.random.choice(total_samples, min(sweep_size, total_samples), replace=False)
-    print(f"Running Multi-Objective sweep for '{method_name}' over {len(sweep_indices)} samples for {n_trials} trials...")
+    print(f"Running Multi-Objective sweep for '{estimator_cls.__name__}' over {len(sweep_indices)} samples for {n_trials} trials...")
     print(f"Sweep validation indices: {sweep_indices}\n")
     
     def objective(trial: optuna.Trial) -> tuple[float, float]:
-        # Define hyperparameter search space dynamically based on the method name
+        # 1. Suggest global parameters
         depth_trunc = trial.suggest_float("depth_trunc", 2.0, 7.0, step=0.1)
         
-        if method_name in ("ppf", "ppf_icp"):
-            ppf_sampling_step = trial.suggest_float("ppf_sampling_step", 0.02, 0.10, step=0.01)
-            ppf_distance_step = trial.suggest_float("ppf_distance_step", 0.02, 0.10, step=0.01)
-            ppf_match_threshold = trial.suggest_float("ppf_match_threshold", 0.02, 0.10, step=0.01)
-            ppf_match_tolerance = trial.suggest_float("ppf_match_tolerance", 0.01, 0.08, step=0.01)
-            icp_max_correspondence_distance = trial.suggest_float("icp_max_correspondence_distance", 0.02, 0.20)
-            icp_max_iterations = trial.suggest_int("icp_max_iterations", 10, 100, step=10)
-            
-            from methods import PPFICPEstimator, PPFICPParams
-            params = PPFICPParams(
-                ppf_sampling_step=ppf_sampling_step,
-                ppf_distance_step=ppf_distance_step,
-                ppf_match_threshold=ppf_match_threshold,
-                ppf_match_tolerance=ppf_match_tolerance,
-                icp_max_correspondence_distance=icp_max_correspondence_distance,
-                icp_max_iterations=icp_max_iterations
-            )
-            estimator = PPFICPEstimator(params=params, extrinsic=extrinsic)
-            
-        elif method_name == "ransac":
-            voxel_size = trial.suggest_float("voxel_size", 0.02, 0.10, step=0.01)
-            icp_max_correspondence_distance = trial.suggest_float("icp_max_correspondence_distance", 0.05, 0.25)
-            icp_max_iterations = trial.suggest_int("icp_max_iterations", 10, 100, step=10)
-            
-            from methods import RansacEstimator, RansacParams
-            params = RansacParams(
-                voxel_size=voxel_size,
-                icp_max_correspondence_distance=icp_max_correspondence_distance,
-                icp_max_iterations=icp_max_iterations
-            )
-            estimator = RansacEstimator(params=params, extrinsic=extrinsic)
-            
-        else:
-            raise ValueError(f"Unknown method for sweep parameters: '{method_name}'")
-            
+        # 2. Dynamically suggest model-specific parameters
+        suggested_params = estimator_cls.suggest_params(trial)
+        
+        # 3. Instantiate model with trial parameters
+        trial_estimator = estimator_cls(params=suggested_params, extrinsic=extrinsic)
+        
         trans_errs, rot_errs, times, failed = evaluate_pipeline(
-            dataset, model, camera, estimator, sweep_indices, depth_trunc=depth_trunc
+            dataset, model, camera, trial_estimator, sweep_indices, depth_trunc=depth_trunc
         )
 
 
@@ -283,6 +273,15 @@ def run_parameter_sweep(dataset, model, camera, study_name, method_name: str, sw
 # =====================================================================
 # 4. CLI ENTRY POINT
 # =====================================================================
+# The @hydra.main decorator intercepts command-line execution and manages:
+# 1. Config Path Resolution: Searches the local directory 'config/' for YAML config templates.
+# 2. Config Composition: Reads 'config.yaml' as the root file, which declares default subconfigs
+#    (e.g., loading model presets under config/model/ and dataset settings under config/dataset/).
+# 3. CLI Overrides parsing: Converts CLI key-value assignments (like 'model=ransac' or 'sweep=true')
+#    into overrides, merges them with the default configuration tree, and encapsulates them into 
+#    an OmegaConf DictConfig object.
+# 4. Working Directory Management: Hydra automatically handles logging output paths and creates a 
+#    unique execution folder for each run (or multi-run sweep studies) to prevent output collisions.
 @hydra.main(config_path="config", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     # Load model, camera, and dataset
@@ -301,9 +300,8 @@ def main(cfg: DictConfig):
         test_glob=cfg.dataset.test_glob
     )
     
-    # Extract method name from model target configuration
-    # E.g. methods.ransac.RansacEstimator -> "ransac"
-    method_name = "ransac" if "ransac" in cfg.model._target_.lower() else "ppf_icp"
+    # Resolve estimator class dynamically from Hydra configuration target
+    estimator_cls = hydra.utils.get_class(cfg.model._target_)
     
     # Retrieve extrinsic matrix for sweep
     extrinsic_list = cfg.camera.get("extrinsic", None)
@@ -316,7 +314,7 @@ def main(cfg: DictConfig):
             model=model,
             camera=camera,
             study_name=study_name,
-            method_name=method_name,
+            estimator_cls=estimator_cls,
             sweep_size=cfg.eval_size,
             n_trials=cfg.trials,
             extrinsic=extrinsic
@@ -330,7 +328,7 @@ def main(cfg: DictConfig):
         # Instantiate estimator dynamically via Hydra
         estimator = hydra.utils.instantiate(cfg.model)
             
-        print(f"Evaluating '{method_name}' parameters on {len(eval_indices)} test samples...")
+        print(f"Evaluating '{estimator_cls.__name__}' parameters on {len(eval_indices)} test samples...")
         print(f"Indices: {eval_indices}\n")
         
         trans_errs, rot_errs, times, failed = evaluate_pipeline(

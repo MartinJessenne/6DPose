@@ -16,7 +16,7 @@ config/
 ├── dataset/
 │   └── default.yaml          # Parquet dataset paths and file globs
 └── model/
-    ├── ppf_icp.yaml          # Default presets for PPF-ICP Estimator
+    ├── ppf.yaml              # Default presets for PPF Estimator
     └── ransac.yaml           # Default presets for RANSAC Estimator
 ```
 
@@ -38,8 +38,8 @@ You can swap presets or override parameters dynamically on the command line with
 
 ### Swap the Estimator Model Preset:
 ```bash
-# Swaps the default model (ransac) to the ppf_icp preset
-uv run inspect_pose.py model=ppf_icp
+# Swaps the default model (ransac) to the ppf preset
+uv run inspect_pose.py model=ppf
 ```
 
 ### Override Hyperparameters Dynamically:

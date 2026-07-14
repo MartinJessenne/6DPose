@@ -6,14 +6,26 @@ Welcome! This guide is written specifically for AI Coding Agents and developer t
 
 ## 1. System Architecture
 
-The project implements a 6D Pose Estimation pipeline for industrial towing carts. It has two main sections:
-1. **Front-End (YOLO Segmentation)**: Runs 2D YOLOv8 instance segmentation (`ultralytics`), crops the depth map using the predicted bounding box, and creates a masked RGB-D frame (`MaskedImageFrame` in `main.py`).
-2. **Back-End (3D Registration)**: Back-projects the depth crop into a 3D point cloud (`open3d`), estimates surface normals, transforms coordinates into the robot base frame (`base_link`), and solves the registration pose relative to the CAD mesh target using `BasePoseEstimator` subclasses.
+The project implements a 6D Pose Estimation pipeline for industrial towing carts. The pipeline consists of two main stages:
 
-### Peer Models (`BasePoseEstimator`):
-- **`RansacEstimator`** (`methods/ransac.py`): Extract FPFH feature descriptors on downsampled point clouds, run RANSAC global registration, and refine using point-to-plane ICP.
-- **`PPFICPEstimator`** (`methods/ppf_icp.py`): Training a PPF (Point Pair Feature) match database using OpenCV's `ppf_match_3d` module and refining via ICP.
-- **Refinement Helper**: Both estimators invoke `refine_pose_dual_hypothesis` (in `methods/base.py`) which computes Point-to-Plane ICP on two orientations (original and rotated 180° around the local Z-axis) to handle cart y-axis symmetry.
+1. **Front-End (2D Detection & Masking)**:
+   - Runs a 2D **YOLO26n-seg** instance segmentation model (a custom-trained nano variant with an image segmentation head from `ultralytics`) to locate the target cart and predict its class and segmentation mask.
+   - Extracts the 2D bounding box and segmentation mask for the largest cart instance.
+   - Crops both the RGB image and raw depth map using the bounding box, and blacks out the background by applying the segmentation mask.
+   - Wraps the cropped RGB, cropped depth, crop coordinates (bounding box offset), and camera model into a `MaskedImageFrame` to prevent coordinate alignment issues.
+
+2. **Back-End (3D Point Cloud Registration)**:
+   - Back-projects the masked depth crop to rebuild the 3D scene point cloud in the camera's local frame. To preserve spatial accuracy, the camera principal point is dynamically shifted based on the crop coordinates.
+   - Computes surface normals for the point cloud and orients them consistently towards the camera.
+   - Transforms the point cloud coordinates from the OpenCV camera frame to the robot base frame (`base_link`) using the camera-to-robot extrinsics matrix.
+   - Solves the 6D registration pose relative to the target CAD mesh using concrete subclasses of `BasePoseEstimator`.
+
+### Modular Sub-step Estimators (`BasePoseEstimator`)
+The estimation algorithms are designed using a Strategy pattern so that individual components (downsampling, feature extraction, voting, and registration) are modular and can be independently swapped or customized:
+- **`RansacEstimator`** (`methods/ransac.py`): Performs voxel downsampling, extracts Fast Point Feature Histograms (FPFH) descriptors on the downsampled point clouds, runs RANSAC global registration to find a coarse initial alignment, and refines it via Point-to-Plane ICP.
+- **`PPFEstimator`** (`methods/ppf.py`): Trains a Point Pair Feature (PPF) match database from the target CAD mesh using OpenCV's `ppf_match_3d` module, runs a voting-based global alignment on the scene points, and refines the pose using Point-to-Point/Plane ICP.
+- **Dual-Hypothesis ICP Refinement**: To handle the physical 180° Y-axis symmetry of the towing carts (where they look identical from the front and back), both estimators call `refine_pose_dual_hypothesis` in `methods/base.py`. This runs Point-to-Plane ICP on two initial alignments (the coarse pose and the pose rotated 180° around the cart's local Z-axis) and retains the orientation with the highest fitness score.
+
 
 ---
 
@@ -34,7 +46,11 @@ The project implements a 6D Pose Estimation pipeline for industrial towing carts
 - **Installer**: `uv` package manager (`pyproject.toml` and `uv.lock`).
 - **Python**: Python `3.12` is required.
 - **Dependency Groups**: Optional dependency group `docs` manages site generation libraries.
-- **Dependency Exclusions**: `opencv-python` conflicts with `opencv-contrib-python`. It is explicitly excluded on all platforms via a platform marker `sys_platform == 'never'` in the `tool.uv` override-dependencies block inside `pyproject.toml`. Do not reinstall `opencv-python` directly.
+- **Opencv Dependency Override**: 
+  - `opencv-contrib-python` is a complete superset of `opencv-python` and contains the extra registration modules we need (like `ppf_match_3d`). We only need `opencv-contrib-python` installed.
+  - However, third-party libraries like `ultralytics` list `opencv-python` as a direct dependency in their package metadata.
+  - To prevent `uv` from installing both (which would cause conflicting namespace files in `site-packages/cv2` and strip the contrib modules), we use the `override-dependencies` field under `[tool.uv]` in `pyproject.toml`. We override `opencv-python` with a platform marker that is never true: `"opencv-python; sys_platform == 'never'"`.
+  - This informs `uv` that `opencv-python` is not needed on any platform, successfully forcing the environment to default to `opencv-contrib-python` as the single, complete OpenCV package. Do not install `opencv-python` manually.
 
 ---
 

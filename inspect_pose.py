@@ -60,6 +60,11 @@ from main import (
     instance_detected
 )
 from methods.base import BasePoseEstimator
+from enum import Enum
+
+class ExecutionMode(Enum):
+    RANDOM = "random"
+    INDICES = "indices"
 
 
 # =====================================================================
@@ -330,8 +335,13 @@ def main(cfg: DictConfig):
     estimator = hydra.utils.instantiate(cfg.model)
     
     # Select execution mode from config
-    mode = cfg.get("mode")
-    if mode == "random":
+    mode_str = cfg.get("mode", "")
+    try:
+        mode = ExecutionMode(mode_str.lower().strip())
+    except ValueError:
+        mode = None
+
+    if mode == ExecutionMode.RANDOM:
         run_random_inspection(
             num_samples=cfg.random_samples,
             model=model,
@@ -339,7 +349,7 @@ def main(cfg: DictConfig):
             dataset=dataset,
             estimator=estimator
         )
-    elif mode == "indices":
+    elif mode == ExecutionMode.INDICES:
         run_targeted_inspection(
             indices=list(cfg.indices),
             model=model,
@@ -348,7 +358,7 @@ def main(cfg: DictConfig):
             estimator=estimator
         )
     else:
-        print("Please specify mode=random or mode=indices on the command line.")
+        print(f"Invalid mode '{mode_str}'. Please specify mode=random or mode=indices on the command line.")
         print("Example: uv run inspect_pose.py mode=random random_samples=5")
         print("Example: uv run inspect_pose.py mode=indices indices=[37,52]")
 
