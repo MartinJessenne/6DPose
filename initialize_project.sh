@@ -1,92 +1,118 @@
 #!/usr/bin/env bash
-# initialize_project.sh — 6D Pose session bootstrap (fully ephemeral)
-# Run at the start of EVERY molab session:
-#   cd /home/marimo && bash 6DPose/initialize_project.sh   (or curl | bash)
+# fetch_dataset.sh — resumable HF dataset download for molab
+# Run on a FRESH instance:  export HF_TOKEN=hf_...  &&  bash fetch_dataset.sh
 #
-# v3: nothing persists on molab, so everything is fetched fresh each session
-# into /home/marimo. Repo clone + best.pt + 29 GB dataset + uv sync.
-# uv concurrency stays capped (default is 50 concurrent downloads) and its
-# tmp/cache/venv are all local anyway now — no FUSE, no hardlink fallback.
-set -euo pipefail
+# Why this shape:
+#   molab's network path (gVisor userspace TCP) is intermittently flaky. A 49 GB
+#   single-shot download can hang forever with no error, or take the instance
+#   down. Fixing that is not a matter of finding the right env var — the fix is
+#   to make failure CHEAP: one shard at a time, hard timeout, retries, and
+#   skip-what's-already-correct. A failure costs one ~300 MB shard, not the whole
+#   run. Re-run after any crash and it picks up exactly where it stopped.
+#
+# Deliberately NOT here: any background "warm auth" download. An earlier version
+# had one; it silently pulled a second full copy of the repo into $HF_HOME and
+# raced the loop. Nothing runs in parallel with the loop.
+set -uo pipefail
 
 export HOME=/home/marimo
-PROJECT="$HOME/6DPose"
-DATASET="UItraviolet/industrial_cart"
-MODEL="UItraviolet/yolo_multicart"
-DEST="$PROJECT/dataset/data"
+REPO="UItraviolet/industrial_cart"
+DEST="$HOME/6DPose/dataset/data"
 
 export HF_HOME="$HOME/.cache/huggingface"
-export UV_CACHE_DIR="$HOME/.cache/uv"
-export UV_CONCURRENT_DOWNLOADS=8        # default 50 — keep it civil
-export UV_CONCURRENT_INSTALLS=2
-export UV_CONCURRENT_BUILDS=2
-export TMPDIR="$HOME/tmp"
-mkdir -p "$HF_HOME" "$UV_CACHE_DIR" "$TMPDIR"
-cd "$HOME"
+export HF_XET_CHUNK_CACHE_SIZE_BYTES=0   # each byte is written once; dedup cache buys nothing
+export HF_XET_NUM_CONCURRENT_RANGE_GETS=4
+export HF_HUB_DOWNLOAD_TIMEOUT=30        # fail a dead socket instead of waiting forever
+unset HF_XET_HIGH_PERFORMANCE            # documented for >=64 GB RAM; not our friend here
 
-pip install -q --upgrade huggingface_hub hf_xet --root-user-action=ignore
+MAX_WORKERS=2                            # per-shard. ~10 min / 46 GB. Do not raise.
+SHARD_TIMEOUT=300                        # wall-clock kill for a hung shard
+ATTEMPTS=3
 
-echo "===================================================="
-echo "6D Pose Session Bootstrap (ephemeral)"
-echo "===================================================="
+mkdir -p "$DEST"
 
-# ---- 0. Disk sanity: dataset (29 GB) + venv (~6 GB) + caches must all fit ----
-echo "[Disk]"
-df -h "$HOME" /tmp | sed 's/^/   /'
-avail_kb=$(df -k --output=avail "$HOME" | tail -1 | tr -d ' ')
-if [ "$avail_kb" -lt $((40 * 1024 * 1024)) ]; then   # < 40 GiB
-  echo "   WARNING: less than 40 GiB free on $HOME — dataset + env may not fit."
+# ---- Auth --------------------------------------------------------------------
+if ! hf auth whoami >/dev/null 2>&1; then
+  [ -n "${HF_TOKEN:-}" ] || { echo "FATAL: export HF_TOKEN=hf_... first (private repo)." >&2; exit 1; }
+  hf auth login --token "$HF_TOKEN" >/dev/null
 fi
+echo "[auth] $(hf auth whoami 2>/dev/null | head -1)"
 
-# ---- 1. Repo -------------------------------------------------------------------
-if [ ! -d "$PROJECT/.git" ]; then
-  echo "[Repo] Cloning..."
-  git clone https://github.com/MartinJessenne/6DPose.git "$PROJECT"
-fi
-cd "$PROJECT"
+# ---- Manifest: filename + expected size, straight from the Hub ---------------
+echo "[manifest] fetching shard list..."
+python3 - "$REPO" > /tmp/manifest.tsv <<'PY'
+import sys
+from huggingface_hub import HfApi
+info = HfApi().repo_info(sys.argv[1], repo_type="dataset", files_metadata=True)
+for s in info.siblings:
+    if s.rfilename.endswith(".parquet"):
+        print(f"{s.rfilename}\t{s.size}")
+PY
+TOTAL=$(wc -l < /tmp/manifest.tsv)
+[ "$TOTAL" -gt 0 ] || { echo "FATAL: empty manifest — auth or repo name wrong." >&2; exit 1; }
+echo "[manifest] $TOTAL parquet shards"
 
-# ---- 2. Auth --------------------------------------------------------------------
-# Token comes from the environment ONLY. Never commit it, never paste it in
-# chats/logs. Set it once per session:   export HF_TOKEN=hf_...
-if hf auth whoami >/dev/null 2>&1; then
-  echo "[HF] Authenticated."
-elif [ -n "${HF_TOKEN:-}" ]; then
-  hf auth login --token "$HF_TOKEN"
-elif [ -t 0 ]; then
-  read -rsp "Hugging Face token: " T; echo ""
-  [ -n "$T" ] || { echo "FATAL: token required (private dataset)." >&2; exit 1; }
-  hf auth login --token "$T"
-else
-  echo "FATAL: no token. Run: export HF_TOKEN=hf_...  then re-run." >&2
-  exit 1
-fi
+# ---- Sequential resumable fetch ----------------------------------------------
+START=$SECONDS
+ok=0; skipped=0; retried=0; failed=0
 
-# ---- 3. YOLO weights --------------------------------------------------------------
-if [ ! -f best.pt ]; then
-  echo "[YOLO] Downloading best.pt..."
-  hf download "$MODEL" runs/segment/train-2/weights/best.pt --local-dir /tmp/w
-  mv /tmp/w/runs/segment/train-2/weights/best.pt best.pt
-  rm -rf /tmp/w
-fi
+while IFS=$'\t' read -r f size; do
+  # Skip only if the local file is EXACTLY the right size. A plain -s test would
+  # happily accept a truncated file left behind by a stalled download.
+  if [ -f "$DEST/$f" ] && [ "$(stat -c %s "$DEST/$f" 2>/dev/null)" = "$size" ]; then
+    skipped=$((skipped + 1)); continue
+  fi
+  rm -f "$DEST/$f"   # drop any partial before refetching
 
-# ---- 4. Dataset -----------------------------------------------------------------
-if [ -d "$DEST" ] && [ "$(find "$DEST" -name '*.parquet' | wc -l)" -ge 159 ]; then
-  echo "[Dataset] Already present ($(du -sh "$DEST" | cut -f1)). Skipping."
-else
-  echo "[Dataset] Downloading (~29 GB)..."
-  mkdir -p "$DEST"
-  time hf download "$DATASET" --repo-type dataset \
-      --include "*.parquet" --local-dir "$DEST" --max-workers 16
-  echo "[Dataset] $(du -sh "$DEST" | cut -f1) in $DEST"
-fi
+  got=0
+  for attempt in $(seq 1 $ATTEMPTS); do
+    if timeout "$SHARD_TIMEOUT" hf download "$REPO" "$f" \
+         --repo-type dataset --local-dir "$DEST" --max-workers "$MAX_WORKERS" \
+         >/dev/null 2>&1; then
+      got=1; break
+    fi
+    retried=$((retried + 1))
+    echo "$(date +%T)  retry $attempt/$ATTEMPTS  $f"
+    sleep 5
+  done
 
-# ---- 5. Python env ----------------------------------------------------------------
-echo "[Env] Pre-sync resources:"
-free -h | sed 's/^/   /'
-df -h "$HOME" | sed 's/^/   /'
+  if [ "$got" = 1 ]; then
+    ok=$((ok + 1))
+    printf '%s  ok  [%3d/%3d]  %s  (%s)\n' \
+      "$(date +%T)" "$((ok + skipped))" "$TOTAL" "$f" "$(du -sh "$DEST" 2>/dev/null | cut -f1)"
+  else
+    failed=$((failed + 1))
+    echo "$(date +%T)  FAILED after $ATTEMPTS attempts: $f"
+  fi
+done < /tmp/manifest.tsv
 
-uv python install -q 3.12
-uv sync -p 3.12
+ELAPSED=$((SECONDS - START))
+
+# ---- Verify: every shard byte-exact against the Hub --------------------------
+echo ""
+echo "[verify] checking all $TOTAL shards against Hub sizes..."
+bad=0
+while IFS=$'\t' read -r f size; do
+  local_size=$(stat -c %s "$DEST/$f" 2>/dev/null || echo -1)
+  if [ "$local_size" != "$size" ]; then
+    bad=$((bad + 1)); echo "   MISMATCH  $f  local=$local_size  remote=$size"
+  fi
+done < /tmp/manifest.tsv
 
 echo ""
-echo "Ready:  cd $PROJECT && uv run inspect_pose.py --random 5 --method ransac"
+echo "=================================================="
+printf 'downloaded : %d\nskipped    : %d\nretries    : %d\nfailed     : %d\n' \
+  "$ok" "$skipped" "$retried" "$failed"
+printf 'wall time  : %dm %ds\non disk    : %s\n' \
+  "$((ELAPSED / 60))" "$((ELAPSED % 60))" "$(du -sh "$DEST" | cut -f1)"
+echo "=================================================="
+
+if [ "$bad" -eq 0 ] && [ "$failed" -eq 0 ]; then
+  echo "OK — all $TOTAL shards present and byte-exact."
+  # $HF_HOME/hub would be a second full copy; --local-dir already wrote the real files.
+  rm -rf "$HF_HOME/hub"
+  exit 0
+else
+  echo "INCOMPLETE — $bad mismatched, $failed failed. Just re-run this script; it resumes."
+  exit 1
+fi
