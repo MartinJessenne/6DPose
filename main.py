@@ -257,7 +257,7 @@ def compute_bbox_area(bbox: torch.Tensor) -> float:
     return float(bbox[-1] * bbox[-2])
 
 
-def select_target_detection(result) -> tuple[str, list[int], torch.Tensor]:
+def select_target_detection(result: list) -> tuple[str, list[int], torch.Tensor]:
     """
     Selects the YOLO prediction with the largest bounding box area from the result.
     This is the initial opinionated choice we make. Later on, we might compose that with a lookup_cart variable, e.g. if the model detects a picanol and a colruyt cart, while lookup_cart = picanol, 
@@ -402,7 +402,7 @@ def crop_and_mask_inputs(
     )
 
 
-def instance_detected(result) -> bool:
+def instance_detected(result: list) -> bool:
     """
     Checks if any segmented instances were detected by the YOLO model in the inference result.
     
@@ -515,7 +515,7 @@ def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int, T_robot_c
 def process_and_reconstruct(
     img: np.ndarray,
     depth_bytes: bytes,
-    result,
+    result: list,
     camera: Camera,
     depth_trunc: float = Config.DEFAULT_DEPTH_TRUNC
 ) -> tuple[str, o3d.geometry.PointCloud]:

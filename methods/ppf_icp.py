@@ -1,3 +1,4 @@
+from typing import Any
 import numpy as np
 import cv2
 import open3d as o3d
@@ -85,7 +86,7 @@ class PPFICPEstimator(BasePoseEstimator):
         self,
         pcd: o3d.geometry.PointCloud,
         cad_mesh: o3d.geometry.TriangleMesh,
-        **kwargs
+        **kwargs: Any
     ) -> np.ndarray | None:
         """
         Estimates the 6D pose of the CAD model relative to the point cloud.
