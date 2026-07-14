@@ -44,7 +44,11 @@ def main():
     # Check if we already have parquet files locally
     has_parquet = False
     if os.path.exists(local_dataset_dir):
-        has_parquet = any(f.endswith('.parquet') for f in os.listdir(local_dataset_dir))
+        has_parquet = any(
+            f.endswith('.parquet')
+            for root, _, files in os.walk(local_dataset_dir)
+            for f in files
+        )
 
     if has_parquet:
         print(f"\n[Dataset] Parquet files already exist in '{local_dataset_dir}'. Skipping download.")
@@ -65,7 +69,7 @@ def main():
             print("Please ensure your Hugging Face token has access to the private dataset repository.")
 
     print("\nInitialization finished. You can now run the project using:")
-    print("  uv run --python 3.12 inspect_pose.py --random 5 --method ransac")
+    print("  uv run inspect_pose.py mode=random random_samples=5 model=ransac")
 
 if __name__ == "__main__":
     main()
