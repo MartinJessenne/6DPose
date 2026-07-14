@@ -44,10 +44,13 @@ class RansacEstimator(BasePoseEstimator):
         Args:
             params (RansacParams, optional): Dedicated parameters. If None, uses defaults.
         """
-        if isinstance(params, dict):
-            self.params = RansacParams(**params)
+        if params is not None:
+            if not isinstance(params, RansacParams):
+                self.params = RansacParams(**dict(params))
+            else:
+                self.params = params
         else:
-            self.params = params if params is not None else RansacParams()
+            self.params = RansacParams()
             
         if extrinsic is not None:
             self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
