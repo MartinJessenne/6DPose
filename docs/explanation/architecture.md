@@ -8,7 +8,7 @@ Below is the proposed outline and questions to address:
 
 ## Proposed Outline
 1. **Pipeline Architecture**: Overview of how the YOLO detection front-end feeds cropped frame properties to `MaskedImageFrame` and Open3D point cloud generation.
-2. **Component Modularity**: Design decisions separating estimators (`RansacEstimator`, `PPFICPEstimator`) using the Strategy and Factory patterns.
+2. **Component Modularity**: Design decisions separating estimators (`RansacEstimator`, `PPFEstimator`) using the Strategy and Factory patterns.
 3. **Dataflow Representation**: How coordinate-system safety is enforced when cropping images and shifting the principal point in camera intrinsics.
 
 ---

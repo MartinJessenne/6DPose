@@ -1,7 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import numpy as np
 import open3d as o3d
+
+if TYPE_CHECKING:
+    import optuna
 
 class BasePoseEstimator(ABC):
     """Abstract base class representing a 6D Pose Estimation method."""
@@ -25,6 +28,24 @@ class BasePoseEstimator(ABC):
             np.ndarray: 4x4 homogeneous transformation matrix, or None if estimation fails.
         """
         pass
+
+    @classmethod
+    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
+        """
+        Suggests hyperparameters for this matching method using an Optuna trial.
+
+        Args:
+            trial: The active Optuna trial.
+
+        Returns:
+            dict[str, Any]: Suggested parameter dictionary.
+
+        Raises:
+            NotImplementedError: If not overridden by the subclass.
+        """
+        raise NotImplementedError(
+            f"Estimator class '{cls.__name__}' does not implement 'suggest_params' for parameter sweeps."
+        )
 
 
 def prepare_scene_point_cloud(

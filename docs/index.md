@@ -54,7 +54,7 @@ uv run inspect_pose.py mode=random random_samples=2 model=ransac
 ### 2. Run Pipeline Benchmarks
 Evaluate the PPF-ICP pose estimator performance metrics (Translation/Rotation error, execution speed, match success rate) over 5 validation samples:
 ```bash
-uv run benchmark.py model=ppf_icp eval_size=5
+uv run benchmark.py model=ppf eval_size=5
 ```
 
 ### 3. Run Hyperparameter Tuning

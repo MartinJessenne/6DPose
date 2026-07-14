@@ -74,8 +74,8 @@ from methods.my_new_model import MyNewModelEstimator
 
 def get_estimator(method_name: str, **kwargs) -> BasePoseEstimator:
     name_clean = method_name.lower().strip()
-    if name_clean in ("ppf", "ppf_icp"):
-        return PPFICPEstimator(**kwargs)
+    if name_clean == "ppf":
+        return PPFEstimator(**kwargs)
     elif name_clean == "ransac":
         return RansacEstimator(**kwargs)
     elif name_clean == "my_new_model":

@@ -1,4 +1,4 @@
-_target_: methods.ppf_icp.PPFICPEstimator
+_target_: methods.ppf.PPFEstimator
 params:
   ppf_sampling_step: 0.1
   ppf_distance_step: 0.02

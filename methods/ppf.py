@@ -1,8 +1,11 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import numpy as np
 import cv2
 import open3d as o3d
 from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
+
+if TYPE_CHECKING:
+    import optuna
 
 
 
@@ -10,8 +13,8 @@ from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_po
 # =====================================================================
 # 1. PARAMETER CLASS
 # =====================================================================
-class PPFICPParams:
-    """Hyperparameters specific to the PPF + ICP matching method."""
+class PPFParams:
+    """Hyperparameters specific to the PPF matching method."""
     def __init__(
         self,
         ppf_sampling_step: float = 0.1,
@@ -57,23 +60,23 @@ def o3d_to_ppf_format(pcd: o3d.geometry.PointCloud) -> np.ndarray:
 # =====================================================================
 # 3. ESTIMATOR CLASS IMPLEMENTATION
 # =====================================================================
-class PPFICPEstimator(BasePoseEstimator):
+class PPFEstimator(BasePoseEstimator):
     """6D Pose Estimator using Point Pair Features (PPF) and Dual ICP refinement."""
 
-    def __init__(self, params: PPFICPParams | dict = None, extrinsic: list | np.ndarray = None):
+    def __init__(self, params: PPFParams | dict = None, extrinsic: list | np.ndarray = None):
         """
-        Initializes the PPF + ICP Estimator with matching parameters.
+        Initializes the PPF Estimator with matching parameters.
         
         Args:
-            params (PPFICPParams, optional): Dedicated parameters. If None, uses defaults.
+            params (PPFParams, optional): Dedicated parameters. If None, uses defaults.
         """
         if params is not None:
-            if not isinstance(params, PPFICPParams):
-                self.params = PPFICPParams(**dict(params))
+            if not isinstance(params, PPFParams):
+                self.params = PPFParams(**dict(params))
             else:
                 self.params = params
         else:
-            self.params = PPFICPParams()
+            self.params = PPFParams()
             
         if extrinsic is not None:
             self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
@@ -84,6 +87,18 @@ class PPFICPEstimator(BasePoseEstimator):
                 [-0.866, 0.0, 0.5, 0.304],
                 [0.0, 0.0,  0.0,   1.0  ]
             ])
+
+    @classmethod
+    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
+        """Suggests parameters for PPF + ICP registration."""
+        return {
+            "ppf_sampling_step": trial.suggest_float("ppf_sampling_step", 0.02, 0.10, step=0.01),
+            "ppf_distance_step": trial.suggest_float("ppf_distance_step", 0.02, 0.10, step=0.01),
+            "ppf_match_threshold": trial.suggest_float("ppf_match_threshold", 0.02, 0.10, step=0.01),
+            "ppf_match_tolerance": trial.suggest_float("ppf_match_tolerance", 0.01, 0.08, step=0.01),
+            "icp_max_correspondence_distance": trial.suggest_float("icp_max_correspondence_distance", 0.02, 0.20),
+            "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10)
+        }
 
     def estimate_pose(
         self,

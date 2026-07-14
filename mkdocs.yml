@@ -42,4 +42,4 @@ nav:
     - Core Pipeline (main): reference/main.md
     - Base Estimators (base): reference/base.md
     - RANSAC Estimator: reference/ransac.md
-    - PPF-ICP Estimator: reference/ppf_icp.md
+    - PPF Estimator: reference/ppf.md

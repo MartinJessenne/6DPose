@@ -1,6 +1,6 @@
 # Tutorial: Comparing RANSAC and PPF Pose Estimators
 
-This tutorial demonstrates how to run both `RansacEstimator` and `PPFICPEstimator` side-by-side on the same input observation to compare their execution speed and accuracy.
+This tutorial demonstrates how to run both `RansacEstimator` and `PPFEstimator` side-by-side on the same input observation to compare their execution speed and accuracy.
 
 ---
 
@@ -14,7 +14,7 @@ import numpy as np
 import open3d as o3d
 from main import Camera, load_hf_model, load_parquet_dataset, process_and_reconstruct, compute_ground_truth_pose
 from methods.ransac import RansacEstimator
-from methods.ppf_icp import PPFICPEstimator
+from methods.ppf import PPFEstimator
 from benchmark import compute_translation_error, compute_rotation_error
 
 # 1. Load assets
@@ -52,8 +52,8 @@ Create both estimators, passing the camera extrinsic matrix during initializatio
 # Initialize RANSAC estimator
 ransac_estimator = RansacEstimator(extrinsic=T_robot_camera)
 
-# Initialize PPF-ICP estimator
-ppf_estimator = PPFICPEstimator(extrinsic=T_robot_camera)
+# Initialize PPF estimator
+ppf_estimator = PPFEstimator(extrinsic=T_robot_camera)
 ```
 
 ---

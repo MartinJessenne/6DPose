@@ -22,7 +22,7 @@ uv run benchmark.py model=ransac sweep=true
 ### Config Customizations:
 You can specify the number of Optuna trials, the size of the validation evaluation slice per trial, and a unique name for the Optuna study:
 ```bash
-uv run benchmark.py model=ppf_icp sweep=true trials=50 eval_size=30 name="PPF_Tuning"
+uv run benchmark.py model=ppf sweep=true trials=50 eval_size=30 name="PPF_Tuning"
 ```
 
 ---

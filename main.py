@@ -83,7 +83,7 @@ from ultralytics import YOLO
 #          |                                                   |
 #          v                                                   v
 #   +---------------------------------+                 +---------------------------------+
-#   |         PPFICPEstimator         |                 |         RansacEstimator         |
+#   |          PPFEstimator           |                 |         RansacEstimator         |
 #   |                                 |                 |                                 |
 #   | 1. Normal Estimation            |                 | 1. Normal Estimation            |
 #   | 2. Transform to Robot Frame     |                 | 2. Transform to Robot Frame     |
