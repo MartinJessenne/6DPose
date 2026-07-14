@@ -1,0 +1,10 @@
+# @package _global_
+depth_trunc: 6.2
+
+model:
+  _target_: methods.ransac.RansacEstimator
+  params:
+    voxel_size: 0.08
+    icp_max_correspondence_distance: 0.1200659534
+    icp_max_iterations: 90
+  extrinsic: ${camera.extrinsic}

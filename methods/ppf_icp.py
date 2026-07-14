@@ -67,10 +67,13 @@ class PPFICPEstimator(BasePoseEstimator):
         Args:
             params (PPFICPParams, optional): Dedicated parameters. If None, uses defaults.
         """
-        if isinstance(params, dict):
-            self.params = PPFICPParams(**params)
+        if params is not None:
+            if not isinstance(params, PPFICPParams):
+                self.params = PPFICPParams(**dict(params))
+            else:
+                self.params = params
         else:
-            self.params = params if params is not None else PPFICPParams()
+            self.params = PPFICPParams()
             
         if extrinsic is not None:
             self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
