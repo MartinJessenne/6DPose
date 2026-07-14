@@ -181,7 +181,7 @@ class Config:
 # =====================================================================
 # 2. DATASET AND MODEL LIFECYCLE HELPERS
 # =====================================================================
-def load_parquet_dataset() -> Dataset:
+def load_parquet_dataset(dataset_path: str = None, test_glob: str = None) -> Dataset:
     """
     Loads the parquet test dataset split directly in Map-style format (non-streaming).
     
@@ -193,17 +193,19 @@ def load_parquet_dataset() -> Dataset:
         >>> first_sample = dataset[0]
         >>> print(first_sample.keys())
     """
+    path = dataset_path if dataset_path is not None else Config.DATASET_PATH
+    glob_pattern = test_glob if test_glob is not None else Config.TEST_PARQUET_GLOB
     dataset = load_dataset(
-        Config.DATASET_PATH,
+        path,
         data_files={
-            "test": Config.TEST_PARQUET_GLOB
+            "test": glob_pattern
         },
         streaming=False,
     )
     return dataset["test"]
 
 
-def load_hf_model() -> YOLO:
+def load_hf_model(local_model_path: str = None, repo_id: str = None, filename: str = None) -> YOLO:
     """
     Loads the YOLO segmentation model from a local file. If the file is not present,
     it downloads it from the Hugging Face Hub, saves it locally, and then loads it.
@@ -215,12 +217,14 @@ def load_hf_model() -> YOLO:
         >>> model = load_hf_model()
         >>> result = model("test_image.png")
     """
-    local_path = Config.LOCAL_MODEL_PATH
+    local_path = local_model_path if local_model_path is not None else Config.LOCAL_MODEL_PATH
+    repo = repo_id if repo_id is not None else Config.HF_REPO
+    file = filename if filename is not None else Config.HF_FILE
     # Check if the YOLO model exists locally. If not, download it from Hugging Face
     # and copy it to the local project path.
     if not os.path.exists(local_path):
         print(f"Model not found locally at {local_path}. Downloading from Hugging Face...")
-        cached_path = hf_hub_download(Config.HF_REPO, Config.HF_FILE)
+        cached_path = hf_hub_download(repo, file)
         # shutil is a standard Python library used here to copy the cached model file to the local directory
         shutil.copy(cached_path, local_path) 
         print(f"Model saved locally to {local_path}")
@@ -477,7 +481,7 @@ def point_cloud_processing(
 # =====================================================================
 # 5. COORDINATE TRANSFORMS AND 6D POSE ESTIMATION
 # =====================================================================
-def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int) -> np.ndarray:
+def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int, T_robot_camera: np.ndarray = None) -> np.ndarray:
     """
     Retrieves the ground truth cart pose, maps it from the Isaac Sim arbitrary world frame 
     to the camera coordinate frame (adjusting for USD to OpenCV conventions), and projects 
@@ -485,6 +489,7 @@ def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int) -> np.nda
     
     Args:
         sample_idx (int): The index of the sample.
+        T_robot_camera (np.ndarray, optional): 4x4 extrinsic transform from camera to robot base link. If None, falls back to default.
         
     Returns:
         np.ndarray: A 4x4 homogeneous transformation matrix in the robot's base frame.
@@ -500,7 +505,8 @@ def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int) -> np.nda
     T_usd_to_cv = np.diag([1, -1, -1, 1])
     
     # 3. Compute final coordinate multiplication chain
-    return Config.T_ROBOT_CAMERA @ T_usd_to_cv @ T_world_camera @ T_world_cart
+    extrinsic = T_robot_camera if T_robot_camera is not None else Config.T_ROBOT_CAMERA
+    return extrinsic @ T_usd_to_cv @ T_world_camera @ T_world_cart
 
 
 # =====================================================================

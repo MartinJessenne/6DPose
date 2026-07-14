@@ -1,0 +1,7 @@
+_target_: methods.ransac.RansacEstimator
+params:
+  voxel_size: 0.06
+  ransac_max_iterations: 100000
+  icp_max_correspondence_distance: 0.15
+  icp_max_iterations: 100
+extrinsic: ${camera.extrinsic}
