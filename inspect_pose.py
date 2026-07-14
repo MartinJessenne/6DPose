@@ -42,12 +42,13 @@ CLI Arguments:
 
 
 import os
-import argparse
 import shutil
 import numpy as np
 import cv2
 import copy
 import trimesh
+import hydra
+from omegaconf import DictConfig
 
 import open3d as o3d
 from datasets import Dataset
@@ -307,72 +308,49 @@ def run_targeted_inspection(
 # =====================================================================
 # 3. CLI ARGUMENT PARSER AND MAIN ENTRY POINT
 # =====================================================================
-def main():
-    parser = argparse.ArgumentParser(description="Unified 6D Pose Validation & Inspection Utility")
-    
-    # Establish mutually exclusive execution modes (the user must select exactly one: --random OR --indices).
-    # --method is added directly to the parser (not the group), so it is a common argument usable by both modes.
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--random", 
-        type=int, 
-        nargs="?",
-        const=10,
-        help="Run random validation mode, optionally specifying the number of samples (default: 10)"
-    )
-    group.add_argument(
-        "--indices", 
-        type=int, 
-        nargs="+", 
-        help="Run targeted debugging mode, exporting PNG, PLY, and GLB files for specific sample indices"
-    )
-    parser.add_argument(
-        "--method",
-        type=str,
-        default="ppf",
-        choices=["ppf", "ppf_icp", "ransac"],
-        help="The 6D pose estimation method to use (default: 'ppf')"
-    )
-
-    
-    args = parser.parse_args()
-    
+@hydra.main(config_path="config", config_name="config", version_base=None)
+def main(cfg: DictConfig):
     # Load pipeline assets
     print("Loading pipeline assets...")
-    model = load_hf_model()
-    camera = Camera(
-        fx=Config.CAMERA_FX, fy=Config.CAMERA_FY,
-        cx=Config.CAMERA_CX, cy=Config.CAMERA_CY
+    model = load_hf_model(
+        local_model_path=cfg.yolo.local_path,
+        repo_id=cfg.yolo.repo,
+        filename=cfg.yolo.file
     )
-    dataset = load_parquet_dataset()
+    camera = Camera(
+        fx=cfg.camera.fx, fy=cfg.camera.fy,
+        cx=cfg.camera.cx, cy=cfg.camera.cy
+    )
+    dataset = load_parquet_dataset(
+        dataset_path=cfg.dataset.path,
+        test_glob=cfg.dataset.test_glob
+    )
     
-    # Instantiate chosen estimator and parameters
-    from methods import get_estimator
-    if args.method in ("ppf", "ppf_icp"):
-        from methods import PPFICPParams
-        method_params = PPFICPParams()
-        estimator = get_estimator("ppf", params=method_params)
-    elif args.method == "ransac":
-        from methods import RansacParams
-        method_params = RansacParams()
-        estimator = get_estimator("ransac", params=method_params)
+    # Instantiate chosen estimator dynamically via Hydra
+    estimator = hydra.utils.instantiate(cfg.model)
     
-    if args.random is not None:
+    # Select execution mode from config
+    mode = cfg.get("mode")
+    if mode == "random":
         run_random_inspection(
-            num_samples=args.random,
+            num_samples=cfg.random_samples,
             model=model,
             camera=camera,
             dataset=dataset,
             estimator=estimator
         )
-    elif args.indices is not None:
+    elif mode == "indices":
         run_targeted_inspection(
-            indices=args.indices,
+            indices=list(cfg.indices),
             model=model,
             camera=camera,
             dataset=dataset,
             estimator=estimator
         )
+    else:
+        print("Please specify mode=random or mode=indices on the command line.")
+        print("Example: uv run inspect_pose.py mode=random random_samples=5")
+        print("Example: uv run inspect_pose.py mode=indices indices=[37,52]")
 
 if __name__ == "__main__":
     main()

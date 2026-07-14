@@ -38,13 +38,14 @@ CLI Arguments:
 """
 
 import os
-import argparse
 import time
 
 import numpy as np
 import torch
 import open3d as o3d
 import optuna
+import hydra
+from omegaconf import DictConfig
 from datasets import Dataset
 
 # Import Config, classes, and helper functions from main.py
@@ -167,7 +168,8 @@ def evaluate_pipeline(
         elapsed_time = time.time() - start_time
             
         # 4. Calculate Ground Truth pose and compare
-        T_ground_truth = compute_ground_truth_pose(dataset, sample_idx)
+        extrinsic = getattr(estimator, "extrinsic", None)
+        T_ground_truth = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=extrinsic)
         
         err_trans = compute_translation_error(T_final, T_ground_truth)
         err_rot = compute_rotation_error(T_final, T_ground_truth)
@@ -182,7 +184,7 @@ def evaluate_pipeline(
 # =====================================================================
 # 3. OPTUNA SWEEP STUDY (MULTI-OBJECTIVE OPTIMIZATION)
 # =====================================================================
-def run_parameter_sweep(dataset, model, camera, study_name, method_name: str, sweep_size: int, n_trials: int):
+def run_parameter_sweep(dataset, model, camera, study_name, method_name: str, sweep_size: int, n_trials: int, extrinsic: np.ndarray = None):
     """
     Launches a Multi-Objective Bayesian Optimization sweep using Optuna
     to find the Pareto Front of optimal accuracy vs. speed trade-offs.
@@ -214,7 +216,7 @@ def run_parameter_sweep(dataset, model, camera, study_name, method_name: str, sw
                 icp_max_correspondence_distance=icp_max_correspondence_distance,
                 icp_max_iterations=icp_max_iterations
             )
-            estimator = PPFICPEstimator(params=params)
+            estimator = PPFICPEstimator(params=params, extrinsic=extrinsic)
             
         elif method_name == "ransac":
             voxel_size = trial.suggest_float("voxel_size", 0.02, 0.10, step=0.01)
@@ -227,7 +229,7 @@ def run_parameter_sweep(dataset, model, camera, study_name, method_name: str, sw
                 icp_max_correspondence_distance=icp_max_correspondence_distance,
                 icp_max_iterations=icp_max_iterations
             )
-            estimator = RansacEstimator(params=params)
+            estimator = RansacEstimator(params=params, extrinsic=extrinsic)
             
         else:
             raise ValueError(f"Unknown method for sweep parameters: '{method_name}'")
@@ -281,63 +283,58 @@ def run_parameter_sweep(dataset, model, camera, study_name, method_name: str, sw
 # =====================================================================
 # 4. CLI ENTRY POINT
 # =====================================================================
-def main():
-    parser = argparse.ArgumentParser(description="6D Pose Estimation Benchmark & Parameter Sweep Utility")
-    parser.add_argument("--name", type=str, help="Sweep's name")
-    parser.add_argument("--sweep", action="store_true", help="Run a hyperparameter sweep using Optuna")
-    parser.add_argument("--trials", type=int, default=30, help="Number of trials for the parameter sweep")
-    parser.add_argument("--eval-size", type=int, default=20, help="Number of samples to evaluate on")
-    parser.add_argument(
-        "--method",
-        type=str,
-        default="ppf",
-        choices=["ppf", "ppf_icp", "ransac"],
-        help="The 6D pose estimation method to benchmark (default: 'ppf')"
-    )
-    args = parser.parse_args()
-    
+@hydra.main(config_path="config", config_name="config", version_base=None)
+def main(cfg: DictConfig):
     # Load model, camera, and dataset
     print("Loading pipeline assets...")
-    model = load_hf_model()
-    camera = Camera(
-        fx=Config.CAMERA_FX, fy=Config.CAMERA_FY,
-        cx=Config.CAMERA_CX, cy=Config.CAMERA_CY
+    model = load_hf_model(
+        local_model_path=cfg.yolo.local_path,
+        repo_id=cfg.yolo.repo,
+        filename=cfg.yolo.file
     )
-    dataset = load_parquet_dataset()
+    camera = Camera(
+        fx=cfg.camera.fx, fy=cfg.camera.fy,
+        cx=cfg.camera.cx, cy=cfg.camera.cy
+    )
+    dataset = load_parquet_dataset(
+        dataset_path=cfg.dataset.path,
+        test_glob=cfg.dataset.test_glob
+    )
     
-    if args.sweep:
-        study_name = args.name if args.name else "6DPoseOptimization"
+    # Extract method name from model target configuration
+    # E.g. methods.ransac.RansacEstimator -> "ransac"
+    method_name = "ransac" if "ransac" in cfg.model._target_.lower() else "ppf_icp"
+    
+    # Retrieve extrinsic matrix for sweep
+    extrinsic_list = cfg.camera.get("extrinsic", None)
+    extrinsic = np.array(extrinsic_list, dtype=np.float64) if extrinsic_list is not None else None
+    
+    if cfg.get("sweep", False):
+        study_name = cfg.get("name", "6DPoseOptimization")
         run_parameter_sweep(
             dataset=dataset,
             model=model,
             camera=camera,
             study_name=study_name,
-            method_name=args.method,
-            sweep_size=args.eval_size,
-            n_trials=args.trials
+            method_name=method_name,
+            sweep_size=cfg.eval_size,
+            n_trials=cfg.trials,
+            extrinsic=extrinsic
         )
 
     else:
         # Default Evaluation mode
         total_samples = len(dataset)
-        eval_indices = np.random.choice(total_samples, min(args.eval_size, total_samples), replace=False)
+        eval_indices = np.random.choice(total_samples, min(cfg.eval_size, total_samples), replace=False)
         
-        # Initialize estimator based on selected method
-        from methods import get_estimator
-        if args.method in ("ppf", "ppf_icp"):
-            from methods import PPFICPParams
-            default_params = PPFICPParams()
-            estimator = get_estimator("ppf", params=default_params)
-        elif args.method == "ransac":
-            from methods import RansacParams
-            default_params = RansacParams()
-            estimator = get_estimator("ransac", params=default_params)
+        # Instantiate estimator dynamically via Hydra
+        estimator = hydra.utils.instantiate(cfg.model)
             
-        print(f"Evaluating '{args.method}' parameters on {len(eval_indices)} test samples...")
+        print(f"Evaluating '{method_name}' parameters on {len(eval_indices)} test samples...")
         print(f"Indices: {eval_indices}\n")
         
         trans_errs, rot_errs, times, failed = evaluate_pipeline(
-            dataset, model, camera, estimator, eval_indices
+            dataset, model, camera, estimator, eval_indices, depth_trunc=cfg.depth_trunc
         )
         
         successful = len(trans_errs)

@@ -24,3 +24,5 @@ debug_yolo_checks/
 *.db
 
 *debug*
+outputs/
+multirun/

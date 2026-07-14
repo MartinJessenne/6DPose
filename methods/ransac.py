@@ -36,14 +36,27 @@ class RansacParams:
 class RansacEstimator(BasePoseEstimator):
     """6D Pose Estimator using FPFH features, RANSAC Global Registration, and Dual ICP refinement."""
 
-    def __init__(self, params: RansacParams = None):
+    def __init__(self, params: RansacParams | dict = None, extrinsic: list | np.ndarray = None):
         """
         Initializes the RANSAC + ICP Estimator with matching parameters.
         
         Args:
             params (RansacParams, optional): Dedicated parameters. If None, uses defaults.
         """
-        self.params = params if params is not None else RansacParams()
+        if isinstance(params, dict):
+            self.params = RansacParams(**params)
+        else:
+            self.params = params if params is not None else RansacParams()
+            
+        if extrinsic is not None:
+            self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
+        else:
+            self.extrinsic = np.array([
+                [0.5, 0.0,  0.866, 0.439],
+                [0.0, 1.0, -0.0,   0.0  ],
+                [-0.866, 0.0, 0.5, 0.304],
+                [0.0, 0.0,  0.0,   1.0  ]
+            ])
 
     def estimate_pose(
         self,
@@ -63,8 +76,7 @@ class RansacEstimator(BasePoseEstimator):
                         or None if registration fails.
         """
         # Prepare scene point cloud using factored-out utility function
-        from main import Config
-        pcd = prepare_scene_point_cloud(pcd, Config.T_ROBOT_CAMERA)
+        pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
 
         # Prepare CAD model by computing vertex normals and sampling points
         cad_mesh.compute_vertex_normals()

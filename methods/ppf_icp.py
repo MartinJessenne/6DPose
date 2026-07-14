@@ -59,14 +59,27 @@ def o3d_to_ppf_format(pcd: o3d.geometry.PointCloud) -> np.ndarray:
 class PPFICPEstimator(BasePoseEstimator):
     """6D Pose Estimator using Point Pair Features (PPF) and Dual ICP refinement."""
 
-    def __init__(self, params: PPFICPParams = None):
+    def __init__(self, params: PPFICPParams | dict = None, extrinsic: list | np.ndarray = None):
         """
         Initializes the PPF + ICP Estimator with matching parameters.
         
         Args:
             params (PPFICPParams, optional): Dedicated parameters. If None, uses defaults.
         """
-        self.params = params if params is not None else PPFICPParams()
+        if isinstance(params, dict):
+            self.params = PPFICPParams(**params)
+        else:
+            self.params = params if params is not None else PPFICPParams()
+            
+        if extrinsic is not None:
+            self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
+        else:
+            self.extrinsic = np.array([
+                [0.5, 0.0,  0.866, 0.439],
+                [0.0, 1.0, -0.0,   0.0  ],
+                [-0.866, 0.0, 0.5, 0.304],
+                [0.0, 0.0,  0.0,   1.0  ]
+            ])
 
     def estimate_pose(
         self,
@@ -86,8 +99,7 @@ class PPFICPEstimator(BasePoseEstimator):
                         or None if registration fails.
         """
         # Prepare scene point cloud using factored-out utility function
-        from main import Config
-        pcd = prepare_scene_point_cloud(pcd, Config.T_ROBOT_CAMERA)
+        pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
 
         # Prepare CAD model
         cad_mesh.compute_vertex_normals()

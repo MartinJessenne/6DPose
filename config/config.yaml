@@ -1,0 +1,22 @@
+defaults:
+  - model: ppf_icp
+  - dataset: default
+  - camera: default
+  - _self_
+
+yolo:
+  repo: "UItraviolet/yolo_multicart"
+  file: "runs/segment/train-2/weights/best.pt"
+  local_path: "best.pt"
+
+depth_trunc: 3.0
+output_dir: "debug_output/"
+
+# Runner / CLI parameters
+mode: null
+random_samples: 10
+indices: []
+eval_size: 20
+sweep: false
+trials: 30
+name: "Sweep"
