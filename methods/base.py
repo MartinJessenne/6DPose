@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Any
 import numpy as np
 import open3d as o3d
 
@@ -10,7 +11,7 @@ class BasePoseEstimator(ABC):
         self,
         pcd: o3d.geometry.PointCloud,
         cad_mesh: o3d.geometry.TriangleMesh,
-        **kwargs
+        **kwargs: Any
     ) -> np.ndarray | None:
         """
         Estimates the 6D pose of the CAD model relative to the point cloud.

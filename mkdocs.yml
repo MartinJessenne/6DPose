@@ -1,0 +1,44 @@
+site_name: 6DPose Project Documentation
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: teal
+      accent: cyan
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            show_source: true
+            docstring_style: google
+
+nav:
+  - Home: index.md
+  - Tutorials:
+    - Overview: tutorials/index.md
+    - Visualizing the 3D Pipeline: tutorials/01_pose_estimation.md
+    - Comparing RANSAC vs PPF: tutorials/02_method_comparison.md
+  - How-to Guides:
+    - Overview: how-to/index.md
+    - Add a New Model: how-to/add_estimator.md
+    - Run Parameter Sweeps: how-to/run_sweeps.md
+  - Explanation:
+    - Overview: explanation/index.md
+    - System Architecture: explanation/architecture.md
+    - Coordinate Frames & Math: explanation/coordinate_frames.md
+    - Pipeline Symmetries & Sinks: explanation/limitations.md
+  - API Reference:
+    - Overview: reference/index.md
+    - Core Pipeline (main): reference/main.md
+    - Base Estimators (base): reference/base.md
+    - RANSAC Estimator: reference/ransac.md
+    - PPF-ICP Estimator: reference/ppf_icp.md
