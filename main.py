@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import shutil
 import copy
@@ -153,9 +154,9 @@ class Config:
     
     # Dataset and Output Settings
     DATASET_PATH = "parquet"
-    TRAIN_PARQUET_GLOB = "dataset/data/train-*-of-00127.parquet"
-    VAL_PARQUET_GLOB = "dataset/data/validation-*-of-00016.parquet"
-    TEST_PARQUET_GLOB = "dataset/data/test-*-of-00016.parquet"
+    TRAIN_PARQUET_GLOB = "dataset/data/data/train-*-of-00127.parquet"
+    VAL_PARQUET_GLOB = "dataset/data/data/validation-*-of-00016.parquet"
+    TEST_PARQUET_GLOB = "dataset/data/data/test-*-of-00016.parquet"
     DEFAULT_DEPTH_TRUNC = 3.0
     OUTPUT_DIR = "debug_output/"
 
@@ -272,6 +273,7 @@ def select_target_detection(result) -> tuple[str, list[int], torch.Tensor]:
     Example:
         >>> results = model(img)
         >>> class_name, bbox, mask = select_target_detection(results)
+    """
     # Assumption: The input `result` list contains detection results for a single image.
     # For a real-time/streaming multi-image batch pipeline, this indexing must be updated
     # to iterate over the batch elements robustly.
