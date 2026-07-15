@@ -16,6 +16,15 @@
 # RESUMABLE. Failure costs one shard / one wheel, never the whole run. Every
 # stage is idempotent — re-run this script after any crash and it picks up where
 # it stopped.
+#
+# v4 UPDATE — the bandwidth-burst fix: the instance dies seconds after a
+# 1-second download burst clears ~300 MB/s. Average throughput is fine (~75 MB/s);
+# the killer is transient spikes to 300–350 MB/s made of many xet range-get
+# sockets ramping in lockstep. hf_xet can't be throttled (Rust binary, own HTTP
+# stack — ignores LD_PRELOAD shapers like trickle AND, per HF's own tracker,
+# http(s)_proxy env vars), and tc/cgroup shaping is a no-op under gVisor. So the
+# bulk transfers below now bypass hf_xet entirely and use a single rate-capped
+# curl per file. See the step 4 note for the mechanism.
 set -uo pipefail
 
 export HOME=/home/marimo
@@ -31,7 +40,11 @@ export HF_HOME="$HOME/.cache/huggingface"
 export UV_CACHE_DIR="$HOME/.cache/uv"
 export TMPDIR="$HOME/tmp"
 
-# HF: keep the network calm.
+# HF metadata calls only (the repo_info manifest fetch). The BULK transfers no
+# longer go through hf_xet at all — they're done with rate-capped curl (step 4),
+# which is the only thing that reliably prevents the >300 MB/s bursts that crash
+# the box. These xet knobs are kept as guardrails for any accidental hf download
+# fallback; they do NOT govern the dataset/weights transfers anymore.
 export HF_XET_CHUNK_CACHE_SIZE_BYTES=0   # each byte written once; dedup cache buys nothing
 export HF_XET_NUM_CONCURRENT_RANGE_GETS=4
 export HF_HUB_DOWNLOAD_TIMEOUT=30        # fail a dead socket instead of waiting forever
@@ -46,14 +59,21 @@ export UV_CONCURRENT_INSTALLS=2
 export UV_CONCURRENT_BUILDS=1
 export UV_HTTP_TIMEOUT=60          # don't hang forever on a dead socket
 
-MAX_WORKERS=2       # per-shard HF download concurrency. ~15 min / 46 GB. Do not raise.
-SHARD_TIMEOUT=300
-ATTEMPTS=3
+# Bandwidth ceiling for every bulk download (curl --limit-rate). The crash is
+# caused by 1-second bursts above ~300 MB/s; a single capped stream cannot exceed
+# this in any 1s window, so the burst can't form. 200M leaves ~100 MB/s of
+# headroom. Overridable, so you can sweep it (e.g. DL_RATE=280M) to pin the exact
+# crash floor against the marimo burst tracker. curl's `M` suffix is MiB/s.
+DL_RATE="${DL_RATE:-200M}"
+
+SHARD_TIMEOUT=300   # wall-clock kill for a hung shard
+ATTEMPTS=3          # per-file retry budget (yolo weights + each dataset shard)
 
 mkdir -p "$HF_HOME" "$UV_CACHE_DIR" "$TMPDIR"
 
 echo "===================================================="
 echo "6D Pose bootstrap (ephemeral) — $(date +%T)"
+echo "  bulk download rate cap: $DL_RATE"
 echo "===================================================="
 # NOTE: no `df` check here. Under gVisor `df` reports a fake `none 8.0E` on every
 # mount, so the old check ALWAYS passed — right up until the instance died. It was
@@ -84,26 +104,58 @@ else
   exit 1
 fi
 
-# ---- 3. YOLO weights ----------------------------------------------------------
+# ---- 2b. Recover the raw token for curl --------------------------------------
+# The bulk downloads (steps 3 & 4) use curl, which needs the token in an
+# Authorization header. `hf auth login` above wrote it to $HF_HOME/token; prefer
+# the env var if we still have it, else read it back from there. curl uses this
+# bearer only for the initial huggingface.co request; the /resolve/ redirect to
+# the CDN is presigned, and curl correctly drops the header on the cross-host hop.
+DL_TOKEN="${HF_TOKEN:-}"
+[ -n "$DL_TOKEN" ] || DL_TOKEN="$(tr -d '\r\n' < "$HF_HOME/token" 2>/dev/null || true)"
+[ -n "$DL_TOKEN" ] || { echo "FATAL: no HF token available for curl downloads." >&2; exit 1; }
+
+# ---- 3. YOLO weights (curl-capped, same reasoning as the dataset in step 4) ---
 if [ -s "$PROJECT/best.pt" ]; then
   echo "[yolo] best.pt already present."
 else
   echo "[yolo] downloading best.pt..."
+  YOLO_PATH="runs/segment/train-2/weights/best.pt"
   for attempt in $(seq 1 $ATTEMPTS); do
-    if timeout 300 hf download "$MODEL" runs/segment/train-2/weights/best.pt \
-         --local-dir "$TMPDIR/w" >/dev/null 2>&1; then
-      mv "$TMPDIR/w/runs/segment/train-2/weights/best.pt" "$PROJECT/best.pt"
-      rm -rf "$TMPDIR/w"
+    if timeout 300 curl -sfL --limit-rate "$DL_RATE" \
+         -H "Authorization: Bearer $DL_TOKEN" \
+         -o "$PROJECT/best.pt" \
+         "https://huggingface.co/$MODEL/resolve/main/$YOLO_PATH" \
+       && [ -s "$PROJECT/best.pt" ]; then
       echo "[yolo] ok."
       break
     fi
     echo "[yolo] retry $attempt/$ATTEMPTS"
+    rm -f "$PROJECT/best.pt"   # drop any partial/empty before refetching
     sleep 5
   done
   [ -s "$PROJECT/best.pt" ] || { echo "FATAL: could not fetch best.pt." >&2; exit 1; }
 fi
 
-# ---- 4. Dataset: one shard at a time, verified by size, resumable -------------
+# ---- 4. Dataset: one shard at a time, curl rate-capped, verified, resumable ---
+# WHY CURL, NOT `hf download`: the crash is bandwidth bursts, not average
+# throughput. net_io_counters during a run showed the average ~75 MB/s but
+# 1-second bursts spiking to 300–350 MB/s — and the instance dies seconds after a
+# burst clears 300. Those bursts are N xet range-get sockets all ramping in
+# lockstep and stacking their startup transients at the interface.
+#
+# hf_xet can't be throttled (Rust binary with its own HTTP stack: ignores
+# LD_PRELOAD shapers and http(s)_proxy env), and tc/cgroup shaping is a no-op
+# under gVisor's userspace netstack (same reason free/df/ss lie in here). So we
+# bypass xet for the bulk path and pull each shard with ONE curl. --limit-rate
+# paces how fast curl drains the socket; TCP flow control then shrinks the window
+# and the SENDER slows to match. A single capped stream physically cannot put
+# more than DL_RATE into any 1s window, so the >300 burst can't form.
+#
+# Single stream is load-bearing: re-introducing parallel range-gets brings back
+# the synchronized-ramp stacking that is the entire problem. Do NOT parallelize.
+# The /resolve/ endpoint serves the materialized file over plain HTTPS for Xet
+# repos too (same path HF_HUB_DISABLE_XET forces internally); the byte-exact
+# check below is the backstop against any endpoint quirk that truncates.
 echo "[dataset] fetching manifest..."
 mkdir -p "$DEST"
 python3 - "$DATASET" > "$TMPDIR/manifest.tsv" <<'PY'
@@ -128,16 +180,21 @@ while IFS=$'\t' read -r f size; do
     skipped=$((skipped + 1)); continue
   fi
   rm -f "$DEST/$f"
+  # curl won't create parent dirs the way hf download did; shard paths include a
+  # leading subdir (e.g. data/train-00000-...parquet), so make it here.
+  mkdir -p "$(dirname "$DEST/$f")"
 
   got=0
   for attempt in $(seq 1 $ATTEMPTS); do
-    if timeout "$SHARD_TIMEOUT" hf download "$DATASET" "$f" \
-         --repo-type dataset --local-dir "$DEST" --max-workers "$MAX_WORKERS" \
-         >/dev/null 2>&1; then
+    if timeout "$SHARD_TIMEOUT" curl -sfL --limit-rate "$DL_RATE" \
+         -H "Authorization: Bearer $DL_TOKEN" \
+         -o "$DEST/$f" \
+         "https://huggingface.co/datasets/$DATASET/resolve/main/$f?download=true"; then
       got=1; break
     fi
     retried=$((retried + 1))
     echo "$(date +%T)  [dataset] retry $attempt/$ATTEMPTS  $f"
+    rm -f "$DEST/$f"   # drop the partial a timed-out/hung curl left behind
     sleep 5
   done
 
@@ -165,7 +222,8 @@ if [ "$bad" -ne 0 ] || [ "$failed" -ne 0 ]; then
   echo "FATAL: dataset incomplete. Re-run this script — it resumes." >&2
   exit 1
 fi
-# --local-dir already wrote the real files; $HF_HOME/hub would be a 2nd full copy.
+# curl wrote the real files directly into $DEST; no $HF_HOME/hub copy is created
+# by this path, but clean it anyway in case a fallback ever populated it.
 rm -rf "$HF_HOME/hub"
 
 # ---- 5. Python interpreter ----------------------------------------------------
@@ -188,9 +246,13 @@ fi
 # ---- 6. uv sync: throttled and retried ---------------------------------------
 # This is the step that has taken the instance down before. Cause is the same as
 # everything else: uv's default 50 concurrent downloads, against multi-GB wheels
-# (torch et al), on a fragile userspace TCP stack. Concurrency is capped to 2
-# above. The retry loop is what makes it safe: uv's cache ($UV_CACHE_DIR) keeps
-# every wheel it has already fetched, so each attempt resumes rather than
+# (torch et al), on a fragile userspace TCP stack. NOTE: uv has no --limit-rate,
+# so the DL_RATE cap above does NOT apply here — the lever for uv is concurrency.
+# Many parallel wheel streams are exactly the synchronized-ramp burst pattern
+# that crashes the dataset pull, so if a *crash* (not a plain uv error) happens
+# here, drop UV_CONCURRENT_DOWNLOADS to 1 (see the FATAL block). Concurrency is
+# capped to 4 above; the retry loop makes it safe: uv's cache ($UV_CACHE_DIR)
+# keeps every wheel already fetched, so each attempt resumes rather than
 # restarting. A crash costs one wheel, not the environment.
 echo "[env] uv sync (downloads=$UV_CONCURRENT_DOWNLOADS, installs=$UV_CONCURRENT_INSTALLS)..."
 synced=0
