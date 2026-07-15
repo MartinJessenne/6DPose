@@ -18,14 +18,14 @@ from tqdm import tqdm
 
 # ---- Configuration ----
 DATASET = "UItraviolet/industrial_cart"
-DEST_DIR = Path("./dataset/data")
-SEGMENTS_PER_FILE = 8              # Parallel range requests per file
+DEST_DIR = Path("./dataset")       # rfilenames already start with "data/", avoids data/data/
+CONCURRENT_FILES = 5               # Cold Xet-bridge objects serve ~30-40 MB/s each:
+                                   # parallelize ACROSS files to reach the aggregate cap.
+SEGMENTS_PER_FILE = 2              # Light intra-file splitting (10 connections total)
 CHUNK_SIZE = 128 * 1024            # 128 KB socket read chunks
 MAX_BANDWIDTH = 200 * 1024 * 1024  # Strict aggregate ceiling: 200 MB/s
-BURST_WINDOW = 0.10                # Token bucket burst window (seconds).
-                                   # Smaller = smoother instantaneous rate,
-                                   # important since a >300 MB/s spike kills the instance.
-MIN_SEGMENT_SIZE = 8 * 1024 * 1024 # Don't split files into segments smaller than 8 MB
+BURST_WINDOW = 0.10                # Token bucket burst window (seconds)
+MIN_SEGMENT_SIZE = 8 * 1024 * 1024 # Never create segments smaller than 8 MB
 
 # Retrieve HF token
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -42,11 +42,7 @@ AUTH_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 
 class AsyncTokenBucket:
-    """Aggregate rate limiter shared by all active segments.
-
-    Waiters sleep OUTSIDE the lock so a single slow consumer never
-    blocks token accounting for the others.
-    """
+    """Aggregate rate limiter shared by all active segments across all files."""
     def __init__(self, rate_bytes_per_sec, burst_window=BURST_WINDOW):
         self.rate = rate_bytes_per_sec
         self.capacity = rate_bytes_per_sec * burst_window
@@ -67,7 +63,6 @@ class AsyncTokenBucket:
                     return
 
                 wait_time = (amount - self.tokens) / self.rate
-            # Sleep with the lock RELEASED, then re-check.
             await asyncio.sleep(wait_time)
 
 
@@ -75,13 +70,7 @@ rate_limiter = AsyncTokenBucket(MAX_BANDWIDTH)
 
 
 async def download_segment(client, url, start, end, fd, progress_bar):
-    """Download one byte range and pwrite() it into the pre-allocated file.
-
-    No file lock: segments own disjoint byte ranges and os.pwrite is a
-    positional write that doesn't touch a shared file offset, so concurrent
-    writes to the same fd are safe. This is what lets all 8 sockets drain
-    simultaneously instead of one at a time.
-    """
+    """Download one byte range and pwrite() it at its offset. Resumable retries."""
     for attempt in range(5):
         offset = start
         segment_headers = {**AUTH_HEADERS, "Range": f"bytes={offset}-{end}"}
@@ -89,9 +78,8 @@ async def download_segment(client, url, start, end, fd, progress_bar):
             async with client.stream(
                 "GET", url, headers=segment_headers,
                 follow_redirects=True,
-                timeout=httpx.Timeout(30.0, read=30.0),
+                timeout=httpx.Timeout(30.0, read=60.0),
             ) as r:
-                # 206 Partial Content is the expected status for Range requests
                 if r.status_code != 206:
                     raise httpx.HTTPStatusError(
                         f"Expected 206 Partial Content, got {r.status_code}",
@@ -106,53 +94,44 @@ async def download_segment(client, url, start, end, fd, progress_bar):
         except Exception:
             if attempt == 4:
                 raise
-            # Resume from the last byte successfully written: no re-download,
-            # and the progress bar stays accurate.
-            start = offset
+            start = offset  # resume from last byte written
             await asyncio.sleep(2 ** attempt)
 
 
 def compute_segments(size):
-    """Split `size` bytes into up to SEGMENTS_PER_FILE ranges, but never
-    create tiny segments (small files download as a single stream)."""
     n = min(SEGMENTS_PER_FILE, max(1, size // MIN_SEGMENT_SIZE))
     base = size // n
-    ranges = []
-    for i in range(n):
-        s = i * base
-        e = size - 1 if i == n - 1 else s + base - 1
-        ranges.append((s, e))
-    return ranges
+    return [
+        (i * base, size - 1 if i == n - 1 else (i + 1) * base - 1)
+        for i in range(n)
+    ]
 
 
-async def download_file_segmented(client, filename, size, progress_bar):
-    """Coordinates parallel segment tasks for a single file."""
+async def download_file(client, filename, size, progress_bar, sem):
+    """Download a single file (segmented), gated by the concurrency semaphore."""
     dest_path = DEST_DIR / filename
 
-    # Idempotent skip
     if dest_path.exists() and dest_path.stat().st_size == size:
         progress_bar.update(size)
         return
 
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = dest_path.with_suffix(".tmp")
+    async with sem:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = dest_path.with_suffix(".tmp")
+        url = f"https://huggingface.co/datasets/{DATASET}/resolve/main/{filename}?download=true"
 
-    url = f"https://huggingface.co/datasets/{DATASET}/resolve/main/{filename}?download=true"
+        fd = os.open(temp_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.ftruncate(fd, size)
+            await asyncio.gather(*[
+                download_segment(client, url, s, e, fd, progress_bar)
+                for s, e in compute_segments(size)
+            ])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
-    # Pre-allocate so segments can pwrite at their byte boundaries
-    fd = os.open(temp_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
-    try:
-        os.ftruncate(fd, size)
-        tasks = [
-            download_segment(client, url, s, e, fd, progress_bar)
-            for s, e in compute_segments(size)
-        ]
-        await asyncio.gather(*tasks)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-    temp_path.rename(dest_path)
+        temp_path.rename(dest_path)
 
 
 async def main():
@@ -163,24 +142,27 @@ async def main():
 
     total_size = sum(s.size for s in shards)
     print(f"Found {len(shards)} shards. Total size: {total_size / (1024**3):.2f} GB")
-    print(f"Downloading shards sequentially using up to {SEGMENTS_PER_FILE} parallel segments per file...")
+    print(f"{CONCURRENT_FILES} files in flight x {SEGMENTS_PER_FILE} segments, "
+          f"capped at {MAX_BANDWIDTH / 1024**2:.0f} MB/s aggregate")
 
+    max_conns = CONCURRENT_FILES * SEGMENTS_PER_FILE
     limits = httpx.Limits(
-        max_keepalive_connections=SEGMENTS_PER_FILE + 2,
-        max_connections=SEGMENTS_PER_FILE * 2,
+        max_keepalive_connections=max_conns + 2,
+        max_connections=max_conns * 2,
     )
-
     custom_socket_options = [
         (socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024),
         (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),
     ]
-
     transport = httpx.AsyncHTTPTransport(limits=limits, socket_options=custom_socket_options)
 
+    sem = asyncio.Semaphore(CONCURRENT_FILES)
     async with httpx.AsyncClient(transport=transport) as client:
         with tqdm(total=total_size, unit="B", unit_scale=True, desc="Downloading") as pbar:
-            for shard in shards:
-                await download_file_segmented(client, shard.rfilename, shard.size, pbar)
+            await asyncio.gather(*[
+                download_file(client, s.rfilename, s.size, pbar, sem)
+                for s in shards
+            ])
 
 
 if __name__ == "__main__":
