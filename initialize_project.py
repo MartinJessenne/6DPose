@@ -1,75 +1,130 @@
+# /// script
+# dependencies = [
+#   "httpx",
+#   "huggingface-hub",
+#   "tqdm"
+# ]
+# ///
+
 import os
-import shutil
-from huggingface_hub import login, hf_hub_download, snapshot_download
+import sys
+import asyncio
+import time
+from pathlib import Path
+import httpx
+from huggingface_hub import HfApi
+from tqdm.asyncio import tqdm
 
-def main():
-    print("====================================================")
-    print("6D Pose Project Initialization & Asset Downloader")
-    print("====================================================")
+# ---- Configuration ----
+DATASET = "UItraviolet/industrial_cart"
+DEST_DIR = Path("./dataset/data")
+CONCURRENT_DOWNLOADS = 3       # Number of files to download at once
+CHUNK_SIZE = 128 * 1024         # 128 KB chunks
+MAX_BANDWIDTH = 150 * 1024 * 1024  # Strict aggregate limit: 150 MB/s
+
+# Retrieve HF token
+HF_TOKEN = os.getenv("HF_TOKEN")
+if not HF_TOKEN:
+    token_path = Path("~/.cache/huggingface/token").expanduser()
+    if token_path.exists():
+        HF_TOKEN = token_path.read_text().strip()
+
+if not HF_TOKEN:
+    print("Error: HF_TOKEN environment variable or cached token not found.", file=sys.stderr)
+    sys.exit(1)
+
+headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+class AsyncTokenBucket:
+    """A strict token bucket rate limiter to govern aggregate bandwidth."""
+    def __init__(self, rate_bytes_per_sec):
+        self.rate = rate_bytes_per_sec
+        self.capacity = rate_bytes_per_sec  # Max burst size is 1 second of transfer
+        self.tokens = rate_bytes_per_sec
+        self.last_update = time.monotonic()
+        self.lock = asyncio.Lock()
+
+    async def consume(self, amount):
+        async with self.lock:
+            while True:
+                now = time.monotonic()
+                elapsed = now - self.last_update
+                self.last_update = now
+                
+                # Top up tokens
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+                
+                if self.tokens >= amount:
+                    self.tokens -= amount
+                    return
+                
+                # Wait for enough tokens to replenish
+                needed = amount - self.tokens
+                wait_time = needed / self.rate
+                await asyncio.sleep(wait_time)
+
+# Initialize global rate limiter
+rate_limiter = AsyncTokenBucket(MAX_BANDWIDTH)
+
+async def download_shard(client, filename, size, sem, progress_bar):
+    dest_path = DEST_DIR / filename
     
-    # 1. Hugging Face Authentication Check
-    from huggingface_hub import HfApi
+    # Idempotent skip: check if file is already fully downloaded
+    if dest_path.exists() and dest_path.stat().st_size == size:
+        progress_bar.update(size)
+        return
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = dest_path.with_suffix(".tmp")
+
+    url = f"https://huggingface.co/datasets/{DATASET}/resolve/main/{filename}?download=true"
+    
+    async with sem:
+        for attempt in range(5):
+            try:
+                # Use client.stream to avoid loading the entire file into memory
+                async with client.stream("GET", url, headers=headers, follow_redirects=True, timeout=60.0) as r:
+                    r.raise_for_status()
+                    
+                    with open(temp_path, "wb") as f:
+                        async for chunk in r.iter_bytes(chunk_size=CHUNK_SIZE):
+                            chunk_len = len(chunk)
+                            # Strict sleep here guarantees we never violate the global speed limit
+                            await rate_limiter.consume(chunk_len)
+                            f.write(chunk)
+                            progress_bar.update(chunk_len)
+                            
+                # Swap temp file to final location on success
+                temp_path.rename(dest_path)
+                return
+            except Exception as e:
+                if temp_path.exists():
+                    temp_path.unlink()
+                if attempt == 4:
+                    print(f"\nFailed to download {filename} after 5 attempts: {e}", file=sys.stderr)
+                    raise e
+                await asyncio.sleep(2 ** attempt)
+
+async def main():
+    print(f"Fetching manifest for {DATASET}...")
     api = HfApi()
-    try:
-        user_info = api.whoami()
-        print(f"Authenticated as: {user_info.get('username', 'Unknown')}")
-    except Exception:
-        print("You are not currently logged in to Hugging Face.")
-        token = input("Please enter your Hugging Face Access Token: ").strip()
-        if token:
-            login(token=token)
-        else:
-            print("No token provided. Proceeding with public download access...")
-
-    # 2. Download YOLO Segmentation Model
-    model_repo = "UItraviolet/yolo_multicart"
-    model_file = "runs/segment/train-2/weights/best.pt"
-    local_model_path = "best.pt"
+    info = api.repo_info(DATASET, repo_type="dataset", files_metadata=True)
+    shards = [s for s in info.siblings if s.rfilename.endswith(".parquet")]
     
-    if os.path.exists(local_model_path):
-        print(f"\n[YOLO Model] Found locally at '{local_model_path}'. Skipping download.")
-    else:
-        print(f"\n[YOLO Model] Downloading '{model_file}' from '{model_repo}'...")
-        try:
-            cached_path = hf_hub_download(repo_id=model_repo, filename=model_file)
-            shutil.copy(cached_path, local_model_path)
-            print(f"[YOLO Model] Successfully saved to '{local_model_path}'")
-        except Exception as e:
-            print(f"[YOLO Model] Error downloading model: {e}")
+    total_size = sum(s.size for s in shards)
+    print(f"Found {len(shards)} shards. Total size: {total_size / (1024**3):.2f} GB")
 
-    # 3. Download Parquet Dataset
-    dataset_repo = "UItraviolet/industrial_cart"
-    local_dataset_dir = "dataset/data"
+    sem = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
     
-    # Check if we already have parquet files locally
-    has_parquet = False
-    if os.path.exists(local_dataset_dir):
-        has_parquet = any(
-            f.endswith('.parquet')
-            for root, _, files in os.walk(local_dataset_dir)
-            for f in files
-        )
-
-    if has_parquet:
-        print(f"\n[Dataset] Parquet files already exist in '{local_dataset_dir}'. Skipping download.")
-    else:
-        print(f"\n[Dataset] Downloading parquet dataset from '{dataset_repo}' (dataset type)...")
-        os.makedirs(local_dataset_dir, exist_ok=True)
-        try:
-            # Download the parquet files using snapshot_download
-            snapshot_download(
-                repo_id=dataset_repo,
-                repo_type="dataset",
-                local_dir=local_dataset_dir,
-                allow_patterns="*.parquet"
-            )
-            print(f"[Dataset] Successfully downloaded dataset parquet files to '{local_dataset_dir}'")
-        except Exception as e:
-            print(f"[Dataset] Error downloading dataset: {e}")
-            print("Please ensure your Hugging Face token has access to the private dataset repository.")
-
-    print("\nInitialization finished. You can now run the project using:")
-    print("  uv run inspect_pose.py mode=random random_samples=5 model=ransac")
+    # We use a single client instance to reuse the underlying connection pools
+    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+    async with httpx.AsyncClient(limits=limits) as client:
+        with tqdm(total=total_size, unit="B", unit_scale=True, desc="Downloading") as pbar:
+            tasks = [
+                download_shard(client, shard.rfilename, shard.size, sem, pbar)
+                for shard in shards
+            ]
+            await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
