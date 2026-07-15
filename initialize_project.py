@@ -19,9 +19,9 @@ from tqdm.asyncio import tqdm
 # ---- Configuration ----
 DATASET = "UItraviolet/industrial_cart"
 DEST_DIR = Path("./dataset/data")
-CONCURRENT_DOWNLOADS = 3            # Keeping it low prevents gVisor cpu overhead
+CONCURRENT_DOWNLOADS = 3            # Low stream footprint avoids gVisor thread overhead
 CHUNK_SIZE = 256 * 1024              # 256 KB chunk reads
-MAX_BANDWIDTH = 200 * 1024 * 1024    # 200 MB/s Strict Aggregate Limit
+MAX_BANDWIDTH = 200 * 1024 * 1024    # Aggregate target speed limit: 200 MB/s
 FORCE_SOCKET_BUFFER_SIZE = 4 * 1024 * 1024  # Force a 4MB TCP Receive Window per socket
 
 # Retrieve HF token
@@ -67,36 +67,6 @@ class AsyncTokenBucket:
 
 # Initialize global rate limiter
 rate_limiter = AsyncTokenBucket(MAX_BANDWIDTH)
-
-# ---- Socket Tuning Hook ----
-def tune_socket(sock: socket.socket):
-    """Forcefully injects custom TCP receive buffer sizes directly to the socket descriptor."""
-    try:
-        # Set receive buffer size
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, FORCE_SOCKET_BUFFER_SIZE)
-        
-        # Disable Nagle's algorithm for low latency packet processing inside gVisor's stack
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except Exception as e:
-        # Some sandboxed environments block direct socket mutations; degrade gracefully
-        pass
-
-class CustomAsyncHTTPTransport(httpx.AsyncHTTPTransport):
-    """Custom HTTPX transport that overrides socket creation to apply low-level gVisor tuning."""
-    async def handle_async_request(self, request, *args, **kwargs):
-        # We hook into the socket factory mechanism of HTTPX
-        original_connect = self._pool._connector.connect
-        
-        async def tuned_connect(*conn_args, **conn_kwargs):
-            connection = await original_connect(*conn_args, **conn_kwargs)
-            # Access the raw underlying socket if it exists and apply our tuning
-            if hasattr(connection, "_socket") and connection._socket:
-                tune_socket(connection._socket)
-            return connection
-            
-        self._pool._connector.connect = tuned_connect
-        return await super().handle_async_request(request, *args, **kwargs)
-
 
 async def download_shard(client, filename, size, sem, progress_bar):
     dest_path = DEST_DIR / filename
@@ -145,9 +115,21 @@ async def main():
 
     sem = asyncio.Semaphore(CONCURRENT_DOWNLOADS)
     
-    # Instantiate HTTPX client using our custom socket-tuned transport
+    # Clean native implementation utilizing socket options!
+    custom_socket_options = [
+        # Force the 4MB TCP receive window at socket level
+        (socket.SOL_SOCKET, socket.SO_RCVBUF, FORCE_SOCKET_BUFFER_SIZE),
+        # Bypass Nagle's algorithm inside gVisor's stack
+        (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1),
+    ]
+    
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    transport = CustomAsyncHTTPTransport(limits=limits)
+    
+    # Provide the socket options array to HTTPX's transport cleanly
+    transport = httpx.AsyncHTTPTransport(
+        limits=limits, 
+        socket_options=custom_socket_options
+    )
     
     async with httpx.AsyncClient(transport=transport) as client:
         with tqdm(total=total_size, unit="B", unit_scale=True, desc="Downloading") as pbar:
