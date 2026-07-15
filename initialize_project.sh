@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# initialize_project.sh — 6D Pose session bootstrap for molab (v4)
+# initialize_project.sh — 6D Pose session bootstrap for molab (v5)
 #
 # Run at the start of EVERY molab session (nothing persists here):
 #   export HF_TOKEN=hf_...
@@ -7,39 +7,49 @@
 #   tail -f /tmp/init.log     # safe to lose — molab's terminal UI crashes; the job won't
 #
 # Design principle, learned the hard way: molab runs under gVisor with a
-# *userspace* TCP stack that is intermittently flaky. High-concurrency network
-# work either hangs a socket with no timeout, or takes the whole instance down
-# with no error message (the kill happens outside the sandbox, so there is
-# nothing in dmesg — don't go looking).
+# *userspace* TCP stack. High-bandwidth-burst network work takes the whole
+# instance down with no error message (the kill happens outside the sandbox,
+# so there is nothing in dmesg — don't go looking). The kill threshold is a
+# 1-second burst clearing ~300 MB/s.
 #
-# So every network step here is: LOW CONCURRENCY + HARD TIMEOUT + RETRY +
-# RESUMABLE. Failure costs one shard / one wheel, never the whole run. Every
-# stage is idempotent — re-run this script after any crash and it picks up where
-# it stopped.
+# So every network step here is: RATE-CAPPED (or inherently slow) + HARD
+# TIMEOUT + RETRY + RESUMABLE. Failure costs one shard / one wheel, never the
+# whole run. Every stage is idempotent — re-run this script after any crash
+# and it picks up where it stopped.
 #
-# v4 UPDATE — the bandwidth-burst fix: the instance dies seconds after a
-# 1-second download burst clears ~300 MB/s. Average throughput is fine (~75 MB/s);
-# the killer is transient spikes to 300–350 MB/s made of many xet range-get
-# sockets ramping in lockstep. hf_xet can't be throttled (Rust binary, own HTTP
-# stack — ignores LD_PRELOAD shapers like trickle AND, per HF's own tracker,
-# http(s)_proxy env vars), and tc/cgroup shaping is a no-op under gVisor. So the
-# bulk transfers below bypass hf_xet entirely.
+# v5 UPDATE — the real bottleneck was the TCP receive window, and it's tunable.
+# The v4 model said: gVisor caps ONE socket at ~6 MB/s (bandwidth-delay product
+# against a small receive window), so you need many sockets for throughput, and
+# bursts are many sockets ramping in lockstep. That model was CORRECT — but only
+# for the default window. The default tcp_rmem here is "4096 1048576 4194304"
+# (1 MB default buffer), and gVisor's netstack HONORS a sysctl write to it.
+# Raising the default to 4 MB was measured to lift a SINGLE socket from ~6 MB/s
+# to ~227 MiB/s (probe on a 292 MiB train shard, 07/2026).
 #
-# First attempt was a single rate-capped curl per file — it never bursts, but it
-# capped effective speed at ~6 MB/s, not the intended ~200. Reason: gVisor's
-# userspace TCP keeps a small per-socket receive window, so ONE connection has a
-# hard throughput ceiling regardless of --limit-rate (bandwidth-delay product).
-# This also retroactively explains the old ~75 MB/s xet average: ~16 concurrent
-# range-get sockets x ~6 MB/s/socket ~= 75 MB/s. The bursts were never about
-# per-socket excess capacity — they were ~16 sockets each hitting that ceiling in
-# the same instant.
+# That inverts the whole risk model:
+#   OLD (1 MB window):  sockets slow  -> need many streams; bursts = stacking.
+#   NEW (4 MB window):  every socket is a firehose -> ANY unthrottled transfer
+#                       can blow past the ~300 MB/s kill threshold ON ITS OWN.
 #
-# Fix: aria2c. It segments one file across N connections (recovers the
-# concurrency you need for real throughput) but enforces a single AGGREGATE
-# rate limit across all of them, re-checked at sub-second granularity — unlike
-# curl, where each stream only knows its own cap. Even if two segments start
-# together, the aggregate throttle reins the pair in before it can stack into a
-# spike. See the step 4 note for tuning knobs.
+# Consequences, encoded below:
+#   * The window is raised ONLY for the aria2 bulk-download phase (steps 3-4),
+#     where every transfer runs under aria2's aggregate rate cap (verified to
+#     hold: 8 segments under a 200M cap averaged 174 MiB/s in the same probe).
+#   * With fast sockets we now want FEW streams, not many: DL_STREAMS=2 (2, not
+#     1, only so one stalled segment can't stall the shard), and a lower cap
+#     (DL_RATE=150M) for margin — a fresh aria2c process warms up its limiter
+#     on every one of the 159 shards, and startup transients are bigger when
+#     sockets are fast.
+#   * The window is RESTORED to the small default before anything unthrottled
+#     touches the network again — uv (python install + sync) has NO rate
+#     limiter, so it gets the old regime back, where 4 concurrent wheel streams
+#     x ~6 MB/s/socket ~= 24 MB/s aggregate is safe by construction.
+#   * If the sysctl turns out not to be writable (gVisor config change), the
+#     script falls back to the v4 regime automatically: DL_STREAMS=8 slow
+#     sockets under the same aggregate cap.
+#   * NEVER run an uncapped transfer while the window is raised. An uncapped
+#     single-socket probe hit ~238 MB/s — one second of that near the threshold
+#     is how the box dies.
 set -uo pipefail
 
 export HOME=/home/marimo
@@ -55,11 +65,11 @@ export HF_HOME="$HOME/.cache/huggingface"
 export UV_CACHE_DIR="$HOME/.cache/uv"
 export TMPDIR="$HOME/tmp"
 
-# HF metadata calls only (the repo_info manifest fetch). The BULK transfers no
-# longer go through hf_xet at all — they're done with segmented, aggregate-rate-
-# capped aria2c (step 4), which is what reliably prevents the >300 MB/s bursts
-# that crash the box. These xet knobs are kept as guardrails for any accidental
-# hf download fallback; they do NOT govern the dataset/weights transfers anymore.
+# HF metadata calls only (the repo_info manifest fetch). The BULK transfers do
+# not go through hf_xet at all — they're done with segmented, aggregate-rate-
+# capped aria2c (steps 3-4). These xet knobs are kept as guardrails for any
+# accidental hf download fallback; they matter MORE in v5: with the raised TCP
+# window an unthrottled hf_xet pull would burst far harder than it used to.
 export HF_XET_CHUNK_CACHE_SIZE_BYTES=0   # each byte written once; dedup cache buys nothing
 export HF_XET_NUM_CONCURRENT_RANGE_GETS=4
 export HF_HUB_DOWNLOAD_TIMEOUT=30        # fail a dead socket instead of waiting forever
@@ -69,21 +79,10 @@ unset HF_XET_HIGH_PERFORMANCE            # documented for >=64 GB RAM; wrong too
 # and uv will warn and ignore .venv because of it. Unset it and be explicit.
 unset VIRTUAL_ENV
 export UV_PROJECT_ENVIRONMENT="$PROJECT/.venv"
-export UV_CONCURRENT_DOWNLOADS=4   # default is 50. torch wheels are GB-sized; 50 kills the box.
-export UV_CONCURRENT_INSTALLS=2
-export UV_CONCURRENT_BUILDS=1
+export UV_CONCURRENT_DOWNLOADS=4   # 4 x ~6 MB/s socket ceiling ~= 24 MB/s — but ONLY
+export UV_CONCURRENT_INSTALLS=2    # safe because the TCP window is restored to the
+export UV_CONCURRENT_BUILDS=1      # small default before uv ever runs (step 4b).
 export UV_HTTP_TIMEOUT=60          # don't hang forever on a dead socket
-
-# Bulk-download tuning (aria2c). DL_RATE is the AGGREGATE ceiling across every
-# segment of a file combined — this is what stops the >300 MB/s burst, and it
-# holds regardless of DL_STREAMS. DL_STREAMS is how many segments aria2 splits
-# each file into; since one gVisor socket tops out near ~6 MB/s, you need several
-# to actually reach DL_RATE (8 streams x ~6 MB/s/socket ceiling ~= plenty of
-# headroom under a 200 MB/s aggregate cap). Both are overridable so you can sweep
-# them (start DL_STREAMS low, raise it) against the marimo burst tracker to find
-# the max concurrency that still never shows a burst above threshold.
-DL_RATE="${DL_RATE:-200M}"
-DL_STREAMS="${DL_STREAMS:-8}"
 
 SHARD_TIMEOUT=300   # wall-clock kill for a hung shard
 ATTEMPTS=3          # per-file retry budget (yolo weights + each dataset shard)
@@ -92,7 +91,6 @@ mkdir -p "$HF_HOME" "$UV_CACHE_DIR" "$TMPDIR"
 
 echo "===================================================="
 echo "6D Pose bootstrap (ephemeral) — $(date +%T)"
-echo "  bulk download rate cap: $DL_RATE"
 echo "===================================================="
 # NOTE: no `df` check here. Under gVisor `df` reports a fake `none 8.0E` on every
 # mount, so the old check ALWAYS passed — right up until the instance died. It was
@@ -100,6 +98,8 @@ echo "===================================================="
 # wrote at ~1.8 GB/s with no ENOSPC and zero memory growth.
 
 # ---- 1. Repo ------------------------------------------------------------------
+# (Unthrottled git fetch, but the repo is small and the TCP window is still at
+# its slow default here — raising it happens in step 2d, after everything tiny.)
 if [ ! -d "$PROJECT/.git" ]; then
   echo "[repo] cloning..."
   git clone "$REPO_URL" "$PROJECT" || { echo "FATAL: clone failed." >&2; exit 1; }
@@ -134,14 +134,68 @@ DL_TOKEN="${HF_TOKEN:-}"
 [ -n "$DL_TOKEN" ] || { echo "FATAL: no HF token available for downloads." >&2; exit 1; }
 
 # ---- 2c. aria2 ------------------------------------------------------------
-# Segmented, aggregate-rate-limited downloads (see the v4 note up top). Not
-# preinstalled on a fresh molab image.
+# Segmented, aggregate-rate-limited downloads (see the v5 note up top). Not
+# preinstalled on a fresh molab image. Done BEFORE raising the TCP window so
+# the apt fetch (unthrottled, but tiny) runs against the slow default.
 if ! command -v aria2c >/dev/null 2>&1; then
   echo "[deps] installing aria2..."
   export DEBIAN_FRONTEND=noninteractive
   apt update -qq && apt install -y -qq aria2 \
     || { echo "FATAL: could not install aria2." >&2; exit 1; }
 fi
+
+# ---- 2d. Raise the TCP receive window for the capped bulk phase ----------------
+# gVisor's default tcp_rmem ("4096 1048576 4194304", 1 MB default buffer) caps a
+# single socket at ~6 MB/s (bandwidth-delay product). gVisor honors a sysctl
+# write here; a 4 MB default lifted one socket to ~227 MiB/s in testing. We
+# raise it ONLY for the aria2 phase (everything under an aggregate cap) and
+# restore it in step 4b before uv (which has no rate limiter) touches the net.
+# Doesn't persist across molab sessions — must run every time.
+TCP_RMEM_OLD="$(tr -s '\t' ' ' < /proc/sys/net/ipv4/tcp_rmem)"
+if sysctl -qw net.ipv4.tcp_rmem="4096 4194304 16777216" 2>/dev/null; then
+  echo "[net] tcp_rmem raised for bulk phase (was: $TCP_RMEM_OLD)"
+  RMEM_RAISED=1
+else
+  echo "[net] tcp_rmem not writable — falling back to many-slow-sockets regime"
+  RMEM_RAISED=0
+fi
+
+restore_rmem() {
+  # Idempotent; also registered on EXIT so a crash/ctrl-C can't leave the box
+  # with a raised window and some later unthrottled tool running.
+  if [ "${RMEM_RAISED:-0}" = 1 ]; then
+    sysctl -qw net.ipv4.tcp_rmem="$TCP_RMEM_OLD" 2>/dev/null \
+      && echo "[net] tcp_rmem restored to default"
+    RMEM_RAISED=0
+  fi
+}
+trap restore_rmem EXIT
+
+# Bulk-download tuning (aria2c). DL_RATE is the AGGREGATE ceiling across every
+# segment of a file combined — it holds regardless of DL_STREAMS (verified:
+# 8 segments under 200M averaged 174 MiB/s). DL_STREAMS is how many segments
+# aria2 splits each file into. The right values depend on which regime we're in:
+#
+#   raised window: one socket alone can exceed the cap, so fewer streams =
+#     smaller synchronized-ramp transients. 2 streams (not 1: a single stalled
+#     segment shouldn't stall the shard). Cap at 150M for margin — each of the
+#     159 shards is a fresh aria2c process with fresh limiter state, and
+#     warm-up overshoot is bigger when sockets are fast. If the marimo burst
+#     tracker still shows shard-boundary spikes near 200+, drop DL_RATE to 100M
+#     (46 GB still finishes in <8 min).
+#
+#   default window: v4 math applies — ~6 MB/s per-socket ceiling, so 8 streams
+#     x ~6 ~= 48 MB/s real throughput, aggregate cap mostly a formality.
+#
+# Both overridable from the environment for sweeps.
+if [ "$RMEM_RAISED" = 1 ]; then
+  DL_RATE="${DL_RATE:-150M}"
+  DL_STREAMS="${DL_STREAMS:-2}"
+else
+  DL_RATE="${DL_RATE:-200M}"
+  DL_STREAMS="${DL_STREAMS:-8}"
+fi
+echo "[net] bulk config: rate cap $DL_RATE, $DL_STREAMS segment(s)/file"
 
 # ---- 3. YOLO weights (aria2, same reasoning as the dataset in step 4) --------
 if [ -s "$PROJECT/best.pt" ]; then
@@ -171,29 +225,19 @@ else
 fi
 
 # ---- 4. Dataset: one shard at a time, aria2 segmented+capped, verified, resumable
-# WHY NOT `hf download`: the crash is bandwidth bursts, not average throughput.
-# net_io_counters during a run showed the average ~75 MB/s but 1-second bursts
-# spiking to 300–350 MB/s — and the instance dies seconds after a burst clears
-# 300. Those bursts are N xet range-get sockets all ramping in lockstep and
-# stacking their startup transients at the interface. hf_xet can't be throttled
-# (Rust binary with its own HTTP stack: ignores LD_PRELOAD shapers and
-# http(s)_proxy env), and tc/cgroup shaping is a no-op under gVisor's userspace
-# netstack (same reason free/df/ss lie in here).
+# WHY NOT `hf download`: hf_xet can't be throttled (Rust binary with its own
+# HTTP stack: ignores LD_PRELOAD shapers and http(s)_proxy env), and tc/cgroup
+# shaping is a no-op under gVisor's userspace netstack (same reason free/df/ss
+# lie in here). Under the OLD 1 MB window it burst to 300-350 MB/s as ~16
+# range-get sockets ramped in lockstep; under the raised window it would be
+# strictly worse. aria2c is the only path with a real aggregate limiter.
 #
-# WHY NOT PLAIN CURL EITHER: a single curl --limit-rate stream never bursts, but
-# it never exceeded ~6 MB/s regardless of the cap — gVisor's per-socket receive
-# window is small, so ONE connection has a hard throughput ceiling independent
-# of any rate limit (bandwidth-delay product). That also explains the old
-# hf_xet average: ~16 sockets x ~6 MB/s/socket ~= ~75 MB/s. The bursts were never
-# excess per-socket capacity — they were many sockets hitting that ceiling at
-# once.
-#
-# THE FIX: aria2c splits each shard into $DL_STREAMS segments (recovers real
-# throughput — several sockets, each near its ~6 MB/s ceiling) while enforcing
-# ONE aggregate rate limit ($DL_RATE) across all of them together, re-checked
-# well under a second. Even if two segments ramp up together, the aggregate
-# throttle reins the pair in before it can stack into a burst — this is the
-# piece plain curl couldn't do (each stream there only knew its own cap).
+# WHY THE RAISED WINDOW + FEW STREAMS (v5): with the default window, one socket
+# tops out ~6 MB/s (bandwidth-delay product), which is what capped v4 at
+# 8 x 6 ~= 48 MB/s regardless of DL_RATE. Raising tcp_rmem lifts a single
+# socket to 200+ MB/s (measured), so throughput no longer needs many sockets —
+# and fewer sockets means smaller startup transients under the same aggregate
+# cap. The cap itself was verified to hold in the fast-socket regime.
 #
 # The /resolve/ endpoint serves the materialized file over plain HTTPS for Xet
 # repos too (same path HF_HUB_DISABLE_XET forces internally); the byte-exact
@@ -266,15 +310,25 @@ printf '[dataset] downloaded=%d skipped=%d retries=%d failed=%d bad=%d  (%dm %ds
 
 if [ "$bad" -ne 0 ] || [ "$failed" -ne 0 ]; then
   echo "FATAL: dataset incomplete. Re-run this script — it resumes." >&2
-  exit 1
+  exit 1   # trap restores tcp_rmem on the way out
 fi
 # aria2 wrote the real files directly into $DEST; no $HF_HOME/hub copy is
 # created by this path, but clean it anyway in case a fallback ever populated it.
 rm -rf "$HF_HOME/hub"
 
+# ---- 4b. Restore the small TCP window BEFORE any unthrottled tool runs ---------
+# Everything past this point (uv python install, uv sync) has NO rate limiter.
+# With the raised window, uv's 4 concurrent wheel streams could stack toward
+# 4 x 200+ MB/s — instant kill. The small default window is itself a ~6 MB/s
+# per-socket throttle: restoring it makes uv safe by construction
+# (4 x ~6 ~= 24 MB/s aggregate). Torch wheels at 24 MB/s cost a couple of
+# minutes; a dead instance costs everything.
+restore_rmem
+
 # ---- 5. Python interpreter ----------------------------------------------------
 # Without this, uv falls back to the system CPython 3.13 and pyproject's
-# `requires-python = "==3.12.*"` rejects it. This is a network fetch too, so retry.
+# `requires-python = "==3.12.*"` rejects it. This is a network fetch too
+# (unthrottled — hence it runs AFTER the window restore), so retry.
 if uv python find "$PY_VERSION" >/dev/null 2>&1; then
   echo "[python] $PY_VERSION already installed."
 else
@@ -290,16 +344,13 @@ else
 fi
 
 # ---- 6. uv sync: throttled and retried ---------------------------------------
-# This is the step that has taken the instance down before. Cause is the same as
-# everything else: uv's default 50 concurrent downloads, against multi-GB wheels
-# (torch et al), on a fragile userspace TCP stack. NOTE: uv has no --limit-rate,
-# so the DL_RATE cap above does NOT apply here — the lever for uv is concurrency.
-# Many parallel wheel streams are exactly the synchronized-ramp burst pattern
-# that crashes the dataset pull, so if a *crash* (not a plain uv error) happens
-# here, drop UV_CONCURRENT_DOWNLOADS to 1 (see the FATAL block). Concurrency is
-# capped to 4 above; the retry loop makes it safe: uv's cache ($UV_CACHE_DIR)
-# keeps every wheel already fetched, so each attempt resumes rather than
-# restarting. A crash costs one wheel, not the environment.
+# This is the step that has taken the instance down before. uv has no
+# --limit-rate, so DL_RATE does NOT apply here — the levers for uv are
+# (a) concurrency, capped to 4 above, and (b) the restored small TCP window
+# (step 4b), which caps each stream near ~6 MB/s at the transport layer. Do NOT
+# run uv sync while the window is raised. The retry loop makes failures cheap:
+# uv's cache ($UV_CACHE_DIR) keeps every wheel already fetched, so each attempt
+# resumes rather than restarting. A crash costs one wheel, not the environment.
 echo "[env] uv sync (downloads=$UV_CONCURRENT_DOWNLOADS, installs=$UV_CONCURRENT_INSTALLS)..."
 synced=0
 for attempt in $(seq 1 5); do
