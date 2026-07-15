@@ -87,7 +87,8 @@ async def download_shard(client, filename, size, sem, progress_bar):
                     r.raise_for_status()
                     
                     with open(temp_path, "wb") as f:
-                        async for chunk in r.iter_bytes(chunk_size=CHUNK_SIZE):
+                        # FIX: Changed to aiter_bytes() for async streaming
+                        async for chunk in r.aiter_bytes(chunk_size=CHUNK_SIZE):
                             chunk_len = len(chunk)
                             # Strict sleep here guarantees we never violate the global speed limit
                             await rate_limiter.consume(chunk_len)
