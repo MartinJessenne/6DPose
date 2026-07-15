@@ -18,9 +18,9 @@ from tqdm.asyncio import tqdm
 # ---- Configuration ----
 DATASET = "UItraviolet/industrial_cart"
 DEST_DIR = Path("./dataset/data")
-CONCURRENT_DOWNLOADS = 3       # Number of files to download at once
+CONCURRENT_DOWNLOADS = 24         # 24 sockets * ~6 MB/s = ~144 MB/s
+MAX_BANDWIDTH = 150 * 1024 * 1024  # Remains your hard safety ceiling
 CHUNK_SIZE = 128 * 1024         # 128 KB chunks
-MAX_BANDWIDTH = 150 * 1024 * 1024  # Strict aggregate limit: 150 MB/s
 
 # Retrieve HF token
 HF_TOKEN = os.getenv("HF_TOKEN")
