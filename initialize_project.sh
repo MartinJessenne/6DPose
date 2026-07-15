@@ -23,8 +23,23 @@
 # sockets ramping in lockstep. hf_xet can't be throttled (Rust binary, own HTTP
 # stack — ignores LD_PRELOAD shapers like trickle AND, per HF's own tracker,
 # http(s)_proxy env vars), and tc/cgroup shaping is a no-op under gVisor. So the
-# bulk transfers below now bypass hf_xet entirely and use a single rate-capped
-# curl per file. See the step 4 note for the mechanism.
+# bulk transfers below bypass hf_xet entirely.
+#
+# First attempt was a single rate-capped curl per file — it never bursts, but it
+# capped effective speed at ~6 MB/s, not the intended ~200. Reason: gVisor's
+# userspace TCP keeps a small per-socket receive window, so ONE connection has a
+# hard throughput ceiling regardless of --limit-rate (bandwidth-delay product).
+# This also retroactively explains the old ~75 MB/s xet average: ~16 concurrent
+# range-get sockets x ~6 MB/s/socket ~= 75 MB/s. The bursts were never about
+# per-socket excess capacity — they were ~16 sockets each hitting that ceiling in
+# the same instant.
+#
+# Fix: aria2c. It segments one file across N connections (recovers the
+# concurrency you need for real throughput) but enforces a single AGGREGATE
+# rate limit across all of them, re-checked at sub-second granularity — unlike
+# curl, where each stream only knows its own cap. Even if two segments start
+# together, the aggregate throttle reins the pair in before it can stack into a
+# spike. See the step 4 note for tuning knobs.
 set -uo pipefail
 
 export HOME=/home/marimo
@@ -41,10 +56,10 @@ export UV_CACHE_DIR="$HOME/.cache/uv"
 export TMPDIR="$HOME/tmp"
 
 # HF metadata calls only (the repo_info manifest fetch). The BULK transfers no
-# longer go through hf_xet at all — they're done with rate-capped curl (step 4),
-# which is the only thing that reliably prevents the >300 MB/s bursts that crash
-# the box. These xet knobs are kept as guardrails for any accidental hf download
-# fallback; they do NOT govern the dataset/weights transfers anymore.
+# longer go through hf_xet at all — they're done with segmented, aggregate-rate-
+# capped aria2c (step 4), which is what reliably prevents the >300 MB/s bursts
+# that crash the box. These xet knobs are kept as guardrails for any accidental
+# hf download fallback; they do NOT govern the dataset/weights transfers anymore.
 export HF_XET_CHUNK_CACHE_SIZE_BYTES=0   # each byte written once; dedup cache buys nothing
 export HF_XET_NUM_CONCURRENT_RANGE_GETS=4
 export HF_HUB_DOWNLOAD_TIMEOUT=30        # fail a dead socket instead of waiting forever
@@ -59,12 +74,16 @@ export UV_CONCURRENT_INSTALLS=2
 export UV_CONCURRENT_BUILDS=1
 export UV_HTTP_TIMEOUT=60          # don't hang forever on a dead socket
 
-# Bandwidth ceiling for every bulk download (curl --limit-rate). The crash is
-# caused by 1-second bursts above ~300 MB/s; a single capped stream cannot exceed
-# this in any 1s window, so the burst can't form. 200M leaves ~100 MB/s of
-# headroom. Overridable, so you can sweep it (e.g. DL_RATE=280M) to pin the exact
-# crash floor against the marimo burst tracker. curl's `M` suffix is MiB/s.
+# Bulk-download tuning (aria2c). DL_RATE is the AGGREGATE ceiling across every
+# segment of a file combined — this is what stops the >300 MB/s burst, and it
+# holds regardless of DL_STREAMS. DL_STREAMS is how many segments aria2 splits
+# each file into; since one gVisor socket tops out near ~6 MB/s, you need several
+# to actually reach DL_RATE (8 streams x ~6 MB/s/socket ceiling ~= plenty of
+# headroom under a 200 MB/s aggregate cap). Both are overridable so you can sweep
+# them (start DL_STREAMS low, raise it) against the marimo burst tracker to find
+# the max concurrency that still never shows a burst above threshold.
 DL_RATE="${DL_RATE:-200M}"
+DL_STREAMS="${DL_STREAMS:-8}"
 
 SHARD_TIMEOUT=300   # wall-clock kill for a hung shard
 ATTEMPTS=3          # per-file retry budget (yolo weights + each dataset shard)
@@ -104,55 +123,78 @@ else
   exit 1
 fi
 
-# ---- 2b. Recover the raw token for curl --------------------------------------
-# The bulk downloads (steps 3 & 4) use curl, which needs the token in an
+# ---- 2b. Recover the raw token for aria2 --------------------------------------
+# The bulk downloads (steps 3 & 4) use aria2c, which needs the token in an
 # Authorization header. `hf auth login` above wrote it to $HF_HOME/token; prefer
-# the env var if we still have it, else read it back from there. curl uses this
-# bearer only for the initial huggingface.co request; the /resolve/ redirect to
-# the CDN is presigned, and curl correctly drops the header on the cross-host hop.
+# the env var if we still have it, else read it back from there. This bearer is
+# only needed for the initial huggingface.co request; the /resolve/ redirect to
+# the CDN is presigned, and aria2 correctly drops the header on the cross-host hop.
 DL_TOKEN="${HF_TOKEN:-}"
 [ -n "$DL_TOKEN" ] || DL_TOKEN="$(tr -d '\r\n' < "$HF_HOME/token" 2>/dev/null || true)"
-[ -n "$DL_TOKEN" ] || { echo "FATAL: no HF token available for curl downloads." >&2; exit 1; }
+[ -n "$DL_TOKEN" ] || { echo "FATAL: no HF token available for downloads." >&2; exit 1; }
 
-# ---- 3. YOLO weights (curl-capped, same reasoning as the dataset in step 4) ---
+# ---- 2c. aria2 ------------------------------------------------------------
+# Segmented, aggregate-rate-limited downloads (see the v4 note up top). Not
+# preinstalled on a fresh molab image.
+if ! command -v aria2c >/dev/null 2>&1; then
+  echo "[deps] installing aria2..."
+  export DEBIAN_FRONTEND=noninteractive
+  apt update -qq && apt install -y -qq aria2 \
+    || { echo "FATAL: could not install aria2." >&2; exit 1; }
+fi
+
+# ---- 3. YOLO weights (aria2, same reasoning as the dataset in step 4) --------
 if [ -s "$PROJECT/best.pt" ]; then
   echo "[yolo] best.pt already present."
 else
   echo "[yolo] downloading best.pt..."
   YOLO_PATH="runs/segment/train-2/weights/best.pt"
   for attempt in $(seq 1 $ATTEMPTS); do
-    if timeout 300 curl -sfL --limit-rate "$DL_RATE" \
-         -H "Authorization: Bearer $DL_TOKEN" \
-         -o "$PROJECT/best.pt" \
+    if timeout 300 aria2c \
+         --header="Authorization: Bearer $DL_TOKEN" \
+         -x "$DL_STREAMS" -s "$DL_STREAMS" -k 1M \
+         --max-overall-download-limit="$DL_RATE" \
+         --file-allocation=none --auto-file-renaming=false --allow-overwrite=true \
+         -d "$PROJECT" -o "best.pt.part" \
          "https://huggingface.co/$MODEL/resolve/main/$YOLO_PATH" \
+         >/dev/null 2>&1 \
+       && mv "$PROJECT/best.pt.part" "$PROJECT/best.pt" \
        && [ -s "$PROJECT/best.pt" ]; then
       echo "[yolo] ok."
       break
     fi
     echo "[yolo] retry $attempt/$ATTEMPTS"
-    rm -f "$PROJECT/best.pt"   # drop any partial/empty before refetching
+    rm -f "$PROJECT/best.pt.part" "$PROJECT/best.pt.part.aria2" "$PROJECT/best.pt"
     sleep 5
   done
   [ -s "$PROJECT/best.pt" ] || { echo "FATAL: could not fetch best.pt." >&2; exit 1; }
 fi
 
-# ---- 4. Dataset: one shard at a time, curl rate-capped, verified, resumable ---
-# WHY CURL, NOT `hf download`: the crash is bandwidth bursts, not average
-# throughput. net_io_counters during a run showed the average ~75 MB/s but
-# 1-second bursts spiking to 300–350 MB/s — and the instance dies seconds after a
-# burst clears 300. Those bursts are N xet range-get sockets all ramping in
-# lockstep and stacking their startup transients at the interface.
+# ---- 4. Dataset: one shard at a time, aria2 segmented+capped, verified, resumable
+# WHY NOT `hf download`: the crash is bandwidth bursts, not average throughput.
+# net_io_counters during a run showed the average ~75 MB/s but 1-second bursts
+# spiking to 300–350 MB/s — and the instance dies seconds after a burst clears
+# 300. Those bursts are N xet range-get sockets all ramping in lockstep and
+# stacking their startup transients at the interface. hf_xet can't be throttled
+# (Rust binary with its own HTTP stack: ignores LD_PRELOAD shapers and
+# http(s)_proxy env), and tc/cgroup shaping is a no-op under gVisor's userspace
+# netstack (same reason free/df/ss lie in here).
 #
-# hf_xet can't be throttled (Rust binary with its own HTTP stack: ignores
-# LD_PRELOAD shapers and http(s)_proxy env), and tc/cgroup shaping is a no-op
-# under gVisor's userspace netstack (same reason free/df/ss lie in here). So we
-# bypass xet for the bulk path and pull each shard with ONE curl. --limit-rate
-# paces how fast curl drains the socket; TCP flow control then shrinks the window
-# and the SENDER slows to match. A single capped stream physically cannot put
-# more than DL_RATE into any 1s window, so the >300 burst can't form.
+# WHY NOT PLAIN CURL EITHER: a single curl --limit-rate stream never bursts, but
+# it never exceeded ~6 MB/s regardless of the cap — gVisor's per-socket receive
+# window is small, so ONE connection has a hard throughput ceiling independent
+# of any rate limit (bandwidth-delay product). That also explains the old
+# hf_xet average: ~16 sockets x ~6 MB/s/socket ~= ~75 MB/s. The bursts were never
+# excess per-socket capacity — they were many sockets hitting that ceiling at
+# once.
 #
-# Single stream is load-bearing: re-introducing parallel range-gets brings back
-# the synchronized-ramp stacking that is the entire problem. Do NOT parallelize.
+# THE FIX: aria2c splits each shard into $DL_STREAMS segments (recovers real
+# throughput — several sockets, each near its ~6 MB/s ceiling) while enforcing
+# ONE aggregate rate limit ($DL_RATE) across all of them together, re-checked
+# well under a second. Even if two segments ramp up together, the aggregate
+# throttle reins the pair in before it can stack into a burst — this is the
+# piece plain curl couldn't do (each stream there only knew its own cap).
+#
 # The /resolve/ endpoint serves the materialized file over plain HTTPS for Xet
 # repos too (same path HF_HUB_DISABLE_XET forces internally); the byte-exact
 # check below is the backstop against any endpoint quirk that truncates.
@@ -179,22 +221,26 @@ while IFS=$'\t' read -r f size; do
   if [ -f "$DEST/$f" ] && [ "$(stat -c %s "$DEST/$f" 2>/dev/null)" = "$size" ]; then
     skipped=$((skipped + 1)); continue
   fi
-  rm -f "$DEST/$f"
-  # curl won't create parent dirs the way hf download did; shard paths include a
-  # leading subdir (e.g. data/train-00000-...parquet), so make it here.
+  rm -f "$DEST/$f" "$DEST/$f.aria2"
+  # aria2 (like curl) won't create parent dirs the way hf download did; shard
+  # paths include a leading subdir (e.g. data/train-00000-...parquet).
   mkdir -p "$(dirname "$DEST/$f")"
 
   got=0
   for attempt in $(seq 1 $ATTEMPTS); do
-    if timeout "$SHARD_TIMEOUT" curl -sfL --limit-rate "$DL_RATE" \
-         -H "Authorization: Bearer $DL_TOKEN" \
-         -o "$DEST/$f" \
-         "https://huggingface.co/datasets/$DATASET/resolve/main/$f?download=true"; then
+    if timeout "$SHARD_TIMEOUT" aria2c \
+         --header="Authorization: Bearer $DL_TOKEN" \
+         -x "$DL_STREAMS" -s "$DL_STREAMS" -k 1M \
+         --max-overall-download-limit="$DL_RATE" \
+         --file-allocation=none --auto-file-renaming=false --allow-overwrite=true \
+         -d "$(dirname "$DEST/$f")" -o "$(basename "$f")" \
+         "https://huggingface.co/datasets/$DATASET/resolve/main/$f?download=true" \
+         >/dev/null 2>&1; then
       got=1; break
     fi
     retried=$((retried + 1))
     echo "$(date +%T)  [dataset] retry $attempt/$ATTEMPTS  $f"
-    rm -f "$DEST/$f"   # drop the partial a timed-out/hung curl left behind
+    rm -f "$DEST/$f" "$DEST/$f.aria2"   # drop the partial a timed-out/hung fetch left behind
     sleep 5
   done
 
@@ -222,8 +268,8 @@ if [ "$bad" -ne 0 ] || [ "$failed" -ne 0 ]; then
   echo "FATAL: dataset incomplete. Re-run this script — it resumes." >&2
   exit 1
 fi
-# curl wrote the real files directly into $DEST; no $HF_HOME/hub copy is created
-# by this path, but clean it anyway in case a fallback ever populated it.
+# aria2 wrote the real files directly into $DEST; no $HF_HOME/hub copy is
+# created by this path, but clean it anyway in case a fallback ever populated it.
 rm -rf "$HF_HOME/hub"
 
 # ---- 5. Python interpreter ----------------------------------------------------
