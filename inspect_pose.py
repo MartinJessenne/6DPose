@@ -39,7 +39,6 @@ CLI Configuration Overrides:
   random_samples=NUM       Number of random samples to run in random validation mode (default: 10).
   indices=[IDX, IDX, ...]  Specific test sample indices to debug in targeted mode.
   model=ppf|ransac         The 6D pose estimation method to use (default: 'ppf').
-  depth_trunc=FLOAT        Maximum depth scaling truncation in meters (default: 3.0).
   output_dir=PATH          Directory path to save GLB outputs.
 """
 
@@ -290,7 +289,7 @@ def run_targeted_inspection(
 # =====================================================================
 # 3. CLI ARGUMENT PARSER AND MAIN ENTRY POINT
 # =====================================================================
-@hydra.main(config_path="config", config_name="config", version_base=None)
+@hydra.main(config_path="config", config_name="inspect_config", version_base=None)
 def main(cfg: DictConfig):
     # Load pipeline assets
     print("Loading pipeline assets...")

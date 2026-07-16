@@ -386,7 +386,7 @@ def run_parameter_sweep(
 # =====================================================================
 # 4. CLI ENTRY POINT
 # =====================================================================
-@hydra.main(config_path="config", config_name="config", version_base=None)
+@hydra.main(config_path="config", config_name="benchmark_config", version_base=None)
 def main(cfg: DictConfig):
     # Load model, camera, and dataset
     print("Loading pipeline assets...")
