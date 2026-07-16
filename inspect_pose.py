@@ -298,7 +298,7 @@ def run_targeted_inspection(
 @hydra.main(config_path="config", config_name="inspect_config", version_base=None)
 def main(cfg: DictConfig):
     from hydra.core.hydra_config import HydraConfig
-    hydra_dir = HydraConfig.get().runtime.output_dir if HydraConfig.was_initialized() else "."
+    hydra_dir = HydraConfig.get().runtime.output_dir if HydraConfig.initialized() else "."
 
     # Load pipeline assets
     print("Loading pipeline assets...")

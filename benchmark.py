@@ -275,7 +275,7 @@ def run_parameter_sweep(
     to find the Pareto Front of optimal accuracy vs. speed trade-offs.
     """
     from hydra.core.hydra_config import HydraConfig
-    hydra_dir = HydraConfig.get().runtime.output_dir if HydraConfig.was_initialized() else "."
+    hydra_dir = HydraConfig.get().runtime.output_dir if HydraConfig.initialized() else "."
     db_name = os.path.join(hydra_dir, f"optuna_{study_name}.db")
     db_url = f"sqlite:///{db_name}"
     
