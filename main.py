@@ -454,27 +454,22 @@ def point_cloud_processing(
 # =====================================================================
 # 5. COORDINATE TRANSFORMS AND 6D POSE ESTIMATION
 # =====================================================================
-def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int, T_robot_camera: np.ndarray) -> np.ndarray:
+def compute_ground_truth_pose(T_world_camera: np.ndarray, T_world_cart: np.ndarray, T_robot_camera: np.ndarray) -> np.ndarray:
     """
-    Retrieves the ground truth cart pose, maps it from the Isaac Sim arbitrary world frame 
+    Computes the ground truth 6D pose of the cart in the robot's base frame.
+    
+    The function transforms the cart pose from global world coordinates (arbitrary USD origin)
     to the camera coordinate frame (adjusting for USD to OpenCV conventions), and projects 
     it into the robot's base_link frame.
     
     Args:
-        local_dataset (Dataset): The Hugging Face dataset.
-        sample_idx (int): The index of the sample.
+        T_world_camera (np.ndarray): 4x4 transform from world to camera.
+        T_world_cart (np.ndarray): 4x4 transform from world to cart.
         T_robot_camera (np.ndarray): 4x4 extrinsic transform from camera to robot base link.
         
     Returns:
         np.ndarray: A 4x4 homogeneous transformation matrix in the robot's base frame.
-        
-    Example:
-        >>> T_gt = compute_ground_truth_pose(local_dataset, 5, T_robot_camera)
     """
-    # 1. Load raw flat lists and reshape into 4x4 row-major matrices
-    T_world_camera = np.asarray(local_dataset["camera_view_transform"][sample_idx]).reshape(4, 4).T
-    T_world_cart = np.asarray(local_dataset["bbox_3d_transform"][sample_idx][0]).reshape(4, 4).T
-    
     # 2. Define USD (Z-back, Y-up) to OpenCV (Z-forward, Y-down) coordinate change matrix
     T_usd_to_cv = np.diag([1, -1, -1, 1])
     
