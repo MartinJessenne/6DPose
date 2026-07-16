@@ -48,12 +48,84 @@ import hydra
 from omegaconf import DictConfig
 from datasets import Dataset
 
+import logging
+from pydantic import BaseModel, Field
+
 from main import (
     Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
     instance_detected
 )
 from methods.base import BasePoseEstimator
+
+# =====================================================================
+# 0. POSE ERROR METRICS & DECOMPOSITION MATH
+# =====================================================================
+class PoseErrorMetrics(BaseModel):
+    trans_xy: float = Field(ge=0.0)
+    trans_z: float
+    yaw: float = Field(ge=-180.0, le=180.0)
+    pitch: float = Field(ge=-90.0, le=90.0)
+    roll: float = Field(ge=-180.0, le=180.0)
+    geodesic_rot: float = Field(ge=0.0, le=180.0)
+
+def extract_pose_errors(T_est: np.ndarray, T_gt: np.ndarray) -> PoseErrorMetrics:
+    t_est = T_est[:3, 3]
+    t_gt = T_gt[:3, 3]
+    
+    trans_xy = float(np.linalg.norm(t_est[:2] - t_gt[:2]))
+    trans_z = float(t_est[2] - t_gt[2])
+    
+    R_est = T_est[:3, :3]
+    R_gt = T_gt[:3, :3]
+    
+    # Error rotation matrix from ground truth to estimate
+    R_err = R_gt.T @ R_est
+    
+    r11, r12, r13 = R_err[0, 0], R_err[0, 1], R_err[0, 2]
+    r21, r22, r23 = R_err[1, 0], R_err[1, 1], R_err[1, 2]
+    r31, r32, r33 = R_err[2, 0], R_err[2, 1], R_err[2, 2]
+    
+    # Extract pitch (asin(-r31)), roll (atan2(r32, r33)), yaw (atan2(r21, r11))
+    pitch_rad = np.arcsin(np.clip(-r31, -1.0, 1.0))
+    roll_rad = np.arctan2(r32, r33)
+    yaw_rad = np.arctan2(r21, r11)
+    
+    pitch = float(np.degrees(pitch_rad))
+    roll = float(np.degrees(roll_rad))
+    yaw = float(np.degrees(yaw_rad))
+    
+    # Standard geodesic rotation error
+    trace_val = np.trace(R_err)
+    cos_theta = np.clip((trace_val - 1.0) / 2.0, -1.0, 1.0)
+    geodesic_rot = float(np.degrees(np.arccos(cos_theta)))
+    
+    return PoseErrorMetrics(
+        trans_xy=trans_xy,
+        trans_z=trans_z,
+        yaw=yaw,
+        pitch=pitch,
+        roll=roll,
+        geodesic_rot=geodesic_rot
+    )
+
+def compute_average_recall(errors: list[PoseErrorMetrics], total_samples: int) -> float:
+    if total_samples <= 0:
+        return 0.0
+        
+    translation_thresholds = [0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.10]
+    rotation_thresholds = [0.5, 1.0, 2.0, 5.0, 10.0, 15.0]
+    
+    recalls = []
+    for t_thresh in translation_thresholds:
+        for r_thresh in rotation_thresholds:
+            successes = sum(
+                1 for e in errors
+                if e.trans_xy < t_thresh and abs(e.yaw) < r_thresh
+            )
+            recalls.append(successes / total_samples)
+            
+    return float(np.mean(recalls))
 
 # Set logging level for Optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -112,22 +184,21 @@ def evaluate_pipeline(
     estimator: BasePoseEstimator,
     sample_indices: list[int],
     depth_trunc: float = 3.0
-) -> tuple[list[float], list[float], list[float], int]:
-
+) -> tuple[list[PoseErrorMetrics], list[float], int, int]:
     """
     Evaluates the pose estimation pipeline on a set of sample indices.
     
     Returns:
         tuple containing:
-            - trans_errors (list[float]): Translation error for each successfully matched sample.
-            - rot_errors (list[float]): Rotation error for each successfully matched sample.
+            - error_metrics (list[PoseErrorMetrics]): Decomposed errors for successfully matched samples.
             - times (list[float]): Pose estimation duration in seconds for each successful sample.
-            - failed_count (int): Number of samples that failed to detect or estimate pose.
+            - detection_failures (int): Count of samples where YOLO failed to detect a cart.
+            - pose_failures (int): Count of samples where pose estimation failed.
     """
-    trans_errors = []
-    rot_errors = []
+    error_metrics = []
     times = []
-    failed_count = 0
+    detection_failures = 0
+    pose_failures = 0
     
     for sample_idx in sample_indices:
         img = dataset["rgb"][sample_idx]
@@ -136,21 +207,22 @@ def evaluate_pipeline(
         # 1. Run YOLO detection
         result = model(img, retina_masks=True, verbose=False)
         if not instance_detected(result):
-            failed_count += 1
+            detection_failures += 1
             continue
             
         # 2. Segment and Reconstruct Point Cloud
         try:
             cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera, depth_trunc=depth_trunc)
         except Exception:
-            failed_count += 1
+            logging.exception(f"PointCloud processing failed for index {sample_idx}")
+            pose_failures += 1
             continue
-
             
         # Verify CAD mesh exists
         mesh_file = f"meshes/{cart_type}.ply"
         if not os.path.exists(mesh_file):
-            failed_count += 1
+            logging.error(f"CAD file {mesh_file} not found for index {sample_idx}")
+            pose_failures += 1
             continue
         cad_mesh = o3d.io.read_triangle_mesh(mesh_file)
         
@@ -159,30 +231,31 @@ def evaluate_pipeline(
         try:
             T_final = estimator.estimate_pose(pcd, cad_mesh)
             if T_final is None:
-                failed_count += 1
+                logging.error(f"Pose estimator returned None for index {sample_idx}")
+                pose_failures += 1
                 continue
         except Exception:
-            failed_count += 1
+            logging.exception(f"Pose estimator raised an exception for index {sample_idx}")
+            pose_failures += 1
             continue
         elapsed_time = time.time() - start_time
             
         # 4. Calculate Ground Truth pose and compare
-        # We explicitly pass the estimator's extrinsic matrix (T_robot_camera) to ensure the 
-        # ground truth calculation uses the same coordinate transform alignment as the estimator.
-        # This prevents mismatches if extrinsics are overridden dynamically via Hydra configs.
         extrinsic = getattr(estimator, "extrinsic", None)
         if extrinsic is None:
             raise ValueError("Estimator must have an extrinsic camera-to-robot transform configured.")
-        T_ground_truth = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=extrinsic)
         
-        err_trans = compute_translation_error(T_final, T_ground_truth)
-        err_rot = compute_rotation_error(T_final, T_ground_truth)
+        try:
+            T_ground_truth = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=extrinsic)
+            metrics = extract_pose_errors(T_final, T_ground_truth)
+            error_metrics.append(metrics)
+            times.append(elapsed_time)
+        except Exception:
+            logging.exception(f"Error metric extraction failed for index {sample_idx}")
+            pose_failures += 1
+            continue
         
-        trans_errors.append(err_trans)
-        rot_errors.append(err_rot)
-        times.append(elapsed_time)
-        
-    return trans_errors, rot_errors, times, failed_count
+    return error_metrics, times, detection_failures, pose_failures
 
 
 # =====================================================================
@@ -190,29 +263,59 @@ def evaluate_pipeline(
 # =====================================================================
 def run_parameter_sweep(
     dataset, model, camera, study_name, estimator_cls: type[BasePoseEstimator], 
-    sweep_size: int, n_trials: int, extrinsic: np.ndarray = None
+    sweep_size: int, n_trials: int, extrinsic: np.ndarray = None, seed: int = None
 ):
     """
     Launches a Multi-Objective Bayesian Optimization sweep using Optuna
     to find the Pareto Front of optimal accuracy vs. speed trade-offs.
-
-    Args:
-        dataset: The Parquet dataset stream.
-        model: The 2D YOLO segment model.
-        camera: The camera model configuration.
-        study_name: SQLite study file identifier.
-        estimator_cls: Concrete estimator class type to tune.
-        sweep_size: Validation subset sample count.
-        n_trials: Bayesian optimization iteration count.
-        extrinsic (np.ndarray, optional): 4x4 camera-to-robot extrinsics matrix. Explicitly passed
-                                         here so that trial estimator instances are evaluated under
-                                         the correct configuration-configured coordinate alignment.
     """
-    # Select a fixed validation subset for the sweep to ensure consistent comparisons
+    db_name = f"optuna_{study_name}.db"
+    db_url = f"sqlite:///{db_name}"
+    
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=db_url,
+        directions=["minimize", "minimize"],  # Minimize error rate AND execution time
+        load_if_exists=True
+    )
+    
+    existing_seed = study.user_attrs.get("seed")
+    existing_eval_size = study.user_attrs.get("eval_size")
+    existing_indices = study.user_attrs.get("sweep_indices")
+    
     total_samples = len(dataset)
-    sweep_indices = np.random.choice(total_samples, min(sweep_size, total_samples), replace=False)
-    print(f"Running Multi-Objective sweep for '{estimator_cls.__name__}' over {len(sweep_indices)} samples for {n_trials} trials...")
+    
+    if existing_seed is not None:
+        # Integrity Guard Check
+        if existing_eval_size != sweep_size:
+            raise ValueError(
+                f"Validation size mismatch: DB has eval_size={existing_eval_size}, "
+                f"but sweep requested eval_size={sweep_size}."
+            )
+        if seed is not None and seed != existing_seed:
+            raise ValueError(
+                f"Seed mismatch: DB has seed={existing_seed}, but sweep requested seed={seed}."
+            )
+        seed = existing_seed
+        sweep_indices = existing_indices
+        print(f"Resuming existing study. Loaded seed={seed}, eval_size={sweep_size}")
+    else:
+        # Create fresh attributes and store
+        if seed is None:
+            seed = int(np.random.SeedSequence().entropy % (2**32))
+        rng = np.random.default_rng(seed)
+        sweep_indices = rng.choice(total_samples, min(sweep_size, total_samples), replace=False).tolist()
+        
+        study.set_user_attr("seed", seed)
+        study.set_user_attr("eval_size", sweep_size)
+        study.set_user_attr("sweep_indices", sweep_indices)
+        print(f"Created new study. Seed={seed}, eval_size={sweep_size}")
+        
     print(f"Sweep validation indices: {sweep_indices}\n")
+    
+    # Seed global random number generators
+    np.random.seed(seed)
+    o3d.utility.random.seed(seed)
     
     def objective(trial: optuna.Trial) -> tuple[float, float]:
         # 1. Suggest global parameters
@@ -224,36 +327,37 @@ def run_parameter_sweep(
         # 3. Instantiate model with trial parameters
         trial_estimator = estimator_cls(params=suggested_params, extrinsic=extrinsic)
         
-        trans_errs, rot_errs, times, failed = evaluate_pipeline(
+        error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
             dataset, model, camera, trial_estimator, sweep_indices, depth_trunc=depth_trunc
         )
+        
+        total_failed = det_failed + pose_failed
+        total_matched = len(error_metrics)
+        total_evaluated = total_matched + total_failed
+        
+        # Calculate Average Recall
+        ar = compute_average_recall(error_metrics, total_evaluated)
+        accuracy_score = 1.0 - ar
+        
+        # Calculate p95 execution time with 5s penalty for failures
+        all_times = times + [5.0] * total_failed
+        p95_time = float(np.percentile(all_times, 95)) if all_times else 5.0
+        
+        # Save trial diagnostics
+        trial.set_user_attr("average_recall", ar)
+        trial.set_user_attr("p95_time", p95_time)
+        trial.set_user_attr("detection_failures", det_failed)
+        trial.set_user_attr("pose_failures", pose_failed)
+        
+        if total_matched > 0:
+            flips = sum(1 for e in error_metrics if abs(e.yaw) > 90.0)
+            trial.set_user_attr("flip_rate", flips / total_matched)
+        else:
+            trial.set_user_attr("flip_rate", 0.0)
+            
+        return accuracy_score, p95_time
 
-
-        
-        # Penalize failures heavily
-        penalty = 5.0 * failed
-        
-        # Objective 1: Accuracy (Combined mean translation and rotation errors)
-        mean_trans = np.mean(trans_errs) if trans_errs else 1.5
-        mean_rot = np.mean(rot_errs) if rot_errs else 180.0
-        accuracy_score = mean_trans + (mean_rot / 180.0) + penalty
-        
-        # Objective 2: Average Execution Time per sample (seconds)
-        mean_time = np.mean(times) if times else 5.0  # Penalty time if failed
-        
-        return accuracy_score, mean_time
-
-    db_name = f"optuna_{study_name}.db"
-    db_url = f"sqlite:///{db_name}"
-    
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=db_url,
-        directions=["minimize", "minimize"],  # Minimize error AND execution time
-        load_if_exists=True
-    )
     print(f"Sweep results are being saved to SQLite database: '{db_name}'")
-    
     study.optimize(objective, n_trials=n_trials)
     
     print("\n" + "=" * 50)
@@ -262,8 +366,8 @@ def run_parameter_sweep(
     print(f"Found {len(study.best_trials)} optimal trade-off trials on the Pareto Front:")
     for t_idx, trial in enumerate(study.best_trials):
         print(f"\n[Trial {trial.number}]")
-        print(f"  - Accuracy Loss Value:   {trial.values[0]:.4f}")
-        print(f"  - Avg Execution Time:     {trial.values[1]:.4f}s")
+        print(f"  - Accuracy Loss (1-AR):  {trial.values[0]:.4f}")
+        print(f"  - p95 Execution Time:    {trial.values[1]:.4f}s")
         print("  - Hyperparameters:")
         for name, val in trial.params.items():
             print(f"    * {name}: {val}")
@@ -273,15 +377,6 @@ def run_parameter_sweep(
 # =====================================================================
 # 4. CLI ENTRY POINT
 # =====================================================================
-# The @hydra.main decorator intercepts command-line execution and manages:
-# 1. Config Path Resolution: Searches the local directory 'config/' for YAML config templates.
-# 2. Config Composition: Reads 'config.yaml' as the root file, which declares default subconfigs
-#    (e.g., loading model presets under config/model/ and dataset settings under config/dataset/).
-# 3. CLI Overrides parsing: Converts CLI key-value assignments (like 'model=ransac' or 'sweep=true')
-#    into overrides, merges them with the default configuration tree, and encapsulates them into 
-#    an OmegaConf DictConfig object.
-# 4. Working Directory Management: Hydra automatically handles logging output paths and creates a 
-#    unique execution folder for each run (or multi-run sweep studies) to prevent output collisions.
 @hydra.main(config_path="config", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     # Load model, camera, and dataset
@@ -317,47 +412,93 @@ def main(cfg: DictConfig):
             estimator_cls=estimator_cls,
             sweep_size=cfg.eval_size,
             n_trials=cfg.trials,
-            extrinsic=extrinsic
+            extrinsic=extrinsic,
+            seed=cfg.get("seed", None)
         )
 
     else:
         # Default Evaluation mode
+        seed = cfg.get("seed", None)
+        if seed is None:
+            seed = int(np.random.SeedSequence().entropy % (2**32))
+        
+        np.random.seed(seed)
+        o3d.utility.random.seed(seed)
+        
         total_samples = len(dataset)
-        eval_indices = np.random.choice(total_samples, min(cfg.eval_size, total_samples), replace=False)
+        eval_indices = np.random.choice(total_samples, min(cfg.eval_size, total_samples), replace=False).tolist()
         
         # Instantiate estimator dynamically via Hydra
         estimator = hydra.utils.instantiate(cfg.model)
             
         print(f"Evaluating '{estimator_cls.__name__}' parameters on {len(eval_indices)} test samples...")
+        print(f"Seed: {seed}")
         print(f"Indices: {eval_indices}\n")
         
-        trans_errs, rot_errs, times, failed = evaluate_pipeline(
+        error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
             dataset, model, camera, estimator, eval_indices, depth_trunc=cfg.depth_trunc
         )
         
-        successful = len(trans_errs)
-        total = successful + failed
+        successful = len(error_metrics)
+        total_failed = det_failed + pose_failed
+        total = successful + total_failed
         
         print("\n" + "=" * 50)
         print("BENCHMARK REPORT (Default Parameters)")
         print("=" * 50)
         print(f"Detections & Matches: {successful} / {total} (Success rate: {successful/total*100:.1f}%)")
+        print(f"  - YOLO detection failures: {det_failed}")
+        print(f"  - Pose estimation failures: {pose_failed}")
+        
         if successful > 0:
-            print(f"Translation Error (meters):")
-            print(f"  - Mean:   {np.mean(trans_errs):.4f}")
-            print(f"  - Median: {np.median(trans_errs):.4f}")
-            print(f"  - Min:    {np.min(trans_errs):.4f}")
-            print(f"  - Max:    {np.max(trans_errs):.4f}")
-            print(f"Rotation Error (degrees):")
-            print(f"  - Mean:   {np.mean(rot_errs):.2f}°")
-            print(f"  - Median: {np.median(rot_errs):.2f}°")
-            print(f"  - Min:    {np.min(rot_errs):.2f}°")
-            print(f"  - Max:    {np.max(rot_errs):.2f}°")
-            print(f"Execution Time (seconds):")
-            print(f"  - Mean:   {np.mean(times):.4f}s")
-            print(f"  - Median: {np.median(times):.4f}s")
-            print(f"  - Min:    {np.min(times):.4f}s")
-            print(f"  - Max:    {np.max(times):.4f}s")
+            ar = compute_average_recall(error_metrics, total)
+            print(f"Average Recall (BOP-style AR): {ar:.4f}")
+            
+            p95_latency = np.percentile(times + [5.0] * total_failed, 95)
+            print(f"p95 Latency: {p95_latency:.4f}s")
+            
+            # Decompose errors
+            trans_xy_errs = [e.trans_xy for e in error_metrics]
+            trans_z_errs = [e.trans_z for e in error_metrics]
+            yaw_errs = [e.yaw for e in error_metrics]
+            pitch_errs = [e.pitch for e in error_metrics]
+            roll_errs = [e.roll for e in error_metrics]
+            geodesic_errs = [e.geodesic_rot for e in error_metrics]
+            
+            print(f"Translation Error (XY in meters):")
+            print(f"  - Mean:   {np.mean(trans_xy_errs):.4f}")
+            print(f"  - Median: {np.median(trans_xy_errs):.4f}")
+            print(f"Translation Error (Z in meters):")
+            print(f"  - Mean:   {np.mean(trans_z_errs):.4f}")
+            print(f"  - Median: {np.median(trans_z_errs):.4f}")
+            
+            print(f"Yaw Rotation Error (degrees):")
+            print(f"  - Mean:   {np.mean(np.abs(yaw_errs)):.2f}°")
+            print(f"  - Median: {np.median(np.abs(yaw_errs)):.2f}°")
+            print(f"Pitch Rotation Error (degrees):")
+            print(f"  - Mean:   {np.mean(np.abs(pitch_errs)):.2f}°")
+            print(f"  - Median: {np.median(np.abs(pitch_errs)):.2f}°")
+            print(f"Roll Rotation Error (degrees):")
+            print(f"  - Mean:   {np.mean(np.abs(roll_errs)):.2f}°")
+            print(f"  - Median: {np.median(np.abs(roll_errs)):.2f}°")
+            print(f"Geodesic Rotation Error (degrees):")
+            print(f"  - Mean:   {np.mean(geodesic_errs):.2f}°")
+            print(f"  - Median: {np.median(geodesic_errs):.2f}°")
+            
+            # Flip rate
+            flips = sum(1 for e in error_metrics if abs(e.yaw) > 90.0)
+            print(f"Flip Rate (among successful matches): {flips/successful*100:.1f}% ({flips}/{successful})")
+            
+            # Median error on non-flipped samples
+            non_flipped_metrics = [e for e in error_metrics if abs(e.yaw) <= 90.0]
+            if non_flipped_metrics:
+                non_flipped_xy = [e.trans_xy for e in non_flipped_metrics]
+                non_flipped_yaw = [e.yaw for e in non_flipped_metrics]
+                print(f"Median errors on non-flipped samples:")
+                print(f"  - Translation XY: {np.median(non_flipped_xy):.4f}m")
+                print(f"  - Yaw Rotation:   {np.median(np.abs(non_flipped_yaw)):.2f}°")
+            else:
+                print("All successful matches were flipped.")
         else:
             print("No samples were successfully matched.")
         print("=" * 50)

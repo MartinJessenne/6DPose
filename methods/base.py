@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 import numpy as np
+import copy
 import open3d as o3d
 
 if TYPE_CHECKING:
@@ -67,6 +68,8 @@ def prepare_scene_point_cloud(
     Returns:
         o3d.geometry.PointCloud: Transformed point cloud with oriented surface normals.
     """
+    # Deepcopy to prevent mutating the caller's point cloud (double extrinsics bug)
+    pcd = copy.deepcopy(pcd)
     # 1. Estimate surface normals using hybrid KD-tree search
     # This computes a local plane fit for each point's neighbors. If points lack normals,
     # ICP refinement (Point-to-Plane) and PPF matching will fail.
