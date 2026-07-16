@@ -183,6 +183,7 @@ def evaluate_pipeline(
     camera: Camera,
     estimator: BasePoseEstimator,
     sample_indices: list[int],
+    meshes: dict[str, o3d.geometry.TriangleMesh],
     depth_trunc: float = 3.0
 ) -> tuple[list[PoseErrorMetrics], list[float], int, int]:
     """
@@ -201,8 +202,9 @@ def evaluate_pipeline(
     pose_failures = 0
     
     for sample_idx in sample_indices:
-        img = dataset["rgb"][sample_idx]
-        depth_bytes = dataset["depth"][sample_idx]
+        row = dataset[int(sample_idx)]
+        img = row["rgb"]
+        depth_bytes = row["depth"]
         
         # 1. Run YOLO detection
         result = model(img, retina_masks=True, verbose=False)
@@ -218,18 +220,17 @@ def evaluate_pipeline(
             pose_failures += 1
             continue
             
-        # Verify CAD mesh exists
-        mesh_file = f"meshes/{cart_type}.ply"
-        if not os.path.exists(mesh_file):
-            logging.error(f"CAD file {mesh_file} not found for index {sample_idx}")
+        # Retrieve preloaded mesh
+        cad_mesh = meshes.get(cart_type)
+        if cad_mesh is None:
+            logging.error(f"CAD mesh not found for cart type '{cart_type}' (sample {sample_idx})")
             pose_failures += 1
             continue
-        cad_mesh = o3d.io.read_triangle_mesh(mesh_file)
         
         # 3. Perform 6D Pose Estimation with timing
         start_time = time.time()
         try:
-            T_final = estimator.estimate_pose(pcd, cad_mesh)
+            T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type)
             if T_final is None:
                 logging.error(f"Pose estimator returned None for index {sample_idx}")
                 pose_failures += 1
@@ -246,7 +247,9 @@ def evaluate_pipeline(
             raise ValueError("Estimator must have an extrinsic camera-to-robot transform configured.")
         
         try:
-            T_ground_truth = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=extrinsic)
+            T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
+            T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
+            T_ground_truth = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera=extrinsic)
             metrics = extract_pose_errors(T_final, T_ground_truth)
             error_metrics.append(metrics)
             times.append(elapsed_time)
@@ -263,7 +266,8 @@ def evaluate_pipeline(
 # =====================================================================
 def run_parameter_sweep(
     dataset, model, camera, study_name, estimator_cls: type[BasePoseEstimator], 
-    sweep_size: int, n_trials: int, extrinsic: np.ndarray = None, seed: int = None
+    sweep_size: int, n_trials: int, meshes: dict[str, o3d.geometry.TriangleMesh],
+    extrinsic: np.ndarray = None, seed: int = None
 ):
     """
     Launches a Multi-Objective Bayesian Optimization sweep using Optuna
@@ -302,7 +306,7 @@ def run_parameter_sweep(
     else:
         # Create fresh attributes and store
         if seed is None:
-            seed = int(np.random.SeedSequence().entropy % (2**32))
+            seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
         rng = np.random.default_rng(seed)
         sweep_indices = rng.choice(total_samples, min(sweep_size, total_samples), replace=False).tolist()
         
@@ -327,8 +331,12 @@ def run_parameter_sweep(
         # 3. Instantiate model with trial parameters
         trial_estimator = estimator_cls(params=suggested_params, extrinsic=extrinsic)
         
+        # Pre-prepare all meshes on this trial estimator
+        for cart_type, mesh in meshes.items():
+            trial_estimator.prepare(mesh, cart_type)
+        
         error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
-            dataset, model, camera, trial_estimator, sweep_indices, depth_trunc=depth_trunc
+            dataset, model, camera, trial_estimator, sweep_indices, meshes, depth_trunc=depth_trunc
         )
         
         total_failed = det_failed + pose_failed
@@ -398,6 +406,18 @@ def main(cfg: DictConfig):
     # Resolve estimator class dynamically from Hydra configuration target
     estimator_cls = hydra.utils.get_class(cfg.model._target_)
     
+    # Hoist CAD mesh loading (relative to script directory)
+    import glob
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    mesh_path_pattern = os.path.join(project_root, "meshes", "*.ply")
+    mesh_files = glob.glob(mesh_path_pattern)
+    meshes = {}
+    for f in mesh_files:
+        name = os.path.splitext(os.path.basename(f))[0]
+        meshes[name] = o3d.io.read_triangle_mesh(f)
+    if not meshes:
+        raise RuntimeError(f"No meshes found matching pattern: {mesh_path_pattern}. Ensure the meshes/ directory is populated.")
+    
     # Retrieve extrinsic matrix for sweep
     extrinsic_list = cfg.camera.get("extrinsic", None)
     extrinsic = np.array(extrinsic_list, dtype=np.float64) if extrinsic_list is not None else None
@@ -412,6 +432,7 @@ def main(cfg: DictConfig):
             estimator_cls=estimator_cls,
             sweep_size=cfg.eval_size,
             n_trials=cfg.trials,
+            meshes=meshes,
             extrinsic=extrinsic,
             seed=cfg.get("seed", None)
         )
@@ -420,7 +441,7 @@ def main(cfg: DictConfig):
         # Default Evaluation mode
         seed = cfg.get("seed", None)
         if seed is None:
-            seed = int(np.random.SeedSequence().entropy % (2**32))
+            seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
         
         np.random.seed(seed)
         o3d.utility.random.seed(seed)
@@ -430,13 +451,17 @@ def main(cfg: DictConfig):
         
         # Instantiate estimator dynamically via Hydra
         estimator = hydra.utils.instantiate(cfg.model)
+        
+        # Pre-prepare all meshes on estimator
+        for cart_type, mesh in meshes.items():
+            estimator.prepare(mesh, cart_type)
             
         print(f"Evaluating '{estimator_cls.__name__}' parameters on {len(eval_indices)} test samples...")
         print(f"Seed: {seed}")
         print(f"Indices: {eval_indices}\n")
         
         error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
-            dataset, model, camera, estimator, eval_indices, depth_trunc=cfg.depth_trunc
+            dataset, model, camera, estimator, eval_indices, meshes, depth_trunc=cfg.depth_trunc
         )
         
         successful = len(error_metrics)

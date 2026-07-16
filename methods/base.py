@@ -10,11 +10,14 @@ if TYPE_CHECKING:
 class BasePoseEstimator(ABC):
     """Abstract base class representing a 6D Pose Estimation method."""
 
+    _PREPARATION_CACHE = {}  # Global cache: (class_name, cart_type, prep_params_tuple) -> prepared_dict
+
     @abstractmethod
     def estimate_pose(
         self,
         pcd: o3d.geometry.PointCloud,
         cad_mesh: o3d.geometry.TriangleMesh,
+        cart_type: str | None = None,
         **kwargs: Any
     ) -> np.ndarray | None:
         """
@@ -23,10 +26,22 @@ class BasePoseEstimator(ABC):
         Args:
             pcd (o3d.geometry.PointCloud): Reconstructed scene point cloud in robot frame.
             cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model.
+            cart_type (str, optional): Name of the cart type.
             **kwargs: Method-specific inputs (e.g., rgb_crop, depth_crop, camera intrinsics).
 
         Returns:
             np.ndarray: 4x4 homogeneous transformation matrix, or None if estimation fails.
+        """
+        pass
+
+    def prepare(self, cad_mesh: o3d.geometry.TriangleMesh, cart_type: str) -> None:
+        """
+        Prepares and caches model-specific properties (e.g., FPFH features, PPF match database)
+        for a given CAD model to speed up online evaluation.
+
+        Args:
+            cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model.
+            cart_type (str): Name of the cart type.
         """
         pass
 

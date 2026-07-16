@@ -1,3 +1,5 @@
+import copy
+import logging
 from typing import TYPE_CHECKING, Any
 import numpy as np
 import open3d as o3d
@@ -74,10 +76,50 @@ class RansacEstimator(BasePoseEstimator):
             "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10)
         }
 
+    def _get_prep_params_key(self) -> tuple:
+        """Returns only the parameters affecting offline preparation."""
+        return (self.params.voxel_size,)
+
+    def prepare(self, cad_mesh: o3d.geometry.TriangleMesh, cart_type: str) -> None:
+        """Prepares CAD model by computing vertex normals, downsampling, and FPFH descriptor computation."""
+        prep_params = self._get_prep_params_key()
+        cache_key = (self.__class__.__name__, cart_type, prep_params)
+        if cache_key in self._PREPARATION_CACHE:
+            return
+
+        # Evict old cached entries for the same cart type with different parameters to bound memory growth
+        stale_keys = [
+            k for k in self._PREPARATION_CACHE
+            if k[0] == self.__class__.__name__ and k[1] == cart_type and k[2] != prep_params
+        ]
+        for k in stale_keys:
+            del self._PREPARATION_CACHE[k]
+
+        # Deepcopy to prevent mutating original mesh
+        mesh_copy = copy.deepcopy(cad_mesh)
+        mesh_copy.compute_vertex_normals()
+        model_pc = mesh_copy.sample_points_uniformly(number_of_points=2000)
+        
+        voxel_size = self.params.voxel_size
+        model_down = model_pc.voxel_down_sample(voxel_size)
+        model_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
+        
+        model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+            model_down,
+            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
+        )
+        
+        self._PREPARATION_CACHE[cache_key] = {
+            "model_pc": model_pc,
+            "model_down": model_down,
+            "model_fpfh": model_fpfh
+        }
+
     def estimate_pose(
         self,
         pcd: o3d.geometry.PointCloud,
         cad_mesh: o3d.geometry.TriangleMesh,
+        cart_type: str | None = None,
         **kwargs: Any
     ) -> np.ndarray | None:
         """
@@ -86,6 +128,7 @@ class RansacEstimator(BasePoseEstimator):
         Args:
             pcd (o3d.geometry.PointCloud): Segmented scene point cloud in camera frame.
             cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model.
+            cart_type (str, optional): Name of the cart type.
             
         Returns:
             np.ndarray: 4x4 homogeneous transformation matrix in robot frame, 
@@ -94,29 +137,41 @@ class RansacEstimator(BasePoseEstimator):
         # Prepare scene point cloud using factored-out utility function
         pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
 
-        # Prepare CAD model by computing vertex normals and sampling points
-        cad_mesh.compute_vertex_normals()
-        model_pc = cad_mesh.sample_points_uniformly(number_of_points=2000)
-        
-        # Define search params for features
         voxel_size = self.params.voxel_size
+
+        if cart_type is None:
+            # Lazy local fallback (no caching, no side-effects)
+            mesh_copy = copy.deepcopy(cad_mesh)
+            mesh_copy.compute_vertex_normals()
+            model_pc = mesh_copy.sample_points_uniformly(number_of_points=2000)
+            model_down = model_pc.voxel_down_sample(voxel_size)
+            model_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
+            model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+                model_down,
+                o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
+            )
+        else:
+            cache_key = (self.__class__.__name__, cart_type, self._get_prep_params_key())
+            if cache_key not in self._PREPARATION_CACHE:
+                logging.warning(f"Cache miss inside estimate_pose: preparing on-the-fly for key {cache_key}")
+                self.prepare(cad_mesh, cart_type)
+            
+            # Retrieve prepared representations: copied: point clouds and features
+            prep_data = self._PREPARATION_CACHE[cache_key]
+            model_pc = copy.deepcopy(prep_data["model_pc"])
+            model_down = copy.deepcopy(prep_data["model_down"])
+            model_fpfh = copy.deepcopy(prep_data["model_fpfh"])
         
         # 1. Downsample point clouds for fast descriptor calculation
         pcd_down = pcd.voxel_down_sample(voxel_size)
-        model_down = model_pc.voxel_down_sample(voxel_size)
         
         # Normals are preserved during downsampling, but let's ensure they are updated
         pcd_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
-        model_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
         
         # 2. Compute FPFH (Fast Point Feature Histograms) descriptors
         print("Computing FPFH descriptors...")
         pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
             pcd_down,
-            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
-        )
-        model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-            model_down,
             o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
         )
         

@@ -30,13 +30,16 @@ T_robot_camera = np.array([
 
 # 2. Select a target sample (e.g. sample 1248)
 sample_idx = 1248
-img = dataset["rgb"][sample_idx]
-depth_bytes = dataset["depth"][sample_idx]
+row = dataset[int(sample_idx)]
+img = row["rgb"]
+depth_bytes = row["depth"]
 result = model(img, retina_masks=True, verbose=False)
 cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera)
 
 # Load ground truth
-T_gt = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=T_robot_camera)
+T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
+T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
+T_gt = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera=T_robot_camera)
 
 # Load CAD mesh
 cad_mesh = o3d.io.read_triangle_mesh(f"meshes/{cart_type}.ply")

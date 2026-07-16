@@ -1,3 +1,5 @@
+import copy
+import logging
 from typing import TYPE_CHECKING, Any
 import numpy as np
 import cv2
@@ -100,10 +102,50 @@ class PPFEstimator(BasePoseEstimator):
             "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10)
         }
 
+    def _get_prep_params_key(self) -> tuple:
+        """Returns only the parameters affecting offline preparation."""
+        return (self.params.ppf_sampling_step, self.params.ppf_distance_step)
+
+    def prepare(self, cad_mesh: o3d.geometry.TriangleMesh, cart_type: str) -> None:
+        """Prepares the CAD mesh by computing vertex normals and training the PPF detector."""
+        prep_params = self._get_prep_params_key()
+        cache_key = (self.__class__.__name__, cart_type, prep_params)
+        if cache_key in self._PREPARATION_CACHE:
+            return
+
+        # Evict old cached entries for the same cart type with different parameters to bound memory growth
+        stale_keys = [
+            k for k in self._PREPARATION_CACHE
+            if k[0] == self.__class__.__name__ and k[1] == cart_type and k[2] != prep_params
+        ]
+        for k in stale_keys:
+            del self._PREPARATION_CACHE[k]
+
+        # Deepcopy to prevent mutating the original input mesh
+        mesh_copy = copy.deepcopy(cad_mesh)
+        mesh_copy.compute_vertex_normals()
+        model_pc = mesh_copy.sample_points_uniformly(number_of_points=1000)
+        
+        # Convert geometries to PPF stacked formats [N, 6]
+        ppf_model = o3d_to_ppf_format(model_pc)
+        
+        # Initialize PPF 3D Detector
+        detector = cv2.ppf_match_3d_PPF3DDetector(
+            relativeSamplingStep=self.params.ppf_sampling_step,
+            relativeDistanceStep=self.params.ppf_distance_step
+        )
+        detector.trainModel(ppf_model)
+        
+        self._PREPARATION_CACHE[cache_key] = {
+            "model_pc": model_pc,
+            "detector": detector
+        }
+
     def estimate_pose(
         self,
         pcd: o3d.geometry.PointCloud,
         cad_mesh: o3d.geometry.TriangleMesh,
+        cart_type: str | None = None,
         **kwargs: Any
     ) -> np.ndarray | None:
         """
@@ -112,6 +154,7 @@ class PPFEstimator(BasePoseEstimator):
         Args:
             pcd (o3d.geometry.PointCloud): Segmented scene point cloud in camera frame.
             cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model.
+            cart_type (str, optional): Name of the cart type.
             
         Returns:
             np.ndarray: 4x4 homogeneous transformation matrix in robot frame, 
@@ -120,22 +163,29 @@ class PPFEstimator(BasePoseEstimator):
         # Prepare scene point cloud using factored-out utility function
         pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
 
-        # Prepare CAD model
-        cad_mesh.compute_vertex_normals()
-        model_pc = cad_mesh.sample_points_uniformly(number_of_points=1000)
+        if cart_type is None:
+            # Lazy local fallback (no caching, no side-effects)
+            mesh_copy = copy.deepcopy(cad_mesh)
+            mesh_copy.compute_vertex_normals()
+            model_pc = mesh_copy.sample_points_uniformly(number_of_points=1000)
+            ppf_model = o3d_to_ppf_format(model_pc)
+            detector = cv2.ppf_match_3d_PPF3DDetector(
+                relativeSamplingStep=self.params.ppf_sampling_step,
+                relativeDistanceStep=self.params.ppf_distance_step
+            )
+            detector.trainModel(ppf_model)
+        else:
+            cache_key = (self.__class__.__name__, cart_type, self._get_prep_params_key())
+            if cache_key not in self._PREPARATION_CACHE:
+                logging.warning(f"Cache miss inside estimate_pose: preparing on-the-fly for key {cache_key}")
+                self.prepare(cad_mesh, cart_type)
+            
+            # Retrieve prepared representations: copied: point clouds; shared: detector
+            prep_data = self._PREPARATION_CACHE[cache_key]
+            model_pc = copy.deepcopy(prep_data["model_pc"])
+            detector = prep_data["detector"]
         
-        # Convert geometries to PPF stacked formats [N, 6]
-        ppf_model = o3d_to_ppf_format(model_pc)
         ppf_scene = o3d_to_ppf_format(pcd)
-        
-        # Initialize PPF 3D Detector (Notice the legacy underscore convention used by cv2)
-        detector = cv2.ppf_match_3d_PPF3DDetector(
-            relativeSamplingStep=self.params.ppf_sampling_step,
-            relativeDistanceStep=self.params.ppf_distance_step
-        )
-        
-        print("Training PPF Hash Table from CAD model...")
-        detector.trainModel(ppf_model)
         
         print("Running PPF Match on scene...")
         match_results = detector.match(

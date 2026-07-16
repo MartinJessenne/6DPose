@@ -36,8 +36,9 @@ We select sample index `315` from the dataset, run YOLO segmentation, and recons
 
 ```python
 sample_idx = 315
-img = dataset["rgb"][sample_idx]
-depth_bytes = dataset["depth"][sample_idx]
+row = dataset[int(sample_idx)]
+img = row["rgb"]
+depth_bytes = row["depth"]
 
 # 1. Run YOLO inference
 print("Running YOLO segmentation...")
@@ -104,7 +105,9 @@ Finally, load the ground truth pose matrix from Isaac Sim and compute the transl
 from benchmark import compute_translation_error, compute_rotation_error
 
 # Retrieve ground truth pose relative to base_link
-T_gt = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=T_robot_camera)
+T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
+T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
+T_gt = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera=T_robot_camera)
 print("Ground Truth 6D Pose Matrix:\n", T_gt)
 
 # Calculate errors
