@@ -55,7 +55,7 @@ from datasets import Dataset
 
 # Import utility classes and functions from main.py
 from main import (
-    Config, Camera, load_hf_model, load_parquet_dataset,
+    Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
     instance_detected
 )
@@ -140,11 +140,13 @@ def run_random_inspection(
     model,
     camera: Camera,
     dataset: Dataset,
-    estimator: BasePoseEstimator
+    estimator: BasePoseEstimator,
+    output_dir: str,
+    depth_trunc: float
 ) -> None:
     """
     Runs the 6D Pose estimation pipeline on random test split samples,
-    exporting the combined 3D scenes (PCD + CAD meshes) as GLB files to Config.OUTPUT_DIR.
+    exporting the combined 3D scenes (PCD + CAD meshes) as GLB files to the output directory.
     
     Args:
         num_samples (int): Number of random test samples to evaluate.
@@ -152,13 +154,14 @@ def run_random_inspection(
         camera (Camera): The pinhole camera model.
         dataset (Dataset): The Hugging Face dataset containing test samples.
         estimator (BasePoseEstimator): The pose estimator instance.
+        output_dir (str): The folder path where debug GLBs are exported.
+        depth_trunc (float): Max depth to include in the point cloud.
         
     Example:
         >>> # To evaluate 5 random samples using the CLI:
         >>> # python inspect_pose.py --random 5
-        >>> run_random_inspection(5, model, camera, dataset, estimator)
+        >>> run_random_inspection(5, model, camera, dataset, estimator, "debug_output/", 3.0)
     """
-    output_dir = Config.OUTPUT_DIR
     
     # Overwrite the old debug folder to ensure we don't mix results from previous runs
     if os.path.exists(output_dir):
@@ -189,7 +192,7 @@ def run_random_inspection(
             
         # 2. Segment and Reconstruct 3D Point Cloud
         # This isolates the cart points and projects them to camera-frame 3D coordinates.
-        cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera)
+        cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera, depth_trunc=depth_trunc)
         print(f"Recognized class: {cart_type}")
         
         # Verify CAD mesh file exists before running registration
@@ -209,7 +212,7 @@ def run_random_inspection(
         
         # 4. Compute Ground Truth Pose
         # This applies the chain: T_robot = T_robot_cam @ T_usd_to_cv @ T_world_cam @ T_world_cart
-        T_ground_truth = compute_ground_truth_pose(dataset, sample_idx)
+        T_ground_truth = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=estimator.extrinsic)
         print("Ground Truth 6D Pose Matrix:\n", T_ground_truth)
         
         # 5. Export Combined Scene to GLB
@@ -228,7 +231,8 @@ def run_targeted_inspection(
     model,
     camera: Camera,
     dataset: Dataset,
-    estimator: BasePoseEstimator
+    estimator: BasePoseEstimator,
+    depth_trunc: float
 ) -> None:
     """
     Performs targeted debugging on specific sample indices, exporting
@@ -280,7 +284,7 @@ def run_targeted_inspection(
             
         # 2. Segment and Reconstruct Point Cloud
         # Generates a 3D point cloud using the crop parameters and depth buffer
-        cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera)
+        cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera, depth_trunc=depth_trunc)
         print(f"Recognized class: {cart_type}")
         
         # Save point cloud to PLY format (includes position, colors, and surface normals)
@@ -297,7 +301,7 @@ def run_targeted_inspection(
             
             if T_final is not None:
                 # Retrieve ground truth pose matrix in base_link coordinates
-                T_ground_truth = compute_ground_truth_pose(dataset, idx)
+                T_ground_truth = compute_ground_truth_pose(dataset, idx, T_robot_camera=estimator.extrinsic)
                 output_glb = os.path.join(output_dir, f"combined_scene_idx_{idx}.glb")
                 # Save combined scene (Scene point cloud + Predicted CAD [Green] + Ground Truth CAD [Blue])
                 export_debug_scene(pcd, cad_mesh, T_final, T_ground_truth, output_glb)
@@ -347,7 +351,9 @@ def main(cfg: DictConfig):
             model=model,
             camera=camera,
             dataset=dataset,
-            estimator=estimator
+            estimator=estimator,
+            output_dir=cfg.output_dir,
+            depth_trunc=cfg.depth_trunc
         )
     elif mode == ExecutionMode.INDICES:
         run_targeted_inspection(
@@ -355,7 +361,8 @@ def main(cfg: DictConfig):
             model=model,
             camera=camera,
             dataset=dataset,
-            estimator=estimator
+            estimator=estimator,
+            depth_trunc=cfg.depth_trunc
         )
     else:
         print(f"Invalid mode '{mode_str}'. Please specify mode=random or mode=indices on the command line.")

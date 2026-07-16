@@ -24,7 +24,7 @@ from ultralytics import YOLO
 #                                |
 #                                v
 #                           [ main.py ] <---+
-#                 (Config, PCD, Math Utilities) |
+#                 (PCD, Math Utilities) |
 #                                |          | (Imported for
 #                                v          |  T_ROBOT_CAMERA)
 #                          [ methods/ ] ----+
@@ -131,34 +131,7 @@ from ultralytics import YOLO
 # =====================================================================
 # 1. CENTRALIZED PIPELINE CONFIGURATION
 # =====================================================================
-class Config: 
-    """Centralized parameters, paths, and transformation matrices for the pipeline."""
-    # Hugging Face Repository Settings
-    HF_REPO = "UItraviolet/yolo_multicart"
-    HF_FILE = "runs/segment/train-2/weights/best.pt"
-    LOCAL_MODEL_PATH = "best.pt"
-    
-    # Camera Intrinsics Parameters
-    CAMERA_FX = 639.99768
-    CAMERA_FY = 639.99768
-    CAMERA_CX = 640.0
-    CAMERA_CY = 400.0
-    
-    # Extrinsic Camera-to-Robot base_link Transform
-    T_ROBOT_CAMERA = np.array([
-        [0.5, 0.0,  0.866, 0.439],
-        [0.0, 1.0, -0.0,   0.0  ],
-        [-0.866, 0.0, 0.5, 0.304],
-        [0.0, 0.0,  0.0,   1.0  ]
-    ])
-    
-    # Dataset and Output Settings
-    DATASET_PATH = "parquet"
-    TRAIN_PARQUET_GLOB = "dataset/data/data/train-*-of-00127.parquet"
-    VAL_PARQUET_GLOB = "dataset/data/data/validation-*-of-00016.parquet"
-    TEST_PARQUET_GLOB = "dataset/data/data/test-*-of-00016.parquet"
-    DEFAULT_DEPTH_TRUNC = 3.0
-    OUTPUT_DIR = "debug_output/"
+# Configuration is managed via Hydra.
 
 
 # =====================================================================
@@ -193,8 +166,8 @@ def load_parquet_dataset(dataset_path: str = None, test_glob: str = None) -> Dat
         >>> first_sample = dataset[0]
         >>> print(first_sample.keys())
     """
-    path = dataset_path if dataset_path is not None else Config.DATASET_PATH
-    glob_pattern = test_glob if test_glob is not None else Config.TEST_PARQUET_GLOB
+    path = dataset_path if dataset_path is not None else "parquet"
+    glob_pattern = test_glob if test_glob is not None else "dataset/data/test-*-of-00016.parquet"
     dataset = load_dataset(
         path,
         data_files={
@@ -217,9 +190,9 @@ def load_hf_model(local_model_path: str = None, repo_id: str = None, filename: s
         >>> model = load_hf_model()
         >>> result = model("test_image.png")
     """
-    local_path = local_model_path if local_model_path is not None else Config.LOCAL_MODEL_PATH
-    repo = repo_id if repo_id is not None else Config.HF_REPO
-    file = filename if filename is not None else Config.HF_FILE
+    local_path = local_model_path if local_model_path is not None else "best.pt"
+    repo = repo_id if repo_id is not None else "UItraviolet/yolo_multicart"
+    file = filename if filename is not None else "runs/segment/train-2/weights/best.pt"
     # Check if the YOLO model exists locally. If not, download it from Hugging Face
     # and copy it to the local project path.
     if not os.path.exists(local_path):
@@ -443,7 +416,7 @@ class Camera:
 
 def point_cloud_processing(
     frame: MaskedImageFrame,
-    depth_trunc: float = Config.DEFAULT_DEPTH_TRUNC
+    depth_trunc: float = 3.0
 ) -> o3d.geometry.PointCloud:
     """
     Converts a MaskedImageFrame into an Open3D PointCloud object using the cropped intrinsics.
@@ -481,21 +454,22 @@ def point_cloud_processing(
 # =====================================================================
 # 5. COORDINATE TRANSFORMS AND 6D POSE ESTIMATION
 # =====================================================================
-def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int, T_robot_camera: np.ndarray = None) -> np.ndarray:
+def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int, T_robot_camera: np.ndarray) -> np.ndarray:
     """
     Retrieves the ground truth cart pose, maps it from the Isaac Sim arbitrary world frame 
     to the camera coordinate frame (adjusting for USD to OpenCV conventions), and projects 
     it into the robot's base_link frame.
     
     Args:
+        local_dataset (Dataset): The Hugging Face dataset.
         sample_idx (int): The index of the sample.
-        T_robot_camera (np.ndarray, optional): 4x4 extrinsic transform from camera to robot base link. If None, falls back to default.
+        T_robot_camera (np.ndarray): 4x4 extrinsic transform from camera to robot base link.
         
     Returns:
         np.ndarray: A 4x4 homogeneous transformation matrix in the robot's base frame.
         
     Example:
-        >>> T_gt = compute_ground_truth_pose(local_dataset, 5)
+        >>> T_gt = compute_ground_truth_pose(local_dataset, 5, T_robot_camera)
     """
     # 1. Load raw flat lists and reshape into 4x4 row-major matrices
     T_world_camera = np.asarray(local_dataset["camera_view_transform"][sample_idx]).reshape(4, 4).T
@@ -505,8 +479,7 @@ def compute_ground_truth_pose(local_dataset: Dataset, sample_idx: int, T_robot_c
     T_usd_to_cv = np.diag([1, -1, -1, 1])
     
     # 3. Compute final coordinate multiplication chain
-    extrinsic = T_robot_camera if T_robot_camera is not None else Config.T_ROBOT_CAMERA
-    return extrinsic @ T_usd_to_cv @ T_world_camera @ T_world_cart
+    return T_robot_camera @ T_usd_to_cv @ T_world_camera @ T_world_cart
 
 
 # =====================================================================
@@ -517,7 +490,7 @@ def process_and_reconstruct(
     depth_bytes: bytes,
     result: list,
     camera: Camera,
-    depth_trunc: float = Config.DEFAULT_DEPTH_TRUNC
+    depth_trunc: float = 3.0
 ) -> tuple[str, o3d.geometry.PointCloud]:
     """
     Extracts the target cart segmentation mask, crops depth and RGB data,
