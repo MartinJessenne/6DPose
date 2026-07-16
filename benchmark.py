@@ -52,7 +52,7 @@ from datasets import Dataset
 import logging
 from pydantic import BaseModel, Field
 
-from main import (
+from pipeline import (
     Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
     instance_detected
@@ -274,7 +274,9 @@ def run_parameter_sweep(
     Launches a Multi-Objective Bayesian Optimization sweep using Optuna
     to find the Pareto Front of optimal accuracy vs. speed trade-offs.
     """
-    db_name = f"optuna_{study_name}.db"
+    from hydra.core.hydra_config import HydraConfig
+    hydra_dir = HydraConfig.get().runtime.output_dir if HydraConfig.was_initialized() else "."
+    db_name = os.path.join(hydra_dir, f"optuna_{study_name}.db")
     db_url = f"sqlite:///{db_name}"
     
     study = optuna.create_study(

@@ -134,24 +134,7 @@ from ultralytics import YOLO
 # Configuration is managed via Hydra.
 
 
-# =====================================================================
-# 1b. METHOD-SPECIFIC HYPERPARAMETERS
-# =====================================================================
 
-# The parameter organisation should be something similar to that (don't hesistate to criticize it, and propose better alternatives):
-# methods/
-#       -ppf/
-#           -model.py # the model file
-#           -presets/
-#                   -realtime.toml # or any other convenient markup language
-#                   -precision.toml 
-#                   -balanced.toml
-#                   -default.toml
-#                   -random.toml
-
-# where for each model, presets is a folder of sets of pareto optimal parameters found after a parameter sweep. 
-# Those parameters files includes all hyper parameters needed for the model, even global parameters such as depth truncation 
-# =====================================================================
 # 2. DATASET AND MODEL LIFECYCLE HELPERS
 # =====================================================================
 def load_parquet_dataset(dataset_path: str = None, test_glob: str = None) -> Dataset:
@@ -296,17 +279,13 @@ class MaskedImageFrame:
         depth: torch.Tensor,
         camera: Camera,
         xmin: int,
-        ymin: int,
-        width_orig: int,
-        height_orig: int
+        ymin: int
     ):
         self.rgb = rgb
         self.depth = depth
         self.camera = camera
         self.xmin = xmin
         self.ymin = ymin
-        self.width_orig = width_orig
-        self.height_orig = height_orig
 
     @property
     def width(self) -> int:
@@ -369,9 +348,7 @@ def crop_and_mask_inputs(
         depth=blacked_out_cropped_depth,
         camera=camera,
         xmin=xmin,
-        ymin=ymin,
-        width_orig=orig_img.shape[1],
-        height_orig=orig_img.shape[0]
+        ymin=ymin
     )
 
 
@@ -398,20 +375,6 @@ class Camera:
         self.fy = fy
         self.cx = cx
         self.cy = cy
-
-    def get_o3d_intrinsics(
-        self, width: int, height: int, xmin: int = 0, ymin: int = 0
-    ) -> o3d.camera.PinholeCameraIntrinsic:
-        """
-        Generates Open3D camera intrinsics, shifting the principal point to account
-        for cropping offsets.
-        """
-        crop_cx = self.cx - xmin
-        crop_cy = self.cy - ymin
-        return o3d.camera.PinholeCameraIntrinsic(
-            width=width, height=height,
-            fx=self.fx, fy=self.fy, cx=crop_cx, cy=crop_cy
-        )
 
 
 def point_cloud_processing(
@@ -512,8 +475,8 @@ def process_and_reconstruct(
     # Select target mask and crop parameters
     cart_type, bbox, mask = select_target_detection(result)
     
-    # Convert original RGB image from YOLO result to a PyTorch tensor on CPU
-    orig_img_tensor = torch.from_numpy(np.array(result[0].orig_img))
+    # Convert original RGB image (from BGR YOLO result) to a PyTorch tensor on CPU
+    orig_img_tensor = torch.from_numpy(result[0].orig_img[..., ::-1].copy())
     
     # Crop and mask inputs, producing the type-safe MaskedImageFrame
     frame = crop_and_mask_inputs(

@@ -5,6 +5,7 @@ model:
   _target_: methods.ransac.RansacEstimator
   params:
     voxel_size: 0.08
+    # Optimized value obtained from Optuna hyperparameter sweep (Pareto front trial #14)
     icp_max_correspondence_distance: 0.1200659534
     icp_max_iterations: 90
   extrinsic: ${camera.extrinsic}

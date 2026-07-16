@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 import numpy as np
 import copy
+import logging
 import open3d as o3d
 
 if TYPE_CHECKING:
@@ -171,17 +172,17 @@ def refine_pose_dual_hypothesis(
     # Select the hypothesis that maximizes point cloud overlap (fitness score)
     if icp_result_1.fitness > icp_result_2.fitness:
         best_result = icp_result_1
-        print(f"Orientation selected: Original (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})")
+        logging.info(f"Orientation selected: Original (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})")
     elif icp_result_2.fitness > icp_result_1.fitness:
         best_result = icp_result_2
-        print(f"Orientation selected: Flipped 180° (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})")
+        logging.info(f"Orientation selected: Flipped 180° (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})")
     else:
         # Tie breaker: pick the one with lower RMSE
         if icp_result_1.inlier_rmse <= icp_result_2.inlier_rmse:
             best_result = icp_result_1
-            print(f"Orientation selected: Original [Tie breaker] (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})")
+            logging.info(f"Orientation selected: Original [Tie breaker] (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})")
         else:
             best_result = icp_result_2
-            print(f"Orientation selected: Flipped 180° [Tie breaker] (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})")
+            logging.info(f"Orientation selected: Flipped 180° [Tie breaker] (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})")
             
     return best_result.transformation

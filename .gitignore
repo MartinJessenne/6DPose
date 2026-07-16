@@ -12,6 +12,7 @@ wheels/
 train/
 
 *.pth
+*.pt
 
 /dataset/
 

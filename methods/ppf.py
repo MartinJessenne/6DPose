@@ -23,6 +23,7 @@ class PPFParams:
         ppf_distance_step: float = 0.02,
         ppf_match_threshold: float = 0.06,
         ppf_match_tolerance: float = 0.03,
+        # Optimized value obtained from Optuna hyperparameter sweep (Pareto front candidate)
         icp_max_correspondence_distance: float = 0.17528702727791115,
         icp_max_iterations: int = 10
     ):

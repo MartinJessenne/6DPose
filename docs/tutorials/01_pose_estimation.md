@@ -12,7 +12,7 @@ First, initialize the environment and load the model, dataset, and camera intrin
 import numpy as np
 import open3d as o3d
 import torch
-from main import Camera, load_hf_model, load_parquet_dataset, process_and_reconstruct, compute_ground_truth_pose
+from pipeline import Camera, load_hf_model, load_parquet_dataset, process_and_reconstruct, compute_ground_truth_pose
 from methods.base import prepare_scene_point_cloud
 from methods.ransac import RansacEstimator, RansacParams
 
