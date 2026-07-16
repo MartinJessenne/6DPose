@@ -23,6 +23,7 @@ dependencies = [
     { name = "opencv-contrib-python" },
     { name = "optuna" },
     { name = "pyrealsense2" },
+    { name = "pytest" },
     { name = "torch" },
     { name = "trimesh" },
     { name = "ultralytics" },
@@ -47,8 +48,9 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.5.0" },
     { name = "open3d", specifier = ">=0.19.0" },
     { name = "opencv-contrib-python", specifier = ">=5.0.0.93" },
-    { name = "optuna" },
+    { name = "optuna", specifier = ">=4.9.0" },
     { name = "pyrealsense2", specifier = ">=2.58.2.10647" },
+    { name = "pytest", specifier = ">=8.0.0" },
     { name = "torch", specifier = ">=2.12.1" },
     { name = "trimesh", specifier = ">=4.12.2" },
     { name = "ultralytics", specifier = ">=8.4.75" },
@@ -739,6 +741,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a9/01/15bb152d77b21318514a96f43af312635eb2500c96b55398d020c93d86ea/importlib_metadata-9.0.0.tar.gz", hash = "sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc", size = 56405, upload-time = "2026-03-20T06:42:56.999Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/3d/2d244233ac4f76e38533cfcb2991c9eb4c7bf688ae0a036d30725b8faafe/importlib_metadata-9.0.0-py3-none-any.whl", hash = "sha256:2d21d1cc5a017bd0559e36150c21c830ab1dc304dedd1b7ea85d20f45ef3edd7", size = 27789, upload-time = "2026-03-20T06:42:55.665Z" },
+]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
 ]
 
 [[package]]
@@ -1534,6 +1545,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
+]
+
+[[package]]
 name = "polars"
 version = "1.41.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1751,6 +1771,22 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c2/63/1fe3262979e5457b7f7bfc55520de09c5a510c93820e8609a4f7009577bd/pyrealsense2-2.58.2.10647-cp312-cp312-manylinux1_x86_64.whl", hash = "sha256:d53f71efc25c9d38694df17fcc5a09cdf7092af4230789db19baf96512c33e08", size = 12843949, upload-time = "2026-06-14T16:59:10.682Z" },
     { url = "https://files.pythonhosted.org/packages/1e/de/295958f1a8f3d589e647c325f4fcb001e5ed6e4b09bde0407b5446e8e5a0/pyrealsense2-2.58.2.10647-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:60013fd6807f47fcfd654bcfbfe5f7f5d6ecd96cb41339995a3e8db39d34bfd6", size = 6385136, upload-time = "2026-06-14T16:59:12.826Z" },
     { url = "https://files.pythonhosted.org/packages/28/55/464a9da3d99a5edfdd38a23706441d01f9dbf9b47c091f86354cf52e8aec/pyrealsense2-2.58.2.10647-cp312-cp312-win_amd64.whl", hash = "sha256:b5a66cea0bd815d7633146450205593f89739a07a3e7b6cb0bcb77a63e9f01be", size = 8976370, upload-time = "2026-06-14T16:59:15.254Z" },
+]
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
 ]
 
 [[package]]

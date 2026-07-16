@@ -180,6 +180,48 @@ class TestBenchmarkMetrics(unittest.TestCase):
         
         self.assertEqual(indices1, indices2)
 
+    def test_icp_tie_breaker_logic(self):
+        from unittest.mock import patch, MagicMock
+        
+        # Create dummy point clouds
+        model_pc = o3d.geometry.PointCloud()
+        scene_pcd = o3d.geometry.PointCloud()
+        T_init = np.eye(4)
+        
+        # We mock o3d.pipelines.registration.registration_icp
+        with patch('open3d.pipelines.registration.registration_icp') as mock_icp:
+            # We want to simulate equal fitness but different inlier_rmse
+            # Result 1: fitness = 0.8, rmse = 0.02, transformation = T_init
+            # Result 2: fitness = 0.8, rmse = 0.01, transformation = T_flipped
+            res1 = MagicMock()
+            res1.fitness = 0.8
+            res1.inlier_rmse = 0.02
+            res1.transformation = np.eye(4)
+            
+            res2 = MagicMock()
+            res2.fitness = 0.8
+            res2.inlier_rmse = 0.01
+            res2.transformation = np.array([
+                [-1.0,  0.0,  0.0,  0.1],
+                [ 0.0, -1.0,  0.0,  0.2],
+                [ 0.0,  0.0,  1.0,  0.3],
+                [ 0.0,  0.0,  0.0,  1.0]
+            ])
+            
+            # Side effect: first call returns res1, second returns res2
+            mock_icp.side_effect = [res1, res2]
+            
+            T_refined = refine_pose_dual_hypothesis(
+                model_pc=model_pc,
+                scene_pcd=scene_pcd,
+                T_init=T_init,
+                icp_max_correspondence_distance=0.1,
+                icp_max_iterations=10
+            )
+            
+            # The tie-breaker should pick res2 because its inlier_rmse (0.01) is lower than res1 (0.02)
+            np.testing.assert_array_equal(T_refined, res2.transformation)
+
 
 if __name__ == '__main__':
     unittest.main()

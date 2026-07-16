@@ -22,3 +22,90 @@ trials: 30
 name: "Sweep"
 seed: null
 
+hydra:
+  help:
+    template: |
+      6D Pose Estimation Pipeline CLI
+      ================================
+      
+      This project uses Hydra to manage configuration. You can override any configuration 
+      parameter directly from the command line using the `key=value` syntax.
+      
+      --------------------------------------------------------------------------------
+      1. INSPECT POSE RUNNER (inspect_pose.py)
+      --------------------------------------------------------------------------------
+      Use this tool to visually validate the pose estimation pipeline on dataset samples.
+      It exports GLB scenes to visualize the point cloud, predicted cart pose (green),
+      and ground truth pose (blue).
+      
+      Usage Modes:
+        * mode=random
+          Selects random samples from the dataset test split and exports them.
+        * mode=indices
+          Runs targeted inspection on specific indices.
+      
+      Key Config Overrides:
+        mode=random|indices       Set the execution mode.
+        random_samples=N          Number of random samples to run (default: 10).
+        indices=[idx1,idx2,...]   List of specific sample indices to run.
+        model=ppf|ransac          Select matching algorithm (default: ppf).
+        depth_trunc=F             Max depth truncation in meters (default: 3.0).
+        output_dir=path/          Directory to write debug outputs (default: debug_output/).
+      
+      Examples:
+        # Run 5 random samples using the RANSAC estimator:
+        uv run inspect_pose.py mode=random random_samples=5 model=ransac
+        
+        # Run targeted debug on indices 37 and 52 using the PPF estimator:
+        uv run inspect_pose.py mode=indices indices=[37,52] model=ppf
+        
+        # Run with a custom depth truncation threshold:
+        uv run inspect_pose.py mode=random random_samples=2 depth_trunc=6.2
+      
+      --------------------------------------------------------------------------------
+      2. BENCHMARK RUNNER (benchmark.py)
+      --------------------------------------------------------------------------------
+      Use this tool to run quantitative evaluations and hyperparameter sweeps.
+      
+      Usage Modes:
+        * sweep=false (Default)
+          Runs a standard evaluation benchmark on a random selection of test samples.
+        * sweep=true
+          Launches an Optuna multi-objective parameter sweep to optimize accuracy and speed.
+      
+      Key Config Overrides:
+        sweep=true|false          Flag to run hyperparameter sweep (default: false).
+        eval_size=N               Number of samples to evaluate (default: 20).
+        model=ppf|ransac          Matching method config (default: ppf).
+        trials=N                  Number of Optuna trials to run if sweep=true (default: 30).
+        name=STR                  Name of the sweep / Optuna database (default: "Sweep").
+        seed=N                    Optional random seed to ensure reproducible sweeps/evals.
+      
+      Examples:
+        # Benchmark the default RANSAC config on 50 samples:
+        uv run benchmark.py model=ransac eval_size=50
+        
+        # Run an Optuna sweep of 100 trials for PPF:
+        uv run benchmark.py model=ppf sweep=true trials=100 name=PPF_Sweep
+        
+        # Run a reproducible benchmark with a fixed seed:
+        uv run benchmark.py model=ransac eval_size=10 seed=42
+      
+      --------------------------------------------------------------------------------
+      3. GLOBAL CONFIGURATION DEFAULT VALUES
+      --------------------------------------------------------------------------------
+      model: ${hydra:runtime.choices.model} (options: ppf, ransac)
+      dataset: ${hydra:runtime.choices.dataset} (options: default)
+      camera: ${hydra:runtime.choices.camera} (options: default)
+      depth_trunc: ${depth_trunc}
+      output_dir: ${output_dir}
+      mode: ${mode}
+      random_samples: ${random_samples}
+      indices: ${indices}
+      eval_size: ${eval_size}
+      sweep: ${sweep}
+      trials: ${trials}
+      name: ${name}
+      seed: ${seed}
+
+

@@ -8,19 +8,19 @@ and compares predictions against Isaac Sim ground truths.
 
 Usage Modes:
 ------------
-1. Random Validation Mode (--random)
+1. Random Validation Mode (mode=random)
    Selects a set of random test samples, runs the full estimation pipeline, and exports
    the output alignment scenes as .glb files to the `debug_output/` folder.
    By default, it wipes the previous `debug_output/` directory so only the current
    run's results are present.
    
    Example (PPF):
-     uv run inspect_pose.py --random 10 --method ppf_icp
+     uv run inspect_pose.py mode=random random_samples=10 model=ppf
      
    Example (RANSAC):
-     uv run inspect_pose.py --random 10 --method ransac
+     uv run inspect_pose.py mode=random random_samples=10 model=ransac
 
-2. Targeted Debugging Mode (--indices)
+2. Targeted Debugging Mode (mode=indices)
    Takes specific sample indices from the test set split (0-1481) and performs a deep
    dive debug. It exports three files per index to the `debug_failures/` folder:
      - yolo_prediction_{idx}.png : 2D bounding boxes and masks plotted on the RGB image.
@@ -31,13 +31,16 @@ Usage Modes:
    debug run's outputs are present.
    
    Example:
-     uv run inspect_pose.py --indices 37 52 88 --method ppf_icp
+     uv run inspect_pose.py mode=indices indices=[37,52,88] model=ppf
 
-CLI Arguments:
---------------
-  --random [NUM]           Triggers the random validation inspection mode, optionally specifying the number of samples (default: 10).
-  --indices IDX [IDX ...]  Triggers targeted debugging mode on one or more sample indices.
-  --method {ppf_icp,ransac}  The 6D pose estimation method to use (default: 'ppf_icp').
+CLI Configuration Overrides:
+----------------------------
+  mode=random|indices      The validation mode to run.
+  random_samples=NUM       Number of random samples to run in random validation mode (default: 10).
+  indices=[IDX, IDX, ...]  Specific test sample indices to debug in targeted mode.
+  model=ppf|ransac         The 6D pose estimation method to use (default: 'ppf').
+  depth_trunc=FLOAT        Maximum depth scaling truncation in meters (default: 3.0).
+  output_dir=PATH          Directory path to save GLB outputs.
 """
 
 
