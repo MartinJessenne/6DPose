@@ -73,6 +73,10 @@ def prepare_scene_point_cloud(
     """
     Prepares the scene point cloud by estimating surface normals, orienting them
     towards the camera origin, and transforming the points to the robot's base frame.
+    
+    Note:
+        This function does not mutate the input point cloud in-place. It operates on a
+        deep copy to prevent coordinate transform contamination.
 
     Args:
         pcd (o3d.geometry.PointCloud): Segmented scene point cloud in camera coordinate frame.

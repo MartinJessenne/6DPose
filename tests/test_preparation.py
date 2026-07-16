@@ -136,13 +136,13 @@ class TestEstimatorPreparation(unittest.TestCase):
         self.assertIn(active_key, BasePoseEstimator._PREPARATION_CACHE)
 
     def test_transform_chain_regression(self):
-        # Expected robot frame ground truth translation is [3.2055, 0.0, 0.0100]
+        # Expected robot frame ground truth translation is [3.2056, 0.0, 0.0100] when using orthonormal matrix
         # Extrinsic camera-to-robot transform matrix
         T_robot_camera = np.array([
-            [0.5, 0.0,  0.866, 0.439],
-            [0.0, 1.0, -0.0,   0.0  ],
-            [-0.866, 0.0, 0.5, 0.304],
-            [0.0, 0.0,  0.0,   1.0  ]
+            [0.5, 0.0,  np.sqrt(3)/2, 0.439],
+            [0.0, 1.0, -0.0,          0.0  ],
+            [-np.sqrt(3)/2, 0.0, 0.5, 0.304],
+            [0.0, 0.0,  0.0,          1.0  ]
         ])
         
         T_world_camera = np.eye(4)
@@ -158,12 +158,12 @@ class TestEstimatorPreparation(unittest.TestCase):
         T_gt = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera)
         t_gt = T_gt[:3, 3]
         
-        # Verify Z is close to 0.01 (rests on floor)
-        self.assertAlmostEqual(t_gt[2], 0.0100, places=3)
-        # Verify Y is close to 0.0 (centered on robot axis)
-        self.assertAlmostEqual(t_gt[1], 0.0, places=3)
-        # Verify X is close to 3.2055
-        self.assertAlmostEqual(t_gt[0], 3.2055, places=3)
+        # Verify Z is close to 0.0100 (rests on floor)
+        self.assertAlmostEqual(t_gt[2], 0.0100, places=4)
+        # Verify Y is close to 0.0000 (centered on robot axis)
+        self.assertAlmostEqual(t_gt[1], 0.0, places=4)
+        # Verify X is close to 3.2056 (orthonormal translation)
+        self.assertAlmostEqual(t_gt[0], 3.2056, places=4)
 
 if __name__ == "__main__":
     unittest.main()

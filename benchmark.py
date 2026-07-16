@@ -6,35 +6,36 @@ against ground truth labels from Isaac Sim. It runs in two distinct modes:
 
 Usage Modes:
 ------------
-1. Default Benchmark Evaluation
+1. Default Benchmark Evaluation (sweep=false)
    Evaluates a chosen method on a random subset of the test split using its default/optimized
    hyperparameters, printing a detailed performance report (Mean/Median Translation & Rotation
    errors, Match Success Rate, and Mean Execution time).
    
    Example (PPF):
-     uv run benchmark.py --method ppf_icp --eval-size 30
+     uv run benchmark.py model=ppf eval_size=30
      
    Example (RANSAC):
-     uv run benchmark.py --method ransac --eval-size 30
+     uv run benchmark.py model=ransac eval_size=30
 
-2. Hyperparameter Sweep Optimization (--sweep)
+2. Hyperparameter Sweep Optimization (sweep=true)
    Launches a Multi-Objective Bayesian Optimization sweep using Optuna to find the Pareto Front
    of optimal accuracy vs. speed trade-offs. The search space is dynamically configured based
    on the selected method, and results are persisted in a local SQLite database for visualization.
    
    Example (PPF Sweep):
-     uv run benchmark.py --sweep --method ppf_icp --name PPF_Sweep --trials 50 --eval-size 30
+     uv run benchmark.py sweep=true model=ppf name=PPF_Sweep trials=50 eval_size=30
      
    Example (RANSAC Sweep):
-     uv run benchmark.py --sweep --method ransac --name RANSAC_Sweep --trials 50 --eval-size 30
+     uv run benchmark.py sweep=true model=ransac name=RANSAC_Sweep trials=50 eval_size=30
 
-CLI Arguments:
---------------
-  --method {ppf_icp,ransac}  The 6D pose estimation method to run (default: 'ppf_icp').
-  --sweep                    Flag to execute the Optuna hyperparameter sweep.
-  --name NAME                Custom name for the sweep (creates 'optuna_<NAME>.db' storage).
-  --trials TRIALS            Number of optimization trials to execute (default: 30).
-  --eval-size SIZE           Number of validation samples to evaluate per trial/benchmark (default: 20).
+CLI Configuration Overrides:
+----------------------------
+  model=ppf|ransac    The 6D pose estimation method to run (default: 'ppf').
+  sweep=true|false    Flag to execute the Optuna hyperparameter sweep (default: false).
+  name=NAME           Custom name for the sweep (creates 'optuna_<NAME>.db' storage).
+  trials=NUM          Number of optimization trials to execute (default: 30).
+  eval_size=NUM       Number of validation samples to evaluate per trial/benchmark (default: 20).
+  seed=NUM            Optional fixed seed to ensure reproducibility.
 """
 
 import os
