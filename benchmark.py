@@ -48,9 +48,8 @@ import hydra
 from omegaconf import DictConfig
 from datasets import Dataset
 
-# Import Config, classes, and helper functions from main.py
 from main import (
-    Config, Camera, load_hf_model, load_parquet_dataset,
+    Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
     instance_detected
 )
@@ -112,7 +111,7 @@ def evaluate_pipeline(
     camera: Camera,
     estimator: BasePoseEstimator,
     sample_indices: list[int],
-    depth_trunc: float = Config.DEFAULT_DEPTH_TRUNC
+    depth_trunc: float = 3.0
 ) -> tuple[list[float], list[float], list[float], int]:
 
     """
@@ -170,9 +169,10 @@ def evaluate_pipeline(
         # 4. Calculate Ground Truth pose and compare
         # We explicitly pass the estimator's extrinsic matrix (T_robot_camera) to ensure the 
         # ground truth calculation uses the same coordinate transform alignment as the estimator.
-        # This prevents mismatches if extrinsics are overridden dynamically via Hydra configs,
-        # which would otherwise fall back to the old hardcoded defaults in main.py.
+        # This prevents mismatches if extrinsics are overridden dynamically via Hydra configs.
         extrinsic = getattr(estimator, "extrinsic", None)
+        if extrinsic is None:
+            raise ValueError("Estimator must have an extrinsic camera-to-robot transform configured.")
         T_ground_truth = compute_ground_truth_pose(dataset, sample_idx, T_robot_camera=extrinsic)
         
         err_trans = compute_translation_error(T_final, T_ground_truth)

@@ -1,0 +1,4 @@
+path: "parquet"
+train_glob: "dataset/data/train-*-of-00127.parquet"
+val_glob: "dataset/data/validation-*-of-00016.parquet"
+test_glob: "dataset/data/test-*-of-00016.parquet"
