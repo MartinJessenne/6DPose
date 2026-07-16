@@ -5,7 +5,7 @@ import open3d as o3d
 from methods.base import BasePoseEstimator
 from methods.ppf import PPFEstimator, PPFParams
 from methods.ransac import RansacEstimator, RansacParams
-from main import compute_ground_truth_pose
+from pipeline import compute_ground_truth_pose
 
 class TestEstimatorPreparation(unittest.TestCase):
     def setUp(self):

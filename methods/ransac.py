@@ -198,9 +198,9 @@ class RansacEstimator(BasePoseEstimator):
         
         T_init = result_ransac.transformation
         
-        # If RANSAC global registration returns an identity or invalid matrix, it failed
-        if np.allclose(T_init, np.eye(4)):
-            print("RANSAC global registration failed to find a valid transformation.")
+        # If RANSAC global registration has 0 fitness (no matches found), it failed
+        if result_ransac.fitness == 0.0:
+            logging.error("RANSAC global registration failed: zero correspondences found.")
             return None
             
         # 4. Refine pose using factored-out dual-hypothesis point-to-plane ICP

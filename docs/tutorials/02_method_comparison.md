@@ -12,7 +12,7 @@ We load a sample image from the dataset, YOLO segmentation, and setup both estim
 import time
 import numpy as np
 import open3d as o3d
-from main import Camera, load_hf_model, load_parquet_dataset, process_and_reconstruct, compute_ground_truth_pose
+from pipeline import Camera, load_hf_model, load_parquet_dataset, process_and_reconstruct, compute_ground_truth_pose
 from methods.ransac import RansacEstimator
 from methods.ppf import PPFEstimator
 from benchmark import compute_translation_error, compute_rotation_error

@@ -63,30 +63,7 @@ class MyNewModelEstimator(BasePoseEstimator):
 
 ---
 
-## Step 2: Register in the Factory Function
-
-To allow the script runners to query your new estimator, register it in the `get_estimator` factory function inside `methods/__init__.py`:
-
-```python
-# methods/__init__.py
-
-from methods.my_new_model import MyNewModelEstimator
-
-def get_estimator(method_name: str, **kwargs) -> BasePoseEstimator:
-    name_clean = method_name.lower().strip()
-    if name_clean == "ppf":
-        return PPFEstimator(**kwargs)
-    elif name_clean == "ransac":
-        return RansacEstimator(**kwargs)
-    elif name_clean == "my_new_model":
-        return MyNewModelEstimator(**kwargs)
-    else:
-        raise ValueError(f"Unrecognized pose estimation method name: '{method_name}'")
-```
-
----
-
-## Step 3: Create the Hydra Configuration
+## Step 2: Create the Hydra Configuration
 
 To enable command-line overrides and automatic instantiation, add a YAML config file for your model under `config/model/my_new_model.yaml`:
 
@@ -101,7 +78,7 @@ extrinsic: ${camera.extrinsic}
 
 ---
 
-## Step 4: Run and Verify
+## Step 3: Run and Verify
 
 You can now select and run your new model using standard Hydra CLI overrides:
 

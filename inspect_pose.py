@@ -55,8 +55,8 @@ from omegaconf import DictConfig
 import open3d as o3d
 from datasets import Dataset
 
-# Import utility classes and functions from main.py
-from main import (
+# Import utility classes and functions from pipeline.py
+from pipeline import (
     Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
     instance_detected
@@ -204,9 +204,11 @@ def run_random_inspection(
         T_ground_truth = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera=estimator.extrinsic)
         print("Ground Truth 6D Pose Matrix:\n", T_ground_truth)
         
-        # 5. Export Combined Scene to GLB
+        # 5. Export Combined Scene to GLB (Robot Frame)
+        pcd_robot = copy.deepcopy(pcd)
+        pcd_robot.transform(estimator.extrinsic)
         output_file = os.path.join(output_dir, f"combined_scene_sample_{sample_idx}.glb")
-        export_debug_scene(pcd, cad_mesh, T_final, T_ground_truth, output_file)
+        export_debug_scene(pcd_robot, cad_mesh, T_final, T_ground_truth, output_file)
         
     print(f"\nAll operations completed. GLB scenes saved to: '{output_dir}/'")
 
@@ -221,6 +223,7 @@ def run_targeted_inspection(
     dataset: Dataset,
     estimator: BasePoseEstimator,
     meshes: dict[str, o3d.geometry.TriangleMesh],
+    output_dir: str,
     depth_trunc: float
 ) -> None:
     """
@@ -228,7 +231,6 @@ def run_targeted_inspection(
     the 2D YOLO overlays (PNG), the 3D target point cloud (PLY), and
     the aligned scene visualization (GLB).
     """
-    output_dir = "debug_failures"
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -261,9 +263,13 @@ def run_targeted_inspection(
         cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera, depth_trunc=depth_trunc)
         print(f"Recognized class: {cart_type}")
         
+        # Transform the point cloud to the robot frame using the estimator's extrinsic
+        pcd_robot = copy.deepcopy(pcd)
+        pcd_robot.transform(estimator.extrinsic)
+        
         pcd_path = os.path.join(output_dir, f"reconstructed_pcd_{idx}.ply")
-        o3d.io.write_point_cloud(pcd_path, pcd)
-        print(f"Saved reconstructed 3D point cloud to: {pcd_path}")
+        o3d.io.write_point_cloud(pcd_path, pcd_robot)
+        print(f"Saved reconstructed 3D point cloud (Robot Frame) to: {pcd_path}")
         
         # 3. Load reference CAD mesh and run Pose Estimation
         cad_mesh = meshes.get(cart_type)
@@ -276,7 +282,7 @@ def run_targeted_inspection(
                 T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
                 T_ground_truth = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera=estimator.extrinsic)
                 output_glb = os.path.join(output_dir, f"combined_scene_idx_{idx}.glb")
-                export_debug_scene(pcd, cad_mesh, T_final, T_ground_truth, output_glb)
+                export_debug_scene(pcd_robot, cad_mesh, T_final, T_ground_truth, output_glb)
                 print(f"Saved combined 6D Pose scene to: {output_glb}")
             else:
                 print("Pose estimation failed. Cannot generate combined GLB scene.")
@@ -291,6 +297,9 @@ def run_targeted_inspection(
 # =====================================================================
 @hydra.main(config_path="config", config_name="inspect_config", version_base=None)
 def main(cfg: DictConfig):
+    from hydra.core.hydra_config import HydraConfig
+    hydra_dir = HydraConfig.get().runtime.output_dir if HydraConfig.was_initialized() else "."
+
     # Load pipeline assets
     print("Loading pipeline assets...")
     model = load_hf_model(
@@ -341,7 +350,7 @@ def main(cfg: DictConfig):
             dataset=dataset,
             estimator=estimator,
             meshes=meshes,
-            output_dir=cfg.output_dir,
+            output_dir=os.path.join(hydra_dir, cfg.output_dir),
             depth_trunc=cfg.depth_trunc
         )
     elif mode == ExecutionMode.INDICES:
@@ -352,6 +361,7 @@ def main(cfg: DictConfig):
             dataset=dataset,
             estimator=estimator,
             meshes=meshes,
+            output_dir=os.path.join(hydra_dir, "debug_failures"),
             depth_trunc=cfg.depth_trunc
         )
     else:

@@ -1,3 +1,0 @@
-# Core Pipeline (main)
-
-::: main

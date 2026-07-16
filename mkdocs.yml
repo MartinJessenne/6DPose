@@ -39,7 +39,7 @@ nav:
     - Pipeline Symmetries & Sinks: explanation/limitations.md
   - API Reference:
     - Overview: reference/index.md
-    - Core Pipeline (main): reference/main.md
+    - Core Pipeline (pipeline): reference/pipeline.md
     - Base Estimators (base): reference/base.md
     - RANSAC Estimator: reference/ransac.md
     - PPF Estimator: reference/ppf.md
