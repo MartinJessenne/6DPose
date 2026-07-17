@@ -79,7 +79,7 @@ A diagnostic evaluation was performed on the first sample image of the dataset t
 * **Reconstructed Point Cloud Center**: `[2.2586, -0.98523, 2.5273]` (meters)
 * **Direct Calculation without USD correction**: `[1.6379, 0.0, -2.2489]` (negative Z, placing it behind the camera)
 * **Corrected OpenCV Camera Pose ($T_{camera\_cart\_cv}$)**: `[1.6379, 0.0, 2.2489]` (correct positive Z and translation offsets)
-* **Resulting Ground Truth Pose in Robot Frame ($T_{gt\_robot}$)**: `[3.2055, 0.0, 0.0100]`
+* **Resulting Ground Truth Pose in Robot Frame ($T_{gt\_robot}$)**: `[3.2056, 0.0, 0.0100]`
 
 ### Interpretation
 - **Z-Coordinate ($0.010\text{m}$)**: Confirms the cart rests correctly on the floor plane ($Z \approx 0$).

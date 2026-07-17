@@ -23,8 +23,8 @@ from ultralytics import YOLO
 #                +---------------+----------------+
 #                                |
 #                                v
-#                           [ main.py ] <---+
-#                 (PCD, Math Utilities) |
+#                           [ pipeline.py ] <---+
+#                  (Pipeline Utilities)    |
 #                                |          | (Imported for
 #                                v          |  T_ROBOT_CAMERA)
 #                          [ methods/ ] ----+
@@ -33,7 +33,7 @@ from ultralytics import YOLO
 #         +---------------------+---------------------+
 #         |                     |                     |
 #         v                     v                     v
-#     [ base.py ]        [ ppf_icp.py ]         [ ransac.py ]
+#     [ base.py ]        [ ppf.py ]           [ ransac.py ]
 #   (Base Estimator)    (PPF + Dual ICP)      (RANSAC + Dual ICP)
 #
 #
@@ -493,4 +493,34 @@ def process_and_reconstruct(
     return cart_type, pcd
 
 
-
+def load_cad_meshes(meshes_dir: str = None) -> dict[str, o3d.geometry.TriangleMesh]:
+    """
+    Loads all PLY CAD meshes from the meshes/ directory.
+    
+    Args:
+        meshes_dir: Absolute path to the meshes directory. If None, uses 
+                    the 'meshes/' directory relative to this script.
+    
+    Returns:
+        dict mapping cart type name (e.g. 'colruyt') to the loaded TriangleMesh.
+        
+    Raises:
+        RuntimeError: If no meshes are found.
+    """
+    import glob as _glob
+    if meshes_dir is None:
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        meshes_dir = os.path.join(project_root, "meshes")
+    
+    mesh_pattern = os.path.join(meshes_dir, "*.ply")
+    mesh_files = _glob.glob(mesh_pattern)
+    meshes = {}
+    for f in mesh_files:
+        name = os.path.splitext(os.path.basename(f))[0]
+        meshes[name] = o3d.io.read_triangle_mesh(f)
+    if not meshes:
+        raise RuntimeError(
+            f"No meshes found matching pattern: {mesh_pattern}. "
+            f"Ensure the meshes/ directory is populated."
+        )
+    return meshes

@@ -59,7 +59,7 @@ from datasets import Dataset
 from pipeline import (
     Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
-    instance_detected
+    instance_detected, load_cad_meshes
 )
 from methods.base import BasePoseEstimator
 from enum import Enum
@@ -316,17 +316,8 @@ def main(cfg: DictConfig):
         test_glob=cfg.dataset.test_glob
     )
     
-    # Hoist CAD mesh loading (relative to script directory)
-    import glob
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    mesh_path_pattern = os.path.join(project_root, "meshes", "*.ply")
-    mesh_files = glob.glob(mesh_path_pattern)
-    meshes = {}
-    for f in mesh_files:
-        name = os.path.splitext(os.path.basename(f))[0]
-        meshes[name] = o3d.io.read_triangle_mesh(f)
-    if not meshes:
-        raise RuntimeError(f"No meshes found matching pattern: {mesh_path_pattern}. Ensure the meshes/ directory is populated.")
+    # Hoist CAD mesh loading
+    meshes = load_cad_meshes()
     
     # Instantiate chosen estimator dynamically via Hydra
     estimator = hydra.utils.instantiate(cfg.model)

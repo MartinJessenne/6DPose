@@ -42,7 +42,7 @@ import os
 import time
 
 import numpy as np
-import torch
+
 import open3d as o3d
 import optuna
 import hydra
@@ -55,7 +55,7 @@ from pydantic import BaseModel, Field
 from pipeline import (
     Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
-    instance_detected
+    instance_detected, load_cad_meshes
 )
 from methods.base import BasePoseEstimator
 
@@ -130,49 +130,6 @@ def compute_average_recall(errors: list[PoseErrorMetrics], total_samples: int) -
 
 # Set logging level for Optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-# =====================================================================
-# 1. EVALUATION METRIC FUNCTIONS
-# =====================================================================
-def compute_translation_error(T_est: np.ndarray, T_gt: np.ndarray) -> float:
-    """
-    Computes the translation error (Euclidean distance) in meters.
-    
-    Args:
-        T_est (np.ndarray): 4x4 estimated transformation matrix.
-        T_gt (np.ndarray): 4x4 ground truth transformation matrix.
-        
-    Returns:
-        float: Translation error in meters.
-    """
-    t_est = T_est[:3, 3]
-    t_gt = T_gt[:3, 3]
-    return float(np.linalg.norm(t_est - t_gt))
-
-
-def compute_rotation_error(T_est: np.ndarray, T_gt: np.ndarray) -> float:
-    """
-    Computes the geodesic rotation error (angle in degrees).
-    
-    Args:
-        T_est (np.ndarray): 4x4 estimated transformation matrix.
-        T_gt (np.ndarray): 4x4 ground truth transformation matrix.
-        
-    Returns:
-        float: Rotation error in degrees.
-    """
-    R_est = T_est[:3, :3]
-    R_gt = T_gt[:3, :3]
-    
-    # Compute trace of R_est^T @ R_gt
-    trace_val = np.trace(R_est.T @ R_gt)
-    
-    # Clip trace_val to [-1, 1] to avoid domain error in arccos due to float precision limits
-    cos_theta = np.clip((trace_val - 1.0) / 2.0, -1.0, 1.0)
-    theta = np.arccos(cos_theta)
-    
-    # Convert from radians to degrees
-    return float(np.degrees(theta))
 
 
 # =====================================================================
@@ -306,6 +263,14 @@ def run_parameter_sweep(
         seed = existing_seed
         sweep_indices = existing_indices
         print(f"Resuming existing study. Loaded seed={seed}, eval_size={sweep_size}")
+    elif len(study.trials) > 0:
+        # Legacy study: has trials but no seed/eval_size attributes.
+        # Refuse to merge new trials into an incomparable Pareto front.
+        raise ValueError(
+            f"Study '{study_name}' has {len(study.trials)} existing trials but no recorded seed. "
+            f"Cannot merge new trials into an incomparable Pareto front. "
+            f"Delete the .db file or use a new study name."
+        )
     else:
         # Create fresh attributes and store
         if seed is None:
@@ -350,9 +315,10 @@ def run_parameter_sweep(
         ar = compute_average_recall(error_metrics, total_evaluated)
         accuracy_score = 1.0 - ar
         
-        # Calculate p95 execution time with 5s penalty for failures
-        all_times = times + [5.0] * total_failed
-        p95_time = float(np.percentile(all_times, 95)) if all_times else 5.0
+        # Calculate p95 execution time over actual successful runs only.
+        # Failures are already counted as misses in Obj 1 (AR); penalizing them
+        # again with fabricated latencies would corrupt the latency objective.
+        p95_time = float(np.percentile(times, 95)) if times else float('inf')
         
         # Save trial diagnostics
         trial.set_user_attr("average_recall", ar)
@@ -409,17 +375,8 @@ def main(cfg: DictConfig):
     # Resolve estimator class dynamically from Hydra configuration target
     estimator_cls = hydra.utils.get_class(cfg.model._target_)
     
-    # Hoist CAD mesh loading (relative to script directory)
-    import glob
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    mesh_path_pattern = os.path.join(project_root, "meshes", "*.ply")
-    mesh_files = glob.glob(mesh_path_pattern)
-    meshes = {}
-    for f in mesh_files:
-        name = os.path.splitext(os.path.basename(f))[0]
-        meshes[name] = o3d.io.read_triangle_mesh(f)
-    if not meshes:
-        raise RuntimeError(f"No meshes found matching pattern: {mesh_path_pattern}. Ensure the meshes/ directory is populated.")
+    # Hoist CAD mesh loading
+    meshes = load_cad_meshes()
     
     # Retrieve extrinsic matrix for sweep
     extrinsic_list = cfg.camera.get("extrinsic", None)
@@ -482,7 +439,7 @@ def main(cfg: DictConfig):
             ar = compute_average_recall(error_metrics, total)
             print(f"Average Recall (BOP-style AR): {ar:.4f}")
             
-            p95_latency = np.percentile(times + [5.0] * total_failed, 95)
+            p95_latency = float(np.percentile(times, 95)) if times else float('inf')
             print(f"p95 Latency: {p95_latency:.4f}s")
             
             # Decompose errors
@@ -497,8 +454,9 @@ def main(cfg: DictConfig):
             print(f"  - Mean:   {np.mean(trans_xy_errs):.4f}")
             print(f"  - Median: {np.median(trans_xy_errs):.4f}")
             print(f"Translation Error (Z in meters):")
-            print(f"  - Mean:   {np.mean(trans_z_errs):.4f}")
-            print(f"  - Median: {np.median(trans_z_errs):.4f}")
+            print(f"  - Bias (signed mean): {np.mean(trans_z_errs):+.4f}")
+            print(f"  - MAE:                {np.mean(np.abs(trans_z_errs)):.4f}")
+            print(f"  - Median (abs):       {np.median(np.abs(trans_z_errs)):.4f}")
             
             print(f"Yaw Rotation Error (degrees):")
             print(f"  - Mean:   {np.mean(np.abs(yaw_errs)):.2f}°")

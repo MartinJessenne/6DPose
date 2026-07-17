@@ -36,7 +36,7 @@ The estimation algorithms are designed using a Strategy pattern so that individu
 - **Interpolations**: Intrinsics/extrinsics are interpolated into the model params using Hydra (e.g. `${camera.extrinsic}`).
 - **CLI Overrides**: Override configuration parameters directly when running python scripts:
   - Run inspection: `uv run inspect_pose.py mode=random random_samples=2 model=ransac`
-  - Run benchmark: `uv run benchmark.py model=ppf_icp eval_size=5`
+  - Run benchmark: `uv run benchmark.py model=ppf eval_size=5`
   - Run Optuna sweep: `uv run benchmark.py model=ransac sweep=true trials=5`
 
 ---
