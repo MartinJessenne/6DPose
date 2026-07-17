@@ -63,6 +63,9 @@ class MyNewModelEstimator(BasePoseEstimator):
 
 ---
 
+> [!NOTE]
+> Previously, new estimators had to be registered manually in a `get_estimator` factory function. Since the codebase now uses Hydra for parameter management, factory functions are no longer required; estimators are dynamically resolved and instantiated via the `_target_` parameter in their YAML configuration.
+
 ## Step 2: Create the Hydra Configuration
 
 To enable command-line overrides and automatic instantiation, add a YAML config file for your model under `config/model/my_new_model.yaml`:

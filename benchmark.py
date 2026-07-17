@@ -111,6 +111,36 @@ def extract_pose_errors(T_est: np.ndarray, T_gt: np.ndarray) -> PoseErrorMetrics
     )
 
 def compute_average_recall(errors: list[PoseErrorMetrics], total_samples: int) -> float:
+    """
+    Computes a BOP-style Average Recall (AR) metric over a grid of error thresholds.
+    
+    Why a BOP-style loss?
+    --------------------
+    1. Prevents Selection Bias:
+       Evaluating only the mean error of successful matches introduces selection bias, where 
+       an estimator that fails on all but one easy sample can achieve a misleadingly low mean error. 
+       This metric penalizes failures implicitly by treating them as misses (0 recall contribution).
+    2. Avoids Arbitrary Magic Multipliers:
+       Traditional objectives like `mean_trans + alpha * mean_rot + beta * failures` mix units (meters, 
+       degrees, counts) and rely on arbitrary scaling weights (e.g., 5.0 for failure). Average Recall 
+       normalizes all parameters to a bounded [0, 1] range, ensuring equal scaling.
+    3. Smooth Optimization Landscape for Optuna TPE:
+       Using a single threshold (e.g., <1cm and <2°) results in a step-like discontinuous objective function 
+       (e.g., 21 discrete values for 20 samples). This is highly hostile to Bayesian optimization. 
+       Averaging recall over a grid of 42 threshold combinations (7 translation x 6 rotation) creates 
+       a much smoother landscape, assisting the Tree-structured Parzen Estimator (TPE) search.
+    4. Focus on Ground-Plane Constraints (XY + Yaw):
+       Since the towing cart is physically floor-bound, the pitch, roll, and Z-axis translation are 
+       highly constrained by gravity and the ground surface. Therefore, we focus the success criteria 
+       strictly on `trans_xy` (ground-plane drift) and `yaw` (heading orientation).
+       
+    Args:
+        errors (list[PoseErrorMetrics]): Computed pose errors for successfully registered samples.
+        total_samples (int): Total number of samples evaluated (including failures).
+        
+    Returns:
+        float: The average recall score in the range [0.0, 1.0].
+    """
     if total_samples <= 0:
         return 0.0
         
@@ -165,6 +195,9 @@ def evaluate_pipeline(
         depth_bytes = row["depth"]
         
         # 1. Run YOLO detection
+        # We execute the 2D instance segmentation model. If no target cart instance 
+        # is detected, we cannot proceed with point cloud reconstruction or pose 
+        # registration, so we log it as a detection failure and continue to the next sample.
         result = model(img, retina_masks=True, verbose=False)
         if not instance_detected(result):
             detection_failures += 1
@@ -243,41 +276,44 @@ def run_parameter_sweep(
         load_if_exists=True
     )
     
+    # Retrieve run attributes from the Optuna study's metadata to check if we are resuming
     existing_seed = study.user_attrs.get("seed")
     existing_eval_size = study.user_attrs.get("eval_size")
     existing_indices = study.user_attrs.get("sweep_indices")
     
     total_samples = len(dataset)
     
+    # CASE 1: Resuming an existing study that has proper validation metadata.
     if existing_seed is not None:
-        # Integrity Guard Check
+        # Integrity Guard: Ensure the requested sweep size matches what was already evaluated.
         if existing_eval_size != sweep_size:
             raise ValueError(
                 f"Validation size mismatch: DB has eval_size={existing_eval_size}, "
                 f"but sweep requested eval_size={sweep_size}."
             )
+        # Integrity Guard: If a seed was explicitly passed, verify it matches the stored seed.
         if seed is not None and seed != existing_seed:
             raise ValueError(
                 f"Seed mismatch: DB has seed={existing_seed}, but sweep requested seed={seed}."
             )
+        # Load the existing seed and sample indices to ensure evaluation is on the exact same validation subset.
         seed = existing_seed
         sweep_indices = existing_indices
         print(f"Resuming existing study. Loaded seed={seed}, eval_size={sweep_size}")
-    elif len(study.trials) > 0:
-        # Legacy study: has trials but no seed/eval_size attributes.
-        # Refuse to merge new trials into an incomparable Pareto front.
-        raise ValueError(
-            f"Study '{study_name}' has {len(study.trials)} existing trials but no recorded seed. "
-            f"Cannot merge new trials into an incomparable Pareto front. "
-            f"Delete the .db file or use a new study name."
-        )
+    
+    # CASE 2: Fresh study initialization.
     else:
-        # Create fresh attributes and store
+        # Generate a seed if not explicitly provided.
+        # We retrieve a high-entropy random integer from the OS (via SeedSequence().entropy) 
+        # and cast it to fit within a standard 31-bit integer range (modulo 2**31 - 1) 
+        # to make sure it is a valid seed for all downstream library generators.
         if seed is None:
             seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
+        # Draw indices deterministically using a generator seeded with our selected seed
         rng = np.random.default_rng(seed)
         sweep_indices = rng.choice(total_samples, min(sweep_size, total_samples), replace=False).tolist()
         
+        # Persist attributes in the study so future runs can resume with the same setup
         study.set_user_attr("seed", seed)
         study.set_user_attr("eval_size", sweep_size)
         study.set_user_attr("sweep_indices", sweep_indices)
@@ -299,7 +335,9 @@ def run_parameter_sweep(
         # 3. Instantiate model with trial parameters
         trial_estimator = estimator_cls(params=suggested_params, extrinsic=extrinsic)
         
-        # Pre-prepare all meshes on this trial estimator
+        # Offline CAD mesh preparation (voxelization, normals, and FPFH/PPF database generation).
+        # We prepare the model CAD representations outside the timed evaluation loop so that 
+        # offline preparation costs are not charged to the online pose estimation latency metric.
         for cart_type, mesh in meshes.items():
             trial_estimator.prepare(mesh, cart_type)
         
@@ -354,6 +392,15 @@ def run_parameter_sweep(
 # =====================================================================
 # 4. CLI ENTRY POINT
 # =====================================================================
+# The @hydra.main decorator intercepts command-line execution and manages:
+# 1. Config Path Resolution: Searches the local directory 'config/' for YAML config templates.
+# 2. Config Composition: Reads 'config.yaml' as the root file, which declares default subconfigs
+#    (e.g., loading model presets under config/model/ and dataset settings under config/dataset/).
+# 3. CLI Overrides parsing: Converts CLI key-value assignments (like 'model=ransac' or 'sweep=true')
+#    into overrides, merges them with the default configuration tree, and encapsulates them into 
+#    an OmegaConf DictConfig object.
+# 4. Working Directory Management: Hydra automatically handles logging output paths and creates a 
+#    unique execution folder for each run (or multi-run sweep studies) to prevent output collisions.
 @hydra.main(config_path="config", config_name="benchmark_config", version_base=None)
 def main(cfg: DictConfig):
     # Load model, camera, and dataset
