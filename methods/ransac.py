@@ -73,6 +73,7 @@ class RansacEstimator(BasePoseEstimator):
 
     def _get_prep_params_key(self) -> tuple:
         """Returns only the parameters affecting offline preparation."""
+        # Note: The trailing comma is required to instantiate a single-element tuple in Python.
         return (self.params.voxel_size,)
 
     def prepare(self, cad_mesh: o3d.geometry.TriangleMesh, cart_type: str) -> None:
@@ -154,7 +155,12 @@ class RansacEstimator(BasePoseEstimator):
                 logging.warning(f"Cache miss inside estimate_pose: preparing on-the-fly for key {cache_key}")
                 self.prepare(cad_mesh, cart_type)
             
-            # Retrieve prepared representations: copied: point clouds and features
+            # Retrieve prepared representations from the cache.
+            # Rationale for deepcopy: Open3D C++ objects are mutable and passed by reference.
+            # Downstream algorithms (such as ICP refinement) transform these point clouds in-place.
+            # If we did not deepcopy, the cached objects would get corrupted across calls.
+            # Performance: Deepcopying a small point cloud/feature descriptor array takes <0.1ms,
+            # whereas recomputing voxelization, normals, and FPFH features from scratch takes ~10-30ms.
             prep_data = self._PREPARATION_CACHE[cache_key]
             model_pc = copy.deepcopy(prep_data["model_pc"])
             model_down = copy.deepcopy(prep_data["model_down"])

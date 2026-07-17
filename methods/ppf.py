@@ -179,7 +179,13 @@ class PPFEstimator(BasePoseEstimator):
                 logging.warning(f"Cache miss inside estimate_pose: preparing on-the-fly for key {cache_key}")
                 self.prepare(cad_mesh, cart_type)
             
-            # Retrieve prepared representations: copied: point clouds; shared: detector
+            # Retrieve prepared representations from the cache.
+            # Rationale for deepcopy: Open3D C++ point clouds are mutable and modified in-place 
+            # by downstream ICP refinement, so they must be copied to prevent cache corruption.
+            # Rationale for sharing: The OpenCV PPF3DDetector is read-only during matching, so it 
+            # is safe to share the single trained instance without deepcopying.
+            # Performance: Deepcopying a 1000-point cloud takes <0.1ms, whereas recomputing normals 
+            # and re-training the PPF matching database from scratch takes ~1-5 seconds.
             prep_data = self._PREPARATION_CACHE[cache_key]
             model_pc = copy.deepcopy(prep_data["model_pc"])
             detector = prep_data["detector"]

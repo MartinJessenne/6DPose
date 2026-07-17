@@ -173,6 +173,39 @@ class TestEstimatorPreparation(unittest.TestCase):
         # Verify X is close to 3.2056 (orthonormal translation)
         self.assertAlmostEqual(t_gt[0], 3.2056, places=4)
 
+    def test_empty_point_cloud_returns_none(self):
+        """D1: Test that empty scene point clouds abort registration early and return None."""
+        empty_pcd = o3d.geometry.PointCloud()
+        
+        # Test RANSAC
+        ransac_est = RansacEstimator(params=RansacParams(voxel_size=0.05), extrinsic=self.extrinsic)
+        res_ransac = ransac_est.estimate_pose(empty_pcd, self.mesh, cart_type="test_cart")
+        self.assertIsNone(res_ransac)
+        
+        # Test PPF
+        ppf_est = PPFEstimator(params=PPFParams(ppf_sampling_step=0.05, ppf_distance_step=0.05), extrinsic=self.extrinsic)
+        res_ppf = ppf_est.estimate_pose(empty_pcd, self.mesh, cart_type="test_cart")
+        self.assertIsNone(res_ppf)
+
+    def test_estimate_pose_cache_hit_on_the_fly(self):
+        """D2: Verify that estimate_pose correctly triggers on-the-fly preparation and hits cache on subsequent calls."""
+        ppf_est = PPFEstimator(params=PPFParams(ppf_sampling_step=0.05, ppf_distance_step=0.05), extrinsic=self.extrinsic)
+        cache_key = (PPFEstimator.__name__, "test_cart", ppf_est._get_prep_params_key())
+        
+        # Cache must be empty for this key initially
+        self.assertNotIn(cache_key, BasePoseEstimator._PREPARATION_CACHE)
+        
+        # Running estimate_pose should trigger preparation on-the-fly (cache miss fallback)
+        ppf_est.estimate_pose(self.pcd, self.mesh, cart_type="test_cart")
+        self.assertIn(cache_key, BasePoseEstimator._PREPARATION_CACHE)
+        
+        # Retrieve the cached detector object
+        cached_detector = BasePoseEstimator._PREPARATION_CACHE[cache_key]["detector"]
+        
+        # Run estimate_pose again, it should use the exact same cached detector
+        ppf_est.estimate_pose(self.pcd, self.mesh, cart_type="test_cart")
+        self.assertIs(BasePoseEstimator._PREPARATION_CACHE[cache_key]["detector"], cached_detector)
+
 class TestMaskedImageFrameIntrinsics(unittest.TestCase):
     """D3: Tests for MaskedImageFrame.get_o3d_intrinsics principal-point shift."""
     
