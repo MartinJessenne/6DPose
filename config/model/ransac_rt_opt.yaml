@@ -1,0 +1,12 @@
+# @package _global_
+depth_trunc: 2.1
+
+model:
+  _target_: methods.ransac.RansacEstimator
+  params:
+    voxel_size: 0.09
+    # Optimized value obtained from Optuna hyperparameter sweep RansacNewSweep (Trial #27)
+    # Optimized for real-time deployment (p95 latency ~0.25s, BOP-style AR ~5.5%)
+    icp_max_correspondence_distance: 0.09794024637923043
+    icp_max_iterations: 20
+  extrinsic: ${camera.extrinsic}
