@@ -131,6 +131,9 @@ class RansacEstimator(BasePoseEstimator):
         """
         # Prepare scene point cloud using factored-out utility function
         pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
+        if pcd.is_empty():
+            logging.warning("Prepared scene point cloud is empty. Registration aborted.")
+            return None
 
         voxel_size = self.params.voxel_size
 

@@ -12,6 +12,14 @@ class TestEstimatorPreparation(unittest.TestCase):
         # Clear global cache before each test
         BasePoseEstimator._PREPARATION_CACHE.clear()
         
+        # Load extrinsic from config as the source of truth
+        import yaml
+        import os
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "camera", "default.yaml")
+        with open(config_path) as f:
+            cam_cfg = yaml.safe_load(f)
+        self.extrinsic = np.array(cam_cfg["extrinsic"], dtype=np.float64)
+
         # Create a simple box mesh to act as a CAD model
         self.mesh = o3d.geometry.TriangleMesh.create_box(width=1.0, height=1.0, depth=1.0)
         self.pcd = o3d.geometry.PointCloud()
@@ -83,7 +91,7 @@ class TestEstimatorPreparation(unittest.TestCase):
     def test_copy_on_retrieval_and_mutation_safety(self):
         # Ransac copy safety test
         params = RansacParams(voxel_size=0.05)
-        est = RansacEstimator(params=params)
+        est = RansacEstimator(params=params, extrinsic=self.extrinsic)
         est.prepare(self.mesh, "test_cart")
         
         # Retrieve representation and perform an in-place transformation (which mimics downstream mutate)
@@ -106,7 +114,7 @@ class TestEstimatorPreparation(unittest.TestCase):
     def test_local_fallback_no_side_effects(self):
         # Running estimate_pose with cart_type=None (lazy local fallback)
         params = RansacParams(voxel_size=0.06)
-        est = RansacEstimator(params=params)
+        est = RansacEstimator(params=params, extrinsic=self.extrinsic)
         
         # Verify cache is empty initially
         self.assertEqual(len(BasePoseEstimator._PREPARATION_CACHE), 0)

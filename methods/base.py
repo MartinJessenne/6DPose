@@ -90,6 +90,8 @@ def prepare_scene_point_cloud(
     """
     # Deepcopy to prevent mutating the caller's point cloud (double extrinsics bug)
     pcd = copy.deepcopy(pcd)
+    if pcd.is_empty():
+        return pcd
     # 1. Estimate surface normals using hybrid KD-tree search
     # This computes a local plane fit for each point's neighbors. If points lack normals,
     # ICP refinement (Point-to-Plane) and PPF matching will fail.
