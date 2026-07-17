@@ -60,12 +60,7 @@ class RansacEstimator(BasePoseEstimator):
         if extrinsic is not None:
             self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
         else:
-            self.extrinsic = np.array([
-                [0.5, 0.0,  np.sqrt(3)/2, 0.439],
-                [0.0, 1.0, -0.0,          0.0  ],
-                [-np.sqrt(3)/2, 0.0, 0.5, 0.304],
-                [0.0, 0.0,  0.0,          1.0  ]
-            ])
+            self.extrinsic = None
 
     @classmethod
     def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
@@ -169,7 +164,7 @@ class RansacEstimator(BasePoseEstimator):
         pcd_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
         
         # 2. Compute FPFH (Fast Point Feature Histograms) descriptors
-        print("Computing FPFH descriptors...")
+        logging.info("Computing FPFH descriptors...")
         pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
             pcd_down,
             o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
@@ -177,7 +172,7 @@ class RansacEstimator(BasePoseEstimator):
         
         # 3. Perform RANSAC Global Registration based on feature matching
         distance_threshold = voxel_size * 1.5
-        print("Running RANSAC global registration...")
+        logging.info("Running RANSAC global registration...")
         result_ransac = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
             model_down, 
             pcd_down, 

@@ -84,12 +84,7 @@ class PPFEstimator(BasePoseEstimator):
         if extrinsic is not None:
             self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
         else:
-            self.extrinsic = np.array([
-                [0.5, 0.0,  np.sqrt(3)/2, 0.439],
-                [0.0, 1.0, -0.0,          0.0  ],
-                [-np.sqrt(3)/2, 0.0, 0.5, 0.304],
-                [0.0, 0.0,  0.0,          1.0  ]
-            ])
+            self.extrinsic = None
 
     @classmethod
     def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
@@ -188,7 +183,7 @@ class PPFEstimator(BasePoseEstimator):
         
         ppf_scene = o3d_to_ppf_format(pcd)
         
-        print("Running PPF Match on scene...")
+        logging.info("Running PPF Match on scene...")
         match_results = detector.match(
             ppf_scene,
             self.params.ppf_match_threshold,
@@ -197,13 +192,13 @@ class PPFEstimator(BasePoseEstimator):
         
         # Guard check if matching returned empty results
         if not match_results:
-            print("PPF matching failed to return any candidate matches.")
+            logging.warning("PPF matching failed to return any candidate matches.")
             return None
             
         # Retrieve the best match result
         best_match = match_results[0]
         T_init = np.asarray(best_match.pose, dtype=np.float64).reshape(4, 4)
-        print(f"PPF Alignment Complete. Best match votes: {best_match.numVotes}")
+        logging.info(f"PPF Alignment Complete. Best match votes: {best_match.numVotes}")
         
         # Refine pose using factored-out dual-hypothesis point-to-plane ICP
         T_refined = refine_pose_dual_hypothesis(

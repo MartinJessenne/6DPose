@@ -137,13 +137,13 @@ class TestEstimatorPreparation(unittest.TestCase):
 
     def test_transform_chain_regression(self):
         # Expected robot frame ground truth translation is [3.2056, 0.0, 0.0100] when using orthonormal matrix
-        # Extrinsic camera-to-robot transform matrix
-        T_robot_camera = np.array([
-            [0.5, 0.0,  np.sqrt(3)/2, 0.439],
-            [0.0, 1.0, -0.0,          0.0  ],
-            [-np.sqrt(3)/2, 0.0, 0.5, 0.304],
-            [0.0, 0.0,  0.0,          1.0  ]
-        ])
+        # Load extrinsic from the single source of truth (config/camera/default.yaml)
+        import yaml
+        import os
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "camera", "default.yaml")
+        with open(config_path) as f:
+            cam_cfg = yaml.safe_load(f)
+        T_robot_camera = np.array(cam_cfg["extrinsic"], dtype=np.float64)
         
         T_world_camera = np.eye(4)
         
@@ -164,6 +164,60 @@ class TestEstimatorPreparation(unittest.TestCase):
         self.assertAlmostEqual(t_gt[1], 0.0, places=4)
         # Verify X is close to 3.2056 (orthonormal translation)
         self.assertAlmostEqual(t_gt[0], 3.2056, places=4)
+
+class TestMaskedImageFrameIntrinsics(unittest.TestCase):
+    """D3: Tests for MaskedImageFrame.get_o3d_intrinsics principal-point shift."""
+    
+    def test_principal_point_shift(self):
+        """Verify that cropping offsets are correctly subtracted from the principal point."""
+        import torch
+        from pipeline import Camera, MaskedImageFrame
+        
+        # Original camera with known principal point
+        camera = Camera(fx=640.0, fy=640.0, cx=640.0, cy=400.0)
+        
+        # Simulate a crop at (xmin=100, ymin=50) producing a 200x150 patch
+        crop_w, crop_h = 200, 150
+        rgb = torch.zeros(crop_h, crop_w, 3, dtype=torch.uint8)
+        depth = torch.zeros(crop_h, crop_w, dtype=torch.float32)
+        
+        frame = MaskedImageFrame(rgb=rgb, depth=depth, camera=camera, xmin=100, ymin=50)
+        
+        intrinsics = frame.get_o3d_intrinsics()
+        
+        # Principal point should be shifted by the crop offset
+        intrinsic_matrix = intrinsics.intrinsic_matrix
+        result_cx = intrinsic_matrix[0, 2]
+        result_cy = intrinsic_matrix[1, 2]
+        
+        self.assertAlmostEqual(result_cx, 640.0 - 100, places=5)  # cx - xmin
+        self.assertAlmostEqual(result_cy, 400.0 - 50, places=5)   # cy - ymin
+        
+        # Focal lengths should be unchanged
+        self.assertAlmostEqual(intrinsic_matrix[0, 0], 640.0, places=5)
+        self.assertAlmostEqual(intrinsic_matrix[1, 1], 640.0, places=5)
+        
+        # Width and height should match the crop
+        self.assertEqual(intrinsics.width, crop_w)
+        self.assertEqual(intrinsics.height, crop_h)
+    
+    def test_zero_offset_preserves_original(self):
+        """When crop starts at origin, intrinsics should match the original camera."""
+        import torch
+        from pipeline import Camera, MaskedImageFrame
+        
+        camera = Camera(fx=639.99768, fy=639.99768, cx=640.0, cy=400.0)
+        
+        rgb = torch.zeros(800, 1280, 3, dtype=torch.uint8)
+        depth = torch.zeros(800, 1280, dtype=torch.float32)
+        
+        frame = MaskedImageFrame(rgb=rgb, depth=depth, camera=camera, xmin=0, ymin=0)
+        
+        intrinsics = frame.get_o3d_intrinsics()
+        intrinsic_matrix = intrinsics.intrinsic_matrix
+        
+        self.assertAlmostEqual(intrinsic_matrix[0, 2], 640.0, places=5)
+        self.assertAlmostEqual(intrinsic_matrix[1, 2], 400.0, places=5)
 
 if __name__ == "__main__":
     unittest.main()
