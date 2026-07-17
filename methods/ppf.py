@@ -158,6 +158,9 @@ class PPFEstimator(BasePoseEstimator):
         """
         # Prepare scene point cloud using factored-out utility function
         pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
+        if pcd.is_empty():
+            logging.warning("Prepared scene point cloud is empty. Registration aborted.")
+            return None
 
         if cart_type is None:
             # Lazy local fallback (no caching, no side-effects)
