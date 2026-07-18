@@ -54,6 +54,7 @@ class Ransac3DoFParams(RansacParams):
             icp_max_iterations=icp_max_iterations,
         )
         self.z_offset = z_offset
+        self.z_gate_threshold = z_gate_threshold
         self.edge_length_threshold = edge_length_threshold
         self.ransac_confidence = ransac_confidence
         self.seed = seed
