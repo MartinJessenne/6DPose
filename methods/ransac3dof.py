@@ -162,5 +162,12 @@ class Ransac3DoFEstimator(RansacEstimator):
         """Suggests parameters for the SE(2)-constrained RANSAC + ICP registration."""
         params = super().suggest_params(trial)
         params["edge_length_threshold"] = trial.suggest_float("edge_length_threshold", 0.8, 0.95)
-        params["z_gate_threshold"] = trial.suggest_float("z_gate_threshold", 0.03, 0.20)
+        # First z-gate sweep pressed against the old 0.20 ceiling (19/20 top
+        # trials above 0.15): the optimum lies higher, so give it headroom.
+        params["z_gate_threshold"] = trial.suggest_float("z_gate_threshold", 0.05, 0.35)
+        # Let Optuna trade RANSAC budget against latency explicitly instead of
+        # only implicitly through voxel_size.
+        params["ransac_max_iterations"] = trial.suggest_int(
+            "ransac_max_iterations", 2000, 100000, log=True
+        )
         return params
