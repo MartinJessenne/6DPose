@@ -2,6 +2,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import open3d as o3d
 
 from methods.constrained_ransac import constrained_ransac_se2, project_to_se2
 from methods.ransac import RansacEstimator, RansacParams
@@ -9,6 +10,46 @@ from methods.se2_icp import refine_pose_dual_hypothesis_se2
 
 if TYPE_CHECKING:
     import optuna
+
+
+def crop_front_face(cad_mesh: "o3d.geometry.TriangleMesh", depth: float) -> "o3d.geometry.TriangleMesh":
+    """
+    Keeps only the slab within `depth` meters of the mesh's +x extreme.
+
+    CAD convention for the cart fleet (colruyt/leanflow/picanol): origin on
+    the floor at the towing face (x ~ 0), body extending toward -x, y the
+    symmetry axis. Cropping to the front slab removes the near-180-degree
+    symmetry that causes flipped registrations: the remaining face is
+    asymmetric, so the dual-hypothesis selection can tell front from back.
+
+    The cropped mesh is NOT recentered — it stays in the original CAD frame,
+    so estimated poses remain directly comparable to full-model ground truth.
+    """
+    vertices = np.asarray(cad_mesh.vertices)
+    x_max = float(vertices[:, 0].max())
+    big = 1e6
+    aabb = o3d.geometry.AxisAlignedBoundingBox(
+        min_bound=(x_max - depth, -big, -big),
+        max_bound=(x_max + big, big, big),
+    )
+    cropped = cad_mesh.crop(aabb)
+    if len(cropped.vertices) == 0:
+        raise ValueError(
+            f"front_crop_depth={depth} left an empty mesh (mesh x range "
+            f"[{vertices[:, 0].min():.3f}, {x_max:.3f}])."
+        )
+    return cropped
+
+
+def derive_z_offset(cad_mesh: "o3d.geometry.TriangleMesh") -> float:
+    """
+    Height of the CAD origin above the model's lowest vertex.
+
+    For a cart resting on the floor in a frame whose z=0 is the ground plane
+    (robot base_link), the pose's z translation must equal this value so the
+    model's lowest point touches the ground.
+    """
+    return -float(np.asarray(cad_mesh.vertices)[:, 2].min())
 
 
 # =====================================================================
@@ -23,17 +64,20 @@ class Ransac3DoFParams(RansacParams):
         ransac_max_iterations: int = 100000,
         icp_max_correspondence_distance: float = 0.15,
         icp_max_iterations: int = 100,
-        z_offset: float = 0.0,
+        z_offset: float | None = None,
         z_gate_threshold: float = 0.09,
         edge_length_threshold: float = 0.9,
         ransac_confidence: float = 0.999,
         seed: int | None = 0,
+        front_crop_depth: float | None = None,
     ):
         """
         Args:
-            z_offset (float): Height of the CAD model origin above the scene's
-                ground plane, in the robot base frame (compensates for a CAD
-                origin that is not on the ground).
+            z_offset (float, optional): Height of the CAD model origin above
+                the scene's ground plane, in the robot base frame. None (the
+                default) derives it per cart from the CAD mesh as
+                -min(vertex z), i.e. the model rests on the floor; set a float
+                to override manually.
             z_gate_threshold (float): Half-width (meters) of the z-consistency
                 gate on FPFH correspondences. A sensor-noise property, so it is
                 tuned independently of voxel_size (default 0.09 matches the
@@ -46,6 +90,11 @@ class Ransac3DoFParams(RansacParams):
                 to 0 so benchmark sweeps (which build params from suggest_params
                 alone, bypassing the yaml) stay deterministic per trial; pass
                 None explicitly for non-deterministic runs.
+            front_crop_depth (float, optional): When set, register against only
+                the front slab of the CAD model (the `depth` meters nearest the
+                +x face, i.e. the towing face) instead of the full cart. The
+                slab is asymmetric, which disambiguates the 180-degree flip.
+                None (default) uses the full mesh.
         """
         super().__init__(
             voxel_size=voxel_size,
@@ -58,6 +107,7 @@ class Ransac3DoFParams(RansacParams):
         self.edge_length_threshold = edge_length_threshold
         self.ransac_confidence = ransac_confidence
         self.seed = seed
+        self.front_crop_depth = front_crop_depth
 
 
 # =====================================================================
@@ -96,6 +146,35 @@ class Ransac3DoFEstimator(RansacEstimator):
             )
 
         super().__init__(params=params, extrinsic=extrinsic)
+        self._active_z_offset = 0.0
+
+    def _get_prep_params_key(self) -> tuple:
+        # front_crop_depth changes the prepared model representation, so it
+        # must be part of the cache key alongside voxel_size.
+        return (self.params.voxel_size, self.params.front_crop_depth)
+
+    def prepare(self, cad_mesh, cart_type: str) -> None:
+        if self.params.front_crop_depth is not None:
+            cad_mesh = crop_front_face(cad_mesh, self.params.front_crop_depth)
+        super().prepare(cad_mesh, cart_type)
+
+    def estimate_pose(self, pcd, cad_mesh, cart_type=None, **kwargs):
+        # Resolve the z offset for THIS cart before the pipeline runs: the
+        # hooks below (_global_registration, _project_pose) have no access to
+        # the CAD mesh, so the resolved value is carried on the instance.
+        # Derived from the FULL mesh — the front slab may not reach the floor.
+        if self.params.z_offset is not None:
+            self._active_z_offset = self.params.z_offset
+        else:
+            self._active_z_offset = derive_z_offset(cad_mesh)
+
+        # Register against the front slab only (asymmetric -> no flips); the
+        # crop stays in the CAD frame, so the output pose is unchanged in
+        # meaning and remains comparable to full-model ground truth.
+        if self.params.front_crop_depth is not None:
+            cad_mesh = crop_front_face(cad_mesh, self.params.front_crop_depth)
+
+        return super().estimate_pose(pcd, cad_mesh, cart_type=cart_type, **kwargs)
 
     def _global_registration(self, model_down, pcd_down, model_fpfh, pcd_fpfh):
         """SE(2)-constrained replacement for Open3D's feature-matching RANSAC."""
@@ -108,7 +187,7 @@ class Ransac3DoFEstimator(RansacEstimator):
             distance_threshold=distance_threshold,
             max_iterations=self.params.ransac_max_iterations,
             confidence=self.params.ransac_confidence,
-            z_offset=self.params.z_offset,
+            z_offset=self._active_z_offset,
             z_gate_threshold=self.params.z_gate_threshold,
             edge_length_threshold=self.params.edge_length_threshold,
             # Short sample baselines give yaw hypotheses dominated by voxel
@@ -148,7 +227,7 @@ class Ransac3DoFEstimator(RansacEstimator):
         exact no-op (up to float round-off). A visible correction indicates a
         bug upstream, so it is logged loudly rather than silently absorbed.
         """
-        T_projected = project_to_se2(T, z_offset=self.params.z_offset)
+        T_projected = project_to_se2(T, z_offset=self._active_z_offset)
         residual = np.abs(T_projected - T).max()
         if residual > 1e-6:
             logging.error(
