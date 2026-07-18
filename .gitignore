@@ -28,3 +28,6 @@ multirun/
 site/
 # Local debug frames dumped at repo root
 frame_*.npy
+
+# Resumable sweep working dir (DBs are backed up to the sweep-backups branch)
+sweeps/
