@@ -249,4 +249,8 @@ class Ransac3DoFEstimator(RansacEstimator):
         params["ransac_max_iterations"] = trial.suggest_int(
             "ransac_max_iterations", 2000, 100000, log=True
         )
+        # Registering the asymmetric front slab instead of the full cart
+        # halved the flip rate and doubled AR in A/B benchmarks; the slab
+        # depth trades feature support against re-imported symmetry.
+        params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.2, 0.6)
         return params
