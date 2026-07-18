@@ -147,7 +147,7 @@ class TestConstrainedRansac(unittest.TestCase):
         result = constrained_ransac_se2(
             model_points, scene_points, model_fpfh, scene_fpfh,
             distance_threshold=0.01, max_iterations=2000,
-            z_offset=z_offset, rng=rng,
+            z_offset=z_offset, min_sample_distance=0.3, rng=rng,
         )
 
         self.assertGreater(result.fitness, 0.8)
