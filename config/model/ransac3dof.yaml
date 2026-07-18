@@ -6,11 +6,17 @@ params:
   icp_max_iterations: 100
   # Height of the CAD model origin above the ground plane in the robot base
   # frame. 0.0 assumes the CAD origin sits on the floor.
-  z_offset: 0.0
+  # null derives the offset per cart from the CAD mesh (-min vertex z, model
+  # resting on the floor); set a float to override manually.
+  z_offset: null
   # Half-width of the z-consistency gate on FPFH correspondences (sensor
   # z-noise property, decoupled from voxel_size).
   z_gate_threshold: 0.09
   edge_length_threshold: 0.9
+  # When set (meters), register against only the front slab of the CAD mesh
+  # (towing face at +x in the CAD frame) — asymmetric, so it disambiguates
+  # 180-degree flips. null uses the full mesh.
+  front_crop_depth: null
   ransac_confidence: 0.999
   # Fixed seed for reproducible benchmarks; set to null for non-deterministic runs.
   seed: 0
