@@ -22,10 +22,8 @@ debug_output/
 
 debug_yolo_checks/
 
-*.db
 
 *debug*
-outputs/
 multirun/
 site/
 # Local debug frames dumped at repo root
