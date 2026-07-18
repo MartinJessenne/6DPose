@@ -104,6 +104,9 @@ class Ransac3DoFEstimator(RansacEstimator):
             confidence=self.params.ransac_confidence,
             z_offset=self.params.z_offset,
             edge_length_threshold=self.params.edge_length_threshold,
+            # Short sample baselines give yaw hypotheses dominated by voxel
+            # noise; require the 2 sampled model points to span a few voxels.
+            min_sample_distance=3.0 * self.params.voxel_size,
             rng=np.random.default_rng(self.params.seed),
         )
 

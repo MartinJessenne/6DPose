@@ -102,9 +102,11 @@ def constrained_ransac_se2(
     scene_fpfh,          # (M, 33)
     distance_threshold,
     max_iterations=100000,
+    min_iterations=1000,
     confidence=0.999,
     z_offset=0.0,        # height of the model origin above the scene's ground plane
     edge_length_threshold=0.9,
+    min_sample_distance=0.0,
     scoring_subsample_size=100,
     rng=None,
 ):
@@ -113,13 +115,21 @@ def constrained_ransac_se2(
     registration_ransac_based_on_feature_matching.
 
     Hypotheses are generated from 2 correspondences (instead of 3 for SE(3)),
-    which also lowers the iteration bound to log(1-confidence)/log(1-eps^2).
+    which lowers the iteration bound to log(1-confidence)/log(1-w^2), where w
+    is the CORRESPONDENCE inlier ratio of the best hypothesis so far (the
+    fraction of FPFH correspondences consistent with it) — not the
+    model-coverage fitness, which measures a different quantity and would make
+    the early exit far too optimistic. `min_iterations` additionally floors
+    the budget so an early mediocre hypothesis cannot end the search.
 
     Because z is fixed by the constraint, correspondences whose z coordinates
     are inconsistent (|q_z - p_z - z_offset| >= distance_threshold) can never
     be inliers of a valid hypothesis and are filtered out upfront.
 
     Args:
+        min_sample_distance: minimum distance between the 2 sampled model
+            points; short baselines give yaw estimates dominated by voxel
+            noise (callers typically pass a few voxel sizes).
         rng: np.random.Generator for reproducible runs (defaults to a fresh one).
     """
     rng = np.random.default_rng() if rng is None else rng
@@ -151,6 +161,11 @@ def constrained_ransac_se2(
     scene_tree = cKDTree(scene_points)
     n_model = len(model_points)
 
+    # Matched pairs used to measure the correspondence inlier ratio of a
+    # hypothesis (drives the early-exit bound).
+    corr_p = model_points[correspondences[:, 0]]
+    corr_q = scene_points[correspondences[:, 1]]
+
     # Cheap hypothesis pre-scoring on a fixed random subsample; the full model
     # is only evaluated when the subsample beats the current best.
     n_sub = min(scoring_subsample_size, n_model)
@@ -179,7 +194,7 @@ def constrained_ransac_se2(
         # p1-p2 / q1-q2 distances disagree (noise or mismatch)
         len_p = np.linalg.norm(p2 - p1)
         len_q = np.linalg.norm(q2 - q1)
-        if len_p < 1e-9:
+        if len_p < max(1e-9, min_sample_distance):
             continue
         if min(len_p, len_q) / max(len_p, len_q) < edge_length_threshold:
             continue
@@ -213,13 +228,24 @@ def constrained_ransac_se2(
             best_rmse = np.sqrt(np.mean(dists[inlier_mask] ** 2)) if inlier_mask.any() else np.inf
             best_T = T
 
-            # Update the iteration bound (as in classic RANSAC / Open3D):
-            # with 2-point samples the bound is log(1-confidence)/log(1-fitness^2)
             if best_fitness >= 1.0:
                 break  # perfect fit: no hypothesis can improve on it
-            if best_fitness > 0:
-                required_iterations = max(1, int(
-                    np.log(1 - confidence) / np.log(1 - best_fitness ** 2)
+
+            # Update the iteration bound from the CORRESPONDENCE inlier ratio w
+            # of the new best: the chance a random 2-sample is all-inlier is
+            # ~w^2, so the classic bound is log(1-confidence)/log(1-w^2).
+            # Model-coverage fitness must not be used here — a mediocre wrong
+            # pose with moderate coverage would collapse the budget to a few
+            # dozen iterations and the true pose would never be sampled.
+            residuals = np.linalg.norm(
+                corr_p @ T[:3, :3].T + T[:3, 3] - corr_q, axis=1
+            )
+            w = (residuals < distance_threshold).mean()
+            if w < 1.0:
+                required_iterations = max(min_iterations, int(
+                    np.log(1 - confidence) / np.log(1 - w ** 2)
                 ))
+            else:
+                required_iterations = min_iterations
 
     return RansacResult(best_T, best_fitness, best_rmse)
