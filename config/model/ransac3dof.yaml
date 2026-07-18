@@ -7,6 +7,9 @@ params:
   # Height of the CAD model origin above the ground plane in the robot base
   # frame. 0.0 assumes the CAD origin sits on the floor.
   z_offset: 0.0
+  # Half-width of the z-consistency gate on FPFH correspondences (sensor
+  # z-noise property, decoupled from voxel_size).
+  z_gate_threshold: 0.09
   edge_length_threshold: 0.9
   ransac_confidence: 0.999
   # Fixed seed for reproducible benchmarks; set to null for non-deterministic runs.

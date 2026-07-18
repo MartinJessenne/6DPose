@@ -24,6 +24,7 @@ class Ransac3DoFParams(RansacParams):
         icp_max_correspondence_distance: float = 0.15,
         icp_max_iterations: int = 100,
         z_offset: float = 0.0,
+        z_gate_threshold: float = 0.09,
         edge_length_threshold: float = 0.9,
         ransac_confidence: float = 0.999,
         seed: int | None = 0,
@@ -33,6 +34,10 @@ class Ransac3DoFParams(RansacParams):
             z_offset (float): Height of the CAD model origin above the scene's
                 ground plane, in the robot base frame (compensates for a CAD
                 origin that is not on the ground).
+            z_gate_threshold (float): Half-width (meters) of the z-consistency
+                gate on FPFH correspondences. A sensor-noise property, so it is
+                tuned independently of voxel_size (default 0.09 matches the
+                previous voxel_size * 1.5 coupling at voxel_size 0.06).
             edge_length_threshold (float): Edge-length similarity checker ratio
                 for RANSAC sample pairs (Open3D-equivalent, default 0.9).
             ransac_confidence (float): Early-exit confidence for the RANSAC
@@ -103,6 +108,7 @@ class Ransac3DoFEstimator(RansacEstimator):
             max_iterations=self.params.ransac_max_iterations,
             confidence=self.params.ransac_confidence,
             z_offset=self.params.z_offset,
+            z_gate_threshold=self.params.z_gate_threshold,
             edge_length_threshold=self.params.edge_length_threshold,
             # Short sample baselines give yaw hypotheses dominated by voxel
             # noise; require the 2 sampled model points to span a few voxels.
@@ -155,4 +161,5 @@ class Ransac3DoFEstimator(RansacEstimator):
         """Suggests parameters for the SE(2)-constrained RANSAC + ICP registration."""
         params = super().suggest_params(trial)
         params["edge_length_threshold"] = trial.suggest_float("edge_length_threshold", 0.8, 0.95)
+        params["z_gate_threshold"] = trial.suggest_float("z_gate_threshold", 0.03, 0.20)
         return params
