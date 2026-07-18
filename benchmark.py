@@ -264,9 +264,13 @@ def run_parameter_sweep(
     Launches a Multi-Objective Bayesian Optimization sweep using Optuna
     to find the Pareto Front of optimal accuracy vs. speed trade-offs.
     """
-    from hydra.core.hydra_config import HydraConfig
-    hydra_dir = HydraConfig.get().runtime.output_dir if HydraConfig.initialized() else "."
-    db_name = os.path.join(hydra_dir, f"optuna_{study_name}.db")
+    # Stable, run-independent storage location: restarting the same command
+    # after a crash (or on a new instance with the file restored) resumes the
+    # study instead of starting a fresh DB in a new Hydra timestamped dir.
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    sweep_dir = os.path.join(project_root, "sweeps")
+    os.makedirs(sweep_dir, exist_ok=True)
+    db_name = os.path.join(sweep_dir, f"optuna_{study_name}.db")
     db_url = f"sqlite:///{db_name}"
     
     study = optuna.create_study(
@@ -373,7 +377,16 @@ def run_parameter_sweep(
         return accuracy_score, p95_time
 
     print(f"Sweep results are being saved to SQLite database: '{db_name}'")
-    study.optimize(objective, n_trials=n_trials)
+
+    # n_trials is a TOTAL target for the study, not an increment: a crashed
+    # sweep restarted with the same command only runs the remaining trials.
+    # Trials left in RUNNING state by a crash are not counted as finished.
+    finished = sum(1 for t in study.trials if t.state.is_finished())
+    remaining = max(0, n_trials - finished)
+    if finished:
+        print(f"Resuming: {finished} finished trials in study, running {remaining} more.")
+    if remaining > 0:
+        study.optimize(objective, n_trials=remaining)
     
     print("\n" + "=" * 50)
     print("SWEEP COMPLETE (PARETO FRONT FINDINGS)")
