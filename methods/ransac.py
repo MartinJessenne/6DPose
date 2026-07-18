@@ -180,12 +180,45 @@ class RansacEstimator(BasePoseEstimator):
         )
         
         # 3. Perform RANSAC Global Registration based on feature matching
-        distance_threshold = voxel_size * 1.5
         logging.info("Running RANSAC global registration...")
-        result_ransac = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-            model_down, 
-            pcd_down, 
-            model_fpfh, 
+        result_ransac = self._global_registration(model_down, pcd_down, model_fpfh, pcd_fpfh)
+
+        T_init = result_ransac.transformation
+        
+        # If RANSAC global registration has 0 fitness (no matches found), it failed
+        if result_ransac.fitness == 0.0:
+            logging.error("RANSAC global registration failed: zero correspondences found.")
+            return None
+            
+        # 4. Refine pose using dual-hypothesis point-to-plane ICP
+        T_refined = self._refine_pose(model_pc, pcd, T_init)
+
+        return self._project_pose(T_refined)
+
+    def _refine_pose(self, model_pc, scene_pcd, T_init: np.ndarray) -> np.ndarray:
+        """
+        Runs the refinement stage on the global-registration result. Subclasses
+        may override to swap in a different refinement (e.g. SE(2)-constrained ICP).
+        """
+        return refine_pose_dual_hypothesis(
+            model_pc=model_pc,
+            scene_pcd=scene_pcd,
+            T_init=T_init,
+            icp_max_correspondence_distance=self.params.icp_max_correspondence_distance,
+            icp_max_iterations=self.params.icp_max_iterations
+        )
+
+    def _global_registration(self, model_down, pcd_down, model_fpfh, pcd_fpfh):
+        """
+        Runs the global registration stage. Returns an object exposing
+        `.transformation` (4x4) and `.fitness`. Subclasses may override to
+        swap in a different registration strategy (e.g. SE(2)-constrained).
+        """
+        distance_threshold = self.params.voxel_size * 1.5
+        return o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+            model_down,
+            pcd_down,
+            model_fpfh,
             pcd_fpfh,
             mutual_filter=True,
             max_correspondence_distance=distance_threshold,
@@ -199,21 +232,7 @@ class RansacEstimator(BasePoseEstimator):
                 self.params.ransac_max_iterations, 0.999
             )
         )
-        
-        T_init = result_ransac.transformation
-        
-        # If RANSAC global registration has 0 fitness (no matches found), it failed
-        if result_ransac.fitness == 0.0:
-            logging.error("RANSAC global registration failed: zero correspondences found.")
-            return None
-            
-        # 4. Refine pose using factored-out dual-hypothesis point-to-plane ICP
-        T_refined = refine_pose_dual_hypothesis(
-            model_pc=model_pc,
-            scene_pcd=pcd,
-            T_init=T_init,
-            icp_max_correspondence_distance=self.params.icp_max_correspondence_distance,
-            icp_max_iterations=self.params.icp_max_iterations
-        )
-        
-        return T_refined
+
+    def _project_pose(self, T: np.ndarray) -> np.ndarray:
+        """Hook for subclasses to project the refined pose onto a constrained manifold."""
+        return T

@@ -1,0 +1,14 @@
+_target_: methods.ransac3dof.Ransac3DoFEstimator
+params:
+  voxel_size: 0.06
+  ransac_max_iterations: 100000
+  icp_max_correspondence_distance: 0.15
+  icp_max_iterations: 100
+  # Height of the CAD model origin above the ground plane in the robot base
+  # frame. 0.0 assumes the CAD origin sits on the floor.
+  z_offset: 0.0
+  edge_length_threshold: 0.9
+  ransac_confidence: 0.999
+  # Fixed seed for reproducible benchmarks; set to null for non-deterministic runs.
+  seed: 0
+extrinsic: ${camera.extrinsic}

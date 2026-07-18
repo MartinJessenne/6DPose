@@ -28,3 +28,5 @@ debug_yolo_checks/
 outputs/
 multirun/
 site/
+# Local debug frames dumped at repo root
+frame_*.npy
