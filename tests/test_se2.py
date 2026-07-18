@@ -175,6 +175,36 @@ class TestConstrainedRansac(unittest.TestCase):
         self.assertEqual(result.fitness, 0.0)
         np.testing.assert_array_equal(result.transformation, np.eye(4))
 
+    def test_z_gate_threshold_decoupled_from_distance_threshold(self):
+        # Scene shifted 5cm up relative to the modeled z_offset (e.g. depth
+        # bias): a 1cm gate must reject everything, a 20cm gate must let the
+        # solver recover the planar pose since inliers still fit within the
+        # 10cm registration distance_threshold.
+        rng = np.random.default_rng(17)
+        theta_true, t_true = 0.5, np.array([0.3, -0.1])
+        model_points, scene_points, model_fpfh, scene_fpfh = self._make_scene(
+            rng, theta_true, t_true, z_offset=0.0
+        )
+        scene_points[:, 2] += 0.05
+
+        tight = constrained_ransac_se2(
+            model_points, scene_points, model_fpfh, scene_fpfh,
+            distance_threshold=0.1, max_iterations=500,
+            z_offset=0.0, z_gate_threshold=0.01, rng=rng,
+        )
+        self.assertEqual(tight.fitness, 0.0)
+
+        wide = constrained_ransac_se2(
+            model_points, scene_points, model_fpfh, scene_fpfh,
+            distance_threshold=0.1, max_iterations=2000,
+            z_offset=0.0, z_gate_threshold=0.20, rng=rng,
+        )
+        self.assertGreater(wide.fitness, 0.8)
+        T = wide.transformation
+        theta_est = np.arctan2(T[1, 0], T[0, 0])
+        self.assertAlmostEqual(theta_est, theta_true, delta=np.deg2rad(2.0))
+        np.testing.assert_allclose(T[:2, 3], t_true, atol=0.02)
+
     def test_seeded_runs_are_reproducible(self):
         theta_true, t_true, z_offset = 0.9, np.array([-0.4, 0.7]), 0.05
         results = []

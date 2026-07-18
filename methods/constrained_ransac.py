@@ -105,6 +105,7 @@ def constrained_ransac_se2(
     min_iterations=1000,
     confidence=0.999,
     z_offset=0.0,        # height of the model origin above the scene's ground plane
+    z_gate_threshold=None,  # z-consistency gate half-width; None falls back to distance_threshold
     edge_length_threshold=0.9,
     min_sample_distance=0.0,
     scoring_subsample_size=100,
@@ -123,10 +124,14 @@ def constrained_ransac_se2(
     the budget so an early mediocre hypothesis cannot end the search.
 
     Because z is fixed by the constraint, correspondences whose z coordinates
-    are inconsistent (|q_z - p_z - z_offset| >= distance_threshold) can never
+    are inconsistent (|q_z - p_z - z_offset| >= z_gate_threshold) can never
     be inliers of a valid hypothesis and are filtered out upfront.
 
     Args:
+        z_gate_threshold: half-width of the z-consistency gate, in meters.
+            This is a sensor-noise property (depth noise along z), so it is
+            decoupled from distance_threshold (a registration-resolution
+            property); None falls back to distance_threshold.
         min_sample_distance: minimum distance between the 2 sampled model
             points; short baselines give yaw estimates dominated by voxel
             noise (callers typically pass a few voxel sizes).
@@ -141,12 +146,14 @@ def constrained_ransac_se2(
 
     # z-consistency gate: a rotation about z preserves the model z coordinate,
     # so any valid correspondence must satisfy q_z ~= p_z + z_offset.
+    if z_gate_threshold is None:
+        z_gate_threshold = distance_threshold
     dz = np.abs(
         scene_points[correspondences[:, 1], 2]
         - model_points[correspondences[:, 0], 2]
         - z_offset
     )
-    correspondences = correspondences[dz < distance_threshold]
+    correspondences = correspondences[dz < z_gate_threshold]
     n_corr = len(correspondences)
     logging.info(
         f"SE(2) RANSAC: {n_matched} mutual FPFH matches, {n_corr} after z-consistency gate."
