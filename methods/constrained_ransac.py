@@ -241,11 +241,17 @@ def constrained_ransac_se2(
                 corr_p @ T[:3, :3].T + T[:3, 3] - corr_q, axis=1
             )
             w = (residuals < distance_threshold).mean()
-            if w < 1.0:
-                required_iterations = max(min_iterations, int(
-                    np.log(1 - confidence) / np.log(1 - w ** 2)
-                ))
-            else:
+            if w >= 1.0:
                 required_iterations = min_iterations
+            elif w > 0.0:
+                # log1p keeps the denominator finite and negative for any
+                # 0 < w < 1; clipping bounds the ratio before the int cast.
+                bound = np.log(1 - confidence) / np.log1p(-(w * w))
+                required_iterations = int(np.clip(bound, min_iterations, max_iterations))
+            else:
+                # The best hypothesis explains none of the correspondences
+                # (it was promoted on subsample fitness alone): no evidence
+                # to shrink the search budget.
+                required_iterations = max_iterations
 
     return RansacResult(best_T, best_fitness, best_rmse)
