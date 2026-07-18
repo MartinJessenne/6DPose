@@ -26,7 +26,7 @@ class Ransac3DoFParams(RansacParams):
         z_offset: float = 0.0,
         edge_length_threshold: float = 0.9,
         ransac_confidence: float = 0.999,
-        seed: int | None = None,
+        seed: int | None = 0,
     ):
         """
         Args:
@@ -37,8 +37,10 @@ class Ransac3DoFParams(RansacParams):
                 for RANSAC sample pairs (Open3D-equivalent, default 0.9).
             ransac_confidence (float): Early-exit confidence for the RANSAC
                 iteration bound.
-            seed (int, optional): Seed for the RANSAC random generator, for
-                reproducible benchmarks. None means non-deterministic.
+            seed (int, optional): Seed for the RANSAC random generator. Defaults
+                to 0 so benchmark sweeps (which build params from suggest_params
+                alone, bypassing the yaml) stay deterministic per trial; pass
+                None explicitly for non-deterministic runs.
         """
         super().__init__(
             voxel_size=voxel_size,
