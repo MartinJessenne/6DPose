@@ -17,16 +17,19 @@ def crop_front_face(cad_mesh: "o3d.geometry.TriangleMesh", depth: float) -> "o3d
     Keeps only the slab within `depth` meters of the mesh's +x extreme.
 
     CAD convention for the cart fleet (colruyt/leanflow/picanol): origin on
-    the floor at the towing face (x ~ 0), body extending toward -x, y the
-    symmetry axis. Cropping to the front slab removes the near-180-degree
+    the floor at the towing face center bottom (x ~ 0), body extending toward -x,
+    y the symmetry axis. Cropping to the front slab removes the near-180-degree
     symmetry that causes flipped registrations: the remaining face is
     asymmetric, so the dual-hypothesis selection can tell front from back.
 
     The cropped mesh is NOT recentered — it stays in the original CAD frame,
     so estimated poses remain directly comparable to full-model ground truth.
     """
+    # vertices is an (N, 3) array where col 0 is X (longitudinal), col 1 is Y (transverse), col 2 is Z (height).
     vertices = np.asarray(cad_mesh.vertices)
+    # x_max is the maximum X coordinate across all vertices, representing the front-most tip of the cart face.
     x_max = float(vertices[:, 0].max())
+    # Big value (1e6) forms an unconstrained half-space along Y and Z, isolating only the front X-slab.
     big = 1e6
     aabb = o3d.geometry.AxisAlignedBoundingBox(
         min_bound=(x_max - depth, -big, -big),
@@ -168,10 +171,10 @@ class Ransac3DoFEstimator(RansacEstimator):
         else:
             self._active_z_offset = derive_z_offset(cad_mesh)
 
-        # Register against the front slab only (asymmetric -> no flips); the
-        # crop stays in the CAD frame, so the output pose is unchanged in
-        # meaning and remains comparable to full-model ground truth.
-        if self.params.front_crop_depth is not None:
+        # Only crop cad_mesh for lazy local fallback (when cart_type is None).
+        # When cart_type is specified, prepare() has already cached the cropped
+        # model geometry in _PREPARATION_CACHE, avoiding per-frame cropping overhead.
+        if cart_type is None and self.params.front_crop_depth is not None:
             cad_mesh = crop_front_face(cad_mesh, self.params.front_crop_depth)
 
         return super().estimate_pose(pcd, cad_mesh, cart_type=cart_type, **kwargs)

@@ -208,7 +208,9 @@ class RansacEstimator(BasePoseEstimator):
             icp_max_iterations=self.params.icp_max_iterations
         )
 
-    def _global_registration(self, model_down, pcd_down, model_fpfh, pcd_fpfh):
+    def _global_registration(
+        self, model_down, pcd_down, model_fpfh, pcd_fpfh
+    ) -> o3d.pipelines.registration.RegistrationResult:
         """
         Runs the global registration stage. Returns an object exposing
         `.transformation` (4x4) and `.fitness`. Subclasses may override to
