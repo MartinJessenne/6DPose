@@ -29,7 +29,21 @@ from methods.se2_lie_utils import minimal_solver_se2
 # ---------------------------------------------------------------------------
 
 class RansacResult:
-    def __init__(self, transformation, fitness, inlier_rmse):
+    """
+    Result container returned by RANSAC registration.
+
+    Attributes:
+        transformation (np.ndarray): 4x4 homogeneous transformation matrix
+            representing the estimated 6D/SE(2) pose of the CAD model in the
+            scene frame (base_link).
+        fitness (float): Fraction of downsampled model points that fall within
+            `distance_threshold` of a scene point after applying `transformation`
+            (in range [0.0, 1.0]).
+        inlier_rmse (float): Root Mean Square Error (RMSE) of Euclidean distances
+            for all inlier model points (points within `distance_threshold`).
+    """
+
+    def __init__(self, transformation: np.ndarray, fitness: float, inlier_rmse: float):
         self.transformation = transformation
         self.fitness = fitness
         self.inlier_rmse = inlier_rmse
@@ -39,23 +53,41 @@ class RansacResult:
 # Mutual FPFH matching -- numpy equivalent of mutual_filter=True
 # ---------------------------------------------------------------------------
 
-def match_correspondences_fpfh(feat_model, feat_scene):
+def match_correspondences_fpfh(feat_model: np.ndarray, feat_scene: np.ndarray) -> np.ndarray:
     """
+    Computes mutual nearest-neighbor matches between model and scene descriptors.
+
     Args:
-        feat_model: (N, 33) FPFH descriptors of the model
-        feat_scene: (M, 33) FPFH descriptors of the scene
+        feat_model: (N, 33) numpy array of 33-dimensional Fast Point Feature
+            Histogram (FPFH) descriptors for N downsampled model points.
+            Each row represents a local surface geometry signature.
+        feat_scene: (M, 33) numpy array of 33-dimensional FPFH descriptors for
+            M downsampled scene points.
 
     Returns:
-        (K, 2) integer array of (i_model, j_scene) pairs such that j_scene is
-        the nearest scene neighbor of i_model AND vice versa (mutual nearest
-        neighbors, like mutual_filter=True in Open3D). Shape (0, 2) if none.
+        (K, 2) integer array of (i_model, j_scene) indices such that scene point
+        j_scene is the nearest descriptor neighbor to model point i_model AND
+        model point i_model is also the nearest descriptor neighbor to scene
+        point j_scene (mutual nearest neighbors, equivalent to mutual_filter=True
+        in Open3D). Returns shape (0, 2) array if inputs are empty or no matches exist.
     """
+    # Guard against empty descriptor arrays resulting from aggressive downsampling/masking
+    if len(feat_model) == 0 or len(feat_scene) == 0:
+        return np.empty((0, 2), dtype=int)
+
+    # 1. For each model point descriptor, find its nearest neighbor in scene descriptor space
     tree_scene = cKDTree(feat_scene)
-    _, nn_in_scene = tree_scene.query(feat_model, k=1)  # nearest scene index per model point
+    _, nn_in_scene = tree_scene.query(feat_model, k=1)  # Shape (N,); nn_in_scene[i] = scene index for model i
 
+    # 2. For each scene point descriptor, find its nearest neighbor in model descriptor space
     tree_model = cKDTree(feat_model)
-    _, nn_in_model = tree_model.query(feat_scene, k=1)  # nearest model index per scene point
+    _, nn_in_model = tree_model.query(feat_scene, k=1)  # Shape (M,); nn_in_model[j] = model index for scene j
 
+    # 3. Check mutual consistency:
+    # `model_idx` is [0, 1, ..., N-1].
+    # `nn_in_scene[i]` is the closest scene point `j` to model point `i`.
+    # `nn_in_model[nn_in_scene[i]]` is the closest model point `i_prime` to scene point `j`.
+    # If `i_prime == i`, then `i` and `j` are mutual nearest neighbors.
     model_idx = np.arange(len(feat_model))
     mutual = nn_in_model[nn_in_scene] == model_idx
     return np.column_stack([model_idx[mutual], nn_in_scene[mutual]])
@@ -65,8 +97,15 @@ def match_correspondences_fpfh(feat_model, feat_scene):
 # Lift (theta, t_xy) into a 4x4 homogeneous transform with fixed z
 # ---------------------------------------------------------------------------
 
-def se2_to_se3(theta, t_xy, z=0.0):
-    """Embeds (theta, x, y) into SE(3) with fixed z and roll = pitch = 0."""
+def se2_to_se3(theta: float, t_xy: np.ndarray, z: float = 0.0) -> np.ndarray:
+    """
+    Embeds 2D planar pose parameters (theta, x, y) into a 3D 4x4 SE(3) homogeneous
+    transformation matrix with fixed elevation `z` and zero roll/pitch angles.
+
+    The 6D pose pipeline operates using 4x4 matrices in 3D robot frame (base_link).
+    This function converts the 2D solver results (yaw rotation `theta` and 2D translation `t_xy`)
+    into the standard 4x4 matrix format expected by downstream components.
+    """
     T = np.eye(4)
     T[:3, :3] = np.array([
         [np.cos(theta), -np.sin(theta), 0.0],
@@ -77,14 +116,16 @@ def se2_to_se3(theta, t_xy, z=0.0):
     return T
 
 
-def project_to_se2(T, z_offset=0.0):
+def project_to_se2(T: np.ndarray, z_offset: float = 0.0) -> np.ndarray:
     """
-    Projects an arbitrary SE(3) transform back onto the SE(2) manifold:
-    yaw is the closest planar rotation (Frobenius projection of the upper-left
-    2x2 block onto SO(2)), roll = pitch = 0, and z is pinned to z_offset.
+    Projects an arbitrary SE(3) 4x4 matrix onto the SE(2) ground-plane manifold.
 
-    Used after the unconstrained ICP refinement so the final pose respects
-    the ground-bounded constraint.
+    Computes the closest planar yaw angle (Frobenius norm projection of the upper-left
+    2x2 block onto SO(2)), sets roll = pitch = 0, and pins z to `z_offset`.
+
+    Caller trace:
+    - Called by `Ransac3DoFEstimator._project_pose` as a final safety-net assertion
+      to guarantee that planar invariants are strictly preserved.
     """
     R = T[:3, :3]
     theta = np.arctan2(R[1, 0] - R[0, 1], R[0, 0] + R[1, 1])
@@ -92,50 +133,97 @@ def project_to_se2(T, z_offset=0.0):
 
 
 # ---------------------------------------------------------------------------
+# Helper functions for RANSAC loop factoring
+# ---------------------------------------------------------------------------
+
+def _sample_and_validate_pair(
+    correspondences: np.ndarray,
+    model_points: np.ndarray,
+    scene_points: np.ndarray,
+    min_sample_distance: float,
+    edge_length_threshold: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """
+    Draws 2 random correspondence pairs and validates their geometric consistency.
+
+    Rejects candidate pairs whose model-point baseline is too small (< min_sample_distance)
+    or whose model vs. scene segment lengths disagree significantly (edge length test).
+
+    Returns:
+        (p1, p2, q1, q2) 2D point pairs if valid, or None if rejected.
+    """
+    n_corr = len(correspondences)
+    i1, i2 = rng.choice(n_corr, size=2, replace=False)
+    mi1, si1 = correspondences[i1]
+    mi2, si2 = correspondences[i2]
+
+    p1, p2 = model_points[mi1, :2], model_points[mi2, :2]
+    q1, q2 = scene_points[si1, :2], scene_points[si2, :2]
+
+    # Measure 2D segment lengths in model and scene
+    len_p = np.linalg.norm(p2 - p1)
+    len_q = np.linalg.norm(q2 - q1)
+
+    # 1. Enforce minimum sample distance baseline to prevent noise-dominated yaw estimates
+    if len_p < max(1e-9, min_sample_distance):
+        return None
+
+    # 2. Edge-length ratio test (equivalent to Open3D CorrespondenceCheckerBasedOnEdgeLength):
+    # Rigid bodies preserve distances between points. If length in model differs from scene, reject.
+    if min(len_p, len_q) / max(len_p, len_q) < edge_length_threshold:
+        return None
+
+    return p1, p2, q1, q2
+
+
+# ---------------------------------------------------------------------------
 # The constrained RANSAC loop
 # ---------------------------------------------------------------------------
 
 def constrained_ransac_se2(
-    model_points,        # (N, 3) downsampled model points
-    scene_points,        # (M, 3) downsampled scene points
-    model_fpfh,          # (N, 33)
-    scene_fpfh,          # (M, 33)
-    distance_threshold,
-    max_iterations=100000,
-    min_iterations=1000,
-    confidence=0.999,
-    z_offset=0.0,        # height of the model origin above the scene's ground plane
-    z_gate_threshold=None,  # z-consistency gate half-width; None falls back to distance_threshold
-    edge_length_threshold=0.9,
-    min_sample_distance=0.0,
-    scoring_subsample_size=100,
-    rng=None,
-):
+    model_points: np.ndarray,        # (N, 3) downsampled model points
+    scene_points: np.ndarray,        # (M, 3) downsampled scene points
+    model_fpfh: np.ndarray,          # (N, 33) FPFH descriptors of model
+    scene_fpfh: np.ndarray,          # (M, 33) FPFH descriptors of scene
+    distance_threshold: float,
+    max_iterations: int = 100000,
+    min_iterations: int = 1000,
+    confidence: float = 0.999,
+    z_offset: float = 0.0,           # height of model origin above ground plane
+    z_gate_threshold: float | None = None,
+    edge_length_threshold: float = 0.9,
+    min_sample_distance: float = 0.0,
+    scoring_subsample_size: int = 100,
+    rng: np.random.Generator | None = None,
+) -> RansacResult:
     """
-    SE(2)-constrained (3 DoF) equivalent of
-    registration_ransac_based_on_feature_matching.
+    SE(2)-constrained (3 DoF: x, y, yaw) RANSAC global registration algorithm.
 
-    Hypotheses are generated from 2 correspondences (instead of 3 for SE(3)),
-    which lowers the iteration bound to log(1-confidence)/log(1-w^2), where w
-    is the CORRESPONDENCE inlier ratio of the best hypothesis so far (the
-    fraction of FPFH correspondences consistent with it) — not the
-    model-coverage fitness, which measures a different quantity and would make
-    the early exit far too optimistic. `min_iterations` additionally floors
-    the budget so an early mediocre hypothesis cannot end the search.
-
-    Because z is fixed by the constraint, correspondences whose z coordinates
-    are inconsistent (|q_z - p_z - z_offset| >= z_gate_threshold) can never
-    be inliers of a valid hypothesis and are filtered out upfront.
+    ### Algorithm Explanation (RANSAC Step-by-Step):
+    1. **Feature Matching**: Find initial candidate point pairs (correspondences) by matching
+       33-dimensional FPFH feature descriptors between model and scene.
+    2. **Z-Consistency Filtering**: Ground-bound objects have fixed vertical offset `z_offset`.
+       Filter out candidate pairs whose vertical heights differ by more than `z_gate_threshold`.
+    3. **RANSAC Hypotheses**: In 2D SE(2), 2 point correspondences (instead of 3 in 3D SE(3))
+       suffice to uniquely solve for planar rotation angle theta and 2D translation (x, y).
+    4. **Candidate Validation**:
+       - Minimum sample distance: Ensure the 2 sampled model points are spaced apart.
+       - Edge-length check: Verify that distance between the 2 model points matches distance
+         between the 2 scene points (rigid transformation requirement).
+    5. **Pre-scoring (Subsampling)**: To save computation time, score candidate pose `T` on a
+       small random subset of model points first. Only evaluate the full point cloud if the
+       subsample score improves upon the current best score.
+    6. **Inlier Ratio & Early Exit**: Update the required RANSAC iterations based on the
+       correspondence inlier ratio `w` of the best hypothesis found so far.
 
     Args:
-        z_gate_threshold: half-width of the z-consistency gate, in meters.
-            This is a sensor-noise property (depth noise along z), so it is
-            decoupled from distance_threshold (a registration-resolution
-            property); None falls back to distance_threshold.
-        min_sample_distance: minimum distance between the 2 sampled model
-            points; short baselines give yaw estimates dominated by voxel
-            noise (callers typically pass a few voxel sizes).
-        rng: np.random.Generator for reproducible runs (defaults to a fresh one).
+        distance_threshold: Maximum Euclidean distance (in meters) for a scene point
+            to be considered an inlier neighbor of a transformed model point.
+        z_gate_threshold: Half-width of vertical height consistency filter (meters).
+        min_sample_distance: Minimum distance required between the 2 sampled model points.
+        scoring_subsample_size: Number of points used for fast candidate pre-scoring.
+        rng: Random number generator for reproducible sampling.
     """
     rng = np.random.default_rng() if rng is None else rng
 
@@ -144,15 +232,16 @@ def constrained_ransac_se2(
     if n_matched < 2:
         return RansacResult(np.eye(4), 0.0, np.inf)
 
-    # z-consistency gate: a rotation about z preserves the model z coordinate,
-    # so any valid correspondence must satisfy q_z ~= p_z + z_offset.
+    # Z-consistency gate: Rotation about +Z preserves Z coordinates.
+    # Any valid correspondence pair (model_i, scene_j) must satisfy:
+    # scene_points[j, 2] ~= model_points[i, 2] + z_offset
     if z_gate_threshold is None:
         z_gate_threshold = distance_threshold
-    dz = np.abs(
-        scene_points[correspondences[:, 1], 2]
-        - model_points[correspondences[:, 0], 2]
-        - z_offset
-    )
+
+    scene_z = scene_points[correspondences[:, 1], 2]
+    model_z = model_points[correspondences[:, 0], 2]
+    dz = np.abs(scene_z - model_z - z_offset)
+
     correspondences = correspondences[dz < z_gate_threshold]
     n_corr = len(correspondences)
     logging.info(
@@ -161,66 +250,57 @@ def constrained_ransac_se2(
     if n_corr < 2:
         logging.warning(
             "SE(2) RANSAC: z-consistency gate removed (almost) all correspondences. "
-            "Check that the scene cloud is in a Z-up frame and z_offset is correct."
+            "Check that scene cloud is in Z-up frame and z_offset is correct."
         )
         return RansacResult(np.eye(4), 0.0, np.inf)
 
     scene_tree = cKDTree(scene_points)
     n_model = len(model_points)
 
-    # Matched pairs used to measure the correspondence inlier ratio of a
-    # hypothesis (drives the early-exit bound).
+    # Correspondence pairs used to compute the correspondence inlier ratio (drives RANSAC early exit)
     corr_p = model_points[correspondences[:, 0]]
     corr_q = scene_points[correspondences[:, 1]]
 
-    # Cheap hypothesis pre-scoring on a fixed random subsample; the full model
-    # is only evaluated when the subsample beats the current best.
+    # Pre-scoring setup: sample a small subset of model points to score candidate transforms quickly.
+    # Full model point cloud evaluation is only triggered when subsample fitness beats current best.
     n_sub = min(scoring_subsample_size, n_model)
     sub_points = model_points[rng.choice(n_model, size=n_sub, replace=False)]
-    subsample_is_full = n_sub == n_model
+    subsample_is_full = (n_sub == n_model)
 
     best_fitness = 0.0
     best_rmse = np.inf
     best_T = np.eye(4)
 
-    # Early-exit criterion, mirroring RANSACConvergenceCriteria(max_iter, confidence)
     it = 0
     required_iterations = max_iterations
 
     while it < min(max_iterations, required_iterations):
         it += 1
 
-        i1, i2 = rng.choice(n_corr, size=2, replace=False)
-        mi1, si1 = correspondences[i1]
-        mi2, si2 = correspondences[i2]
-
-        p1, p2 = model_points[mi1, :2], model_points[mi2, :2]
-        q1, q2 = scene_points[si1, :2], scene_points[si2, :2]
-
-        # CorrespondenceCheckerBasedOnEdgeLength: reject sample pairs whose
-        # p1-p2 / q1-q2 distances disagree (noise or mismatch)
-        len_p = np.linalg.norm(p2 - p1)
-        len_q = np.linalg.norm(q2 - q1)
-        if len_p < max(1e-9, min_sample_distance):
+        # 1. Sample 2 correspondences and validate geometric constraints
+        pair = _sample_and_validate_pair(
+            correspondences, model_points, scene_points, min_sample_distance, edge_length_threshold, rng
+        )
+        if pair is None:
             continue
-        if min(len_p, len_q) / max(len_p, len_q) < edge_length_threshold:
-            continue
+        p1, p2, q1, q2 = pair
 
+        # 2. Solve 2D minimal pose (theta, tx, ty) and embed into 4x4 SE(3) matrix with fixed z_offset
         theta, t_xy = minimal_solver_se2(p1, p2, q1, q2)
         T = se2_to_se3(theta, t_xy, z_offset)
 
+        # 3. Fast pre-scoring on subsample
         sub_transformed = sub_points @ T[:3, :3].T + T[:3, 3]
         sub_dists, _ = scene_tree.query(sub_transformed, k=1)
         sub_fitness = (sub_dists < distance_threshold).mean()
-        # The slack (~2 sigma of a binomial estimate at n_sub=100) prevents
-        # subsample noise from rejecting a hypothesis that is actually better
-        # than the current best. Random wrong hypotheses score near zero, so
-        # the gate still prunes the vast majority of full evaluations.
+
+        # Gate check: skip full evaluation if subsample fitness falls below current best
         if not subsample_is_full and sub_fitness <= best_fitness - 2.0 * np.sqrt(0.25 / n_sub):
             continue
         if subsample_is_full and sub_fitness <= best_fitness:
             continue
 
+        # 4. Full evaluation on all model points
         if subsample_is_full:
             dists = sub_dists
         else:
@@ -230,20 +310,17 @@ def constrained_ransac_se2(
         inlier_mask = dists < distance_threshold
         fitness = inlier_mask.sum() / n_model
 
+        # 5. Update best pose if full fitness improved
         if fitness > best_fitness:
             best_fitness = fitness
             best_rmse = np.sqrt(np.mean(dists[inlier_mask] ** 2)) if inlier_mask.any() else np.inf
             best_T = T
 
             if best_fitness >= 1.0:
-                break  # perfect fit: no hypothesis can improve on it
+                break  # Perfect fit found
 
-            # Update the iteration bound from the CORRESPONDENCE inlier ratio w
-            # of the new best: the chance a random 2-sample is all-inlier is
-            # ~w^2, so the classic bound is log(1-confidence)/log(1-w^2).
-            # Model-coverage fitness must not be used here — a mediocre wrong
-            # pose with moderate coverage would collapse the budget to a few
-            # dozen iterations and the true pose would never be sampled.
+            # 6. Update required RANSAC iterations based on correspondence inlier ratio w:
+            # Chance of picking 2 inliers in a row is w^2, so required iterations = log(1-conf)/log(1-w^2).
             residuals = np.linalg.norm(
                 corr_p @ T[:3, :3].T + T[:3, 3] - corr_q, axis=1
             )
@@ -251,14 +328,9 @@ def constrained_ransac_se2(
             if w >= 1.0:
                 required_iterations = min_iterations
             elif w > 0.0:
-                # log1p keeps the denominator finite and negative for any
-                # 0 < w < 1; clipping bounds the ratio before the int cast.
                 bound = np.log(1 - confidence) / np.log1p(-(w * w))
                 required_iterations = int(np.clip(bound, min_iterations, max_iterations))
             else:
-                # The best hypothesis explains none of the correspondences
-                # (it was promoted on subsample fitness alone): no evidence
-                # to shrink the search budget.
                 required_iterations = max_iterations
 
     return RansacResult(best_T, best_fitness, best_rmse)

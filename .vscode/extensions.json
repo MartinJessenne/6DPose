@@ -1,5 +1,6 @@
 {
     "recommendations": [
-        "optuna.optuna-dashboard"
+        "optuna.optuna-dashboard",
+        "ohziinteractivestudio.ohzi-vscode-glb-viewer"
     ]
 }
