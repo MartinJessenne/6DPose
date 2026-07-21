@@ -281,12 +281,16 @@ ModelPreset = Union[
 # =====================================================================
 @dataclass(frozen=True)
 class BenchmarkArgs:
-    """uv run benchmark.py [options] model:<algo> model.profile:<tuning>
+    """Example: uv run benchmark.py --eval-size 30 model:ransac3dof model.profile:acc-opt
 
-    BOTH subcommand tokens are required -- e.g. model:ransac3dof model.profile:acc-opt.
-    Run with model:<algo> --help (after picking an algorithm) to list that
-    algorithm's profile choices, since they differ per algorithm and can't
-    all be shown in this top-level --help.
+    TWO subcommand tokens are ALWAYS required together: model:<algo> AND
+    model.profile:<tuning>. Forgetting model.profile:<tuning> is the single
+    most common mistake here -- if you see "Missing subcommand: Expected one
+    of {model.profile:default, model.profile:acc-opt, ...}", that's it, you
+    picked model:<algo> but forgot to also pick model.profile:<tuning>.
+
+    Available algorithms: model:ppf, model:ransac, model:ransac3dof.
+    To see an algorithm's profile choices before running: model:<algo> --help
     """
     model: ModelPreset
     yolo: YoloConfig = field(default_factory=YoloConfig)
@@ -301,12 +305,16 @@ class BenchmarkArgs:
 
 @dataclass(frozen=True)
 class InspectArgs:
-    """uv run inspect_pose.py --mode {random,indices} [options] model:<algo> model.profile:<tuning>
+    """Example: uv run inspect_pose.py --mode random model:ransac3dof model.profile:acc-opt
 
-    BOTH subcommand tokens are required -- e.g. model:ransac3dof model.profile:acc-opt.
-    Run with model:<algo> --help (after picking an algorithm) to list that
-    algorithm's profile choices, since they differ per algorithm and can't
-    all be shown in this top-level --help.
+    TWO subcommand tokens are ALWAYS required together: model:<algo> AND
+    model.profile:<tuning>. Forgetting model.profile:<tuning> is the single
+    most common mistake here -- if you see "Missing subcommand: Expected one
+    of {model.profile:default, model.profile:acc-opt, ...}", that's it, you
+    picked model:<algo> but forgot to also pick model.profile:<tuning>.
+
+    Available algorithms: model:ppf, model:ransac, model:ransac3dof.
+    To see an algorithm's profile choices before running: model:<algo> --help
     """
     model: ModelPreset
     mode: Literal["random", "indices"]  # tyro validates this choice up front -- no null/"" sentinel needed.
