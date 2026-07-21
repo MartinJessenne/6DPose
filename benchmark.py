@@ -332,33 +332,32 @@ def run_parameter_sweep(
         print(f"Created new study. Seed={seed}, eval_size={sweep_size}")
         
     print(f"Sweep validation indices: {sweep_indices}\n")
-    
+
     # Seed global random number generators
     np.random.seed(seed)
     o3d.utility.random.seed(seed)
-    
-    def objective(trial: optuna.Trial) -> tuple[float, float]:
-        # 1. Suggest global parameters
-        depth_trunc = trial.suggest_float("depth_trunc", 2.0, 7.0, step=0.1)
 
-        # 2. Dynamically suggest model-specific parameters
-        suggested_params = estimator_cls.suggest_params(trial)
+    # ONE W&B run for this whole sweep (1 CLI execution <-> 1 run), not one per
+    # trial -- a 200-trial sweep would otherwise flood the workspace with 200
+    # separate run pages. Each trial logs into the SAME run at step=trial.number,
+    # so every metric/param gets a real per-trial history (a genuine trend line
+    # in the W&B UI, not the single-point "history" a one-shot log produces).
+    with wandb.init(
+        project="6dpose",
+        name=study_name,
+        group=estimator_cls.__name__,
+        job_type="sweep",
+        tags=[study_name],
+        config={"eval_size": sweep_size, "n_trials": n_trials, "seed": seed},
+    ) as run:
 
-        # One W&B run per trial. reinit="create_new" forces a genuinely new
-        # run every call even though objective() runs repeatedly in this same
-        # process across trials (confirmed by testing: without it, or with
-        # the module-level wandb.log() shorthand instead of run.log(), a
-        # subsequent trial can silently fail to get its own run). The `with`
-        # block guarantees run.finish() runs even if this trial raises.
-        with wandb.init(
-            project="6dpose",
-            group=estimator_cls.__name__,
-            job_type="sweep",
-            tags=[study_name],
-            name=f"{study_name}-trial-{trial.number}",
-            config={**suggested_params, "depth_trunc": depth_trunc},
-            reinit="create_new",
-        ) as run:
+        def objective(trial: optuna.Trial) -> tuple[float, float]:
+            # 1. Suggest global parameters
+            depth_trunc = trial.suggest_float("depth_trunc", 2.0, 7.0, step=0.1)
+
+            # 2. Dynamically suggest model-specific parameters
+            suggested_params = estimator_cls.suggest_params(trial)
+
             # 3. Instantiate model with trial parameters
             trial_estimator = estimator_cls(params=suggested_params, extrinsic=extrinsic)
 
@@ -397,33 +396,63 @@ def run_parameter_sweep(
                 flip_rate = 0.0
             trial.set_user_attr("flip_rate", flip_rate)
 
-            # Mirror the same diagnostics into W&B -- this is the whole reason
-            # for manual logging instead of relying on WeightsAndBiasesCallback
-            # alone: the callback only captures trial.params + the two
-            # objective values, not these extra user_attrs.
+            # Log params + metrics together, indexed by trial number -- this is
+            # what makes each key's W&B history a real per-trial trend line
+            # instead of a single point.
             run.log({
+                **suggested_params,
+                "depth_trunc": depth_trunc,
                 "accuracy_score": accuracy_score,
                 "p95_time": p95_time,
                 "average_recall": ar,
                 "detection_failures": det_failed,
                 "pose_failures": pose_failed,
                 "flip_rate": flip_rate,
-            })
+            }, step=trial.number)
 
-        return accuracy_score, p95_time
+            return accuracy_score, p95_time
 
-    print(f"Sweep results are being saved to SQLite database: '{db_name}'")
+        print(f"Sweep results are being saved to SQLite database: '{db_name}'")
 
-    # n_trials is a TOTAL target for the study, not an increment: a crashed
-    # sweep restarted with the same command only runs the remaining trials.
-    # Trials left in RUNNING state by a crash are not counted as finished.
-    finished = sum(1 for t in study.trials if t.state.is_finished())
-    remaining = max(0, n_trials - finished)
-    if finished:
-        print(f"Resuming: {finished} finished trials in study, running {remaining} more.")
-    if remaining > 0:
-        study.optimize(objective, n_trials=remaining)
-    
+        # n_trials is a TOTAL target for the study, not an increment: a crashed
+        # sweep restarted with the same command only runs the remaining trials.
+        # Trials left in RUNNING state by a crash are not counted as finished.
+        finished = sum(1 for t in study.trials if t.state.is_finished())
+        remaining = max(0, n_trials - finished)
+        if finished:
+            print(f"Resuming: {finished} finished trials in study, running {remaining} more.")
+        try:
+            if remaining > 0:
+                study.optimize(objective, n_trials=remaining)
+        finally:
+            # Build the Pareto-front scatter from every COMPLETE trial in the
+            # study (not just ones run in this process) -- reads straight from
+            # Optuna's persistent SQLite storage, so a resumed sweep's chart is
+            # always the complete picture, and an interrupted sweep (Ctrl+C
+            # mid-study.optimize) still gets a chart for whatever finished
+            # before the interrupt, since `finally` runs either way.
+            completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            if completed:
+                param_names = list(completed[0].params.keys())
+                columns = ["trial_number", *param_names, "accuracy_score", "p95_time", "average_recall", "flip_rate"]
+                rows = [
+                    [
+                        t.number,
+                        *[t.params.get(name) for name in param_names],
+                        t.values[0],
+                        t.values[1],
+                        t.user_attrs.get("average_recall"),
+                        t.user_attrs.get("flip_rate"),
+                    ]
+                    for t in completed
+                ]
+                table = wandb.Table(columns=columns, data=rows)
+                run.log({
+                    "pareto_front": wandb.plot.scatter(
+                        table, "p95_time", "accuracy_score", title=f"Pareto Front - {study_name}"
+                    )
+                })
+
     print("\n" + "=" * 50)
     print("SWEEP COMPLETE (PARETO FRONT FINDINGS)")
     print("=" * 50)
