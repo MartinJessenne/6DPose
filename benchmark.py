@@ -6,36 +6,41 @@ against ground truth labels from Isaac Sim. It runs in two distinct modes:
 
 Usage Modes:
 ------------
-1. Default Benchmark Evaluation (sweep=false)
+1. Default Benchmark Evaluation (--sweep not passed, or --no-sweep)
    Evaluates a chosen method on a random subset of the test split using its default/optimized
    hyperparameters, printing a detailed performance report (Mean/Median Translation & Rotation
    errors, Match Success Rate, and Mean Execution time).
-   
-   Example (PPF):
-     uv run benchmark.py model=ppf eval_size=30
-     
-   Example (RANSAC):
-     uv run benchmark.py model=ransac eval_size=30
 
-2. Hyperparameter Sweep Optimization (sweep=true)
+   Example (PPF):
+     uv run benchmark.py --eval-size 30 model:ppf model.profile:default
+
+   Example (RANSAC):
+     uv run benchmark.py --eval-size 30 model:ransac model.profile:default
+
+2. Hyperparameter Sweep Optimization (--sweep)
    Launches a Multi-Objective Bayesian Optimization sweep using Optuna to find the Pareto Front
    of optimal accuracy vs. speed trade-offs. The search space is dynamically configured based
    on the selected method, and results are persisted in a local SQLite database for visualization.
-   
+
    Example (PPF Sweep):
-     uv run benchmark.py sweep=true model=ppf name=PPF_Sweep trials=50 eval_size=30
-     
+     uv run benchmark.py --sweep --name PPF_Sweep --trials 50 --eval-size 30 model:ppf model.profile:default
+
    Example (RANSAC Sweep):
-     uv run benchmark.py sweep=true model=ransac name=RANSAC_Sweep trials=50 eval_size=30
+     uv run benchmark.py --sweep --name RANSAC_Sweep --trials 50 --eval-size 30 model:ransac model.profile:default
 
 CLI Configuration Overrides:
 ----------------------------
-  model=ppf|ransac    The 6D pose estimation method to run (default: 'ppf').
-  sweep=true|false    Flag to execute the Optuna hyperparameter sweep (default: false).
-  name=NAME           Custom name for the sweep (creates 'optuna_<NAME>.db' storage).
-  trials=NUM          Number of optimization trials to execute (default: 30).
-  eval_size=NUM       Number of validation samples to evaluate per trial/benchmark (default: 20).
-  seed=NUM            Optional fixed seed to ensure reproducibility.
+  model:ppf|ransac|ransac3dof   The 6D pose estimation method to run (required, no default --
+                                see docs/explanation/tyro_cli_config.md for why).
+  model.profile:<name>          Tuning profile for the chosen method (required); run
+                                `uv run benchmark.py model:<algo> --help` to list them.
+  --sweep / --no-sweep          Flag to execute the Optuna hyperparameter sweep (default: no-sweep).
+  --name NAME                   Custom name for the sweep (creates 'optuna_<NAME>.db' storage).
+  --trials NUM                  Number of optimization trials to execute (default: 30).
+  --eval-size NUM                Number of validation samples to evaluate per trial/benchmark (default: 20).
+  --seed NUM                    Optional fixed seed to ensure reproducibility.
+  --model.profile.params.<field> <value>   Override a single hyperparameter of the chosen profile.
+  --model.profile.depth-trunc <value>      Override the chosen profile's depth truncation.
 """
 
 import os
@@ -45,13 +50,13 @@ import numpy as np
 
 import open3d as o3d
 import optuna
-import hydra
-from omegaconf import DictConfig
+import tyro
 from datasets import Dataset
 
 import logging
 from pydantic import BaseModel, Field
 
+from cli_config import BenchmarkArgs
 from pipeline import (
     Camera, load_hf_model, load_parquet_dataset,
     process_and_reconstruct, compute_ground_truth_pose,
@@ -405,83 +410,81 @@ def run_parameter_sweep(
 # =====================================================================
 # 4. CLI ENTRY POINT
 # =====================================================================
-# The @hydra.main decorator intercepts command-line execution and manages:
-# 1. Config Path Resolution: Searches the local directory 'config/' for YAML config templates.
-# 2. Config Composition: Reads 'config.yaml' as the root file, which declares default subconfigs
-#    (e.g., loading model presets under config/model/ and dataset settings under config/dataset/).
-# 3. CLI Overrides parsing: Converts CLI key-value assignments (like 'model=ransac' or 'sweep=true')
-#    into overrides, merges them with the default configuration tree, and encapsulates them into 
-#    an OmegaConf DictConfig object.
-# 4. Working Directory Management: Hydra automatically handles logging output paths and creates a 
-#    unique execution folder for each run (or multi-run sweep studies) to prevent output collisions.
-@hydra.main(config_path="config", config_name="benchmark_config", version_base=None)
-def main(cfg: DictConfig):
+# tyro.cli(BenchmarkArgs) builds the parser directly from the BenchmarkArgs
+# dataclass (cli_config.py) -- no external config file, no dynamic string
+# resolution. `args.model` is already a concrete, type-checked *Preset
+# instance by the time we get here: `.ESTIMATOR_CLS` is the real class object
+# and `.profile.params`/`.profile.depth_trunc` are the chosen profile's
+# values. See docs/explanation/tyro_cli_config.md for the full picture.
+def main():
+    args = tyro.cli(BenchmarkArgs)
+
     # Load model, camera, and dataset
     print("Loading pipeline assets...")
     model = load_hf_model(
-        local_model_path=cfg.yolo.local_path,
-        repo_id=cfg.yolo.repo,
-        filename=cfg.yolo.file
+        local_model_path=args.yolo.local_path,
+        repo_id=args.yolo.repo,
+        filename=args.yolo.file
     )
     camera = Camera(
-        fx=cfg.camera.fx, fy=cfg.camera.fy,
-        cx=cfg.camera.cx, cy=cfg.camera.cy
+        fx=args.camera.fx, fy=args.camera.fy,
+        cx=args.camera.cx, cy=args.camera.cy
     )
     dataset = load_parquet_dataset(
-        dataset_path=cfg.dataset.path,
-        test_glob=cfg.dataset.test_glob
+        dataset_path=args.dataset.path,
+        test_glob=args.dataset.test_glob
     )
-    
-    # Resolve estimator class dynamically from Hydra configuration target
-    estimator_cls = hydra.utils.get_class(cfg.model._target_)
-    
+
+    estimator_cls = args.model.ESTIMATOR_CLS
+
     # Hoist CAD mesh loading
     meshes = load_cad_meshes()
-    
-    # Retrieve extrinsic matrix for sweep
-    extrinsic_list = cfg.camera.get("extrinsic", None)
-    extrinsic = np.array(extrinsic_list, dtype=np.float64) if extrinsic_list is not None else None
-    
-    if cfg.get("sweep", False):
-        study_name = cfg.get("name", "6DPoseOptimization")
+
+    # Camera extrinsic is always present now (CameraConfig has a real default,
+    # not an optional YAML key), so no None-fallback is needed here anymore.
+    extrinsic = np.array(args.camera.extrinsic, dtype=np.float64)
+
+    if args.sweep:
         run_parameter_sweep(
             dataset=dataset,
             model=model,
             camera=camera,
-            study_name=study_name,
+            study_name=args.name,
             estimator_cls=estimator_cls,
-            sweep_size=cfg.eval_size,
-            n_trials=cfg.trials,
+            sweep_size=args.eval_size,
+            n_trials=args.trials,
             meshes=meshes,
             extrinsic=extrinsic,
-            seed=cfg.get("seed", None)
+            seed=args.seed
         )
 
     else:
         # Default Evaluation mode
-        seed = cfg.get("seed", None)
+        seed = args.seed
         if seed is None:
             seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
-        
+
         np.random.seed(seed)
         o3d.utility.random.seed(seed)
-        
+
         total_samples = len(dataset)
-        eval_indices = np.random.choice(total_samples, min(cfg.eval_size, total_samples), replace=False).tolist()
-        
-        # Instantiate estimator dynamically via Hydra
-        estimator = hydra.utils.instantiate(cfg.model)
-        
+        eval_indices = np.random.choice(total_samples, min(args.eval_size, total_samples), replace=False).tolist()
+
+        # Directly construct the chosen preset's estimator -- no _target_
+        # string resolution needed, args.model.ESTIMATOR_CLS is already the
+        # concrete class.
+        estimator = estimator_cls(params=args.model.profile.params, extrinsic=extrinsic)
+
         # Pre-prepare all meshes on estimator
         for cart_type, mesh in meshes.items():
             estimator.prepare(mesh, cart_type)
-            
+
         print(f"Evaluating '{estimator_cls.__name__}' parameters on {len(eval_indices)} test samples...")
         print(f"Seed: {seed}")
         print(f"Indices: {eval_indices}\n")
-        
+
         error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
-            dataset, model, camera, estimator, eval_indices, meshes, depth_trunc=cfg.depth_trunc
+            dataset, model, camera, estimator, eval_indices, meshes, depth_trunc=args.model.profile.depth_trunc
         )
         
         successful = len(error_metrics)

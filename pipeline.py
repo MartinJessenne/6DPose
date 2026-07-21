@@ -131,7 +131,7 @@ from ultralytics import YOLO
 # =====================================================================
 # 1. CENTRALIZED PIPELINE CONFIGURATION
 # =====================================================================
-# Configuration is managed via Hydra.
+# Configuration is managed via tyro (see cli_config.py).
 
 
 

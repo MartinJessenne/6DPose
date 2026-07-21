@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -58,59 +59,39 @@ def derive_z_offset(cad_mesh: "o3d.geometry.TriangleMesh") -> float:
 # =====================================================================
 # 1. PARAMETER CLASS
 # =====================================================================
+@dataclass(frozen=True)
 class Ransac3DoFParams(RansacParams):
-    """Hyperparameters for the SE(2)-constrained FPFH + RANSAC + ICP method."""
+    """Hyperparameters for the SE(2)-constrained FPFH + RANSAC + ICP method.
 
-    def __init__(
-        self,
-        voxel_size: float = 0.06,
-        ransac_max_iterations: int = 100000,
-        icp_max_correspondence_distance: float = 0.15,
-        icp_max_iterations: int = 100,
-        z_offset: float | None = None,
-        z_gate_threshold: float = 0.09,
-        edge_length_threshold: float = 0.9,
-        ransac_confidence: float = 0.999,
-        seed: int | None = 0,
-        front_crop_depth: float | None = None,
-    ):
-        """
-        Args:
-            z_offset (float, optional): Height of the CAD model origin above
-                the scene's ground plane, in the robot base frame. None (the
-                default) derives it per cart from the CAD mesh as
-                -min(vertex z), i.e. the model rests on the floor; set a float
-                to override manually.
-            z_gate_threshold (float): Half-width (meters) of the z-consistency
-                gate on FPFH correspondences. A sensor-noise property, so it is
-                tuned independently of voxel_size (default 0.09 matches the
-                previous voxel_size * 1.5 coupling at voxel_size 0.06).
-            edge_length_threshold (float): Edge-length similarity checker ratio
-                for RANSAC sample pairs (Open3D-equivalent, default 0.9).
-            ransac_confidence (float): Early-exit confidence for the RANSAC
-                iteration bound.
-            seed (int, optional): Seed for the RANSAC random generator. Defaults
-                to 0 so benchmark sweeps (which build params from suggest_params
-                alone, bypassing the yaml) stay deterministic per trial; pass
-                None explicitly for non-deterministic runs.
-            front_crop_depth (float, optional): When set, register against only
-                the front slab of the CAD model (the `depth` meters nearest the
-                +x face, i.e. the towing face) instead of the full cart. The
-                slab is asymmetric, which disambiguates the 180-degree flip.
-                None (default) uses the full mesh.
-        """
-        super().__init__(
-            voxel_size=voxel_size,
-            ransac_max_iterations=ransac_max_iterations,
-            icp_max_correspondence_distance=icp_max_correspondence_distance,
-            icp_max_iterations=icp_max_iterations,
-        )
-        self.z_offset = z_offset
-        self.z_gate_threshold = z_gate_threshold
-        self.edge_length_threshold = edge_length_threshold
-        self.ransac_confidence = ransac_confidence
-        self.seed = seed
-        self.front_crop_depth = front_crop_depth
+    Attributes:
+        z_offset: Height of the CAD model origin above the scene's ground
+            plane, in the robot base frame. None (the default) derives it per
+            cart from the CAD mesh as -min(vertex z), i.e. the model rests on
+            the floor; set a float to override manually.
+        z_gate_threshold: Half-width (meters) of the z-consistency gate on
+            FPFH correspondences. A sensor-noise property, so it is tuned
+            independently of voxel_size (default 0.09 matches the previous
+            voxel_size * 1.5 coupling at voxel_size 0.06).
+        edge_length_threshold: Edge-length similarity checker ratio for
+            RANSAC sample pairs (Open3D-equivalent, default 0.9).
+        ransac_confidence: Early-exit confidence for the RANSAC iteration
+            bound.
+        seed: Seed for the RANSAC random generator. Defaults to 0 so
+            benchmark sweeps (which build params from suggest_params alone,
+            bypassing the yaml) stay deterministic per trial; pass None
+            explicitly for non-deterministic runs.
+        front_crop_depth: When set, register against only the front slab of
+            the CAD model (the `depth` meters nearest the +x face, i.e. the
+            towing face) instead of the full cart. The slab is asymmetric,
+            which disambiguates the 180-degree flip. None (default) uses the
+            full mesh.
+    """
+    z_offset: float | None = None
+    z_gate_threshold: float = 0.09
+    edge_length_threshold: float = 0.9
+    ransac_confidence: float = 0.999
+    seed: int | None = 0
+    front_crop_depth: float | None = None
 
 
 # =====================================================================

@@ -1,5 +1,6 @@
 import copy
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 import numpy as np
 import cv2
@@ -15,27 +16,16 @@ if TYPE_CHECKING:
 # =====================================================================
 # 1. PARAMETER CLASS
 # =====================================================================
+@dataclass(frozen=True)
 class PPFParams:
     """Hyperparameters specific to the PPF matching method."""
-    def __init__(
-        self,
-        ppf_sampling_step: float = 0.1,
-        ppf_distance_step: float = 0.02,
-        ppf_match_threshold: float = 0.06,
-        ppf_match_tolerance: float = 0.03,
-        # Optimized value obtained from Optuna hyperparameter sweep (Pareto front candidate)
-        icp_max_correspondence_distance: float = 0.17528702727791115,
-        icp_max_iterations: int = 10
-    ):
-        """
-        Initializes hyperparameters for PPF and ICP alignment.
-        """
-        self.ppf_sampling_step = ppf_sampling_step
-        self.ppf_distance_step = ppf_distance_step
-        self.ppf_match_threshold = ppf_match_threshold
-        self.ppf_match_tolerance = ppf_match_tolerance
-        self.icp_max_correspondence_distance = icp_max_correspondence_distance
-        self.icp_max_iterations = icp_max_iterations
+    ppf_sampling_step: float = 0.1
+    ppf_distance_step: float = 0.02
+    ppf_match_threshold: float = 0.06
+    ppf_match_tolerance: float = 0.03
+    # Optimized value obtained from Optuna hyperparameter sweep (Pareto front candidate)
+    icp_max_correspondence_distance: float = 0.17528702727791115
+    icp_max_iterations: int = 10
 
 
 # =====================================================================

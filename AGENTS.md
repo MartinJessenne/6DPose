@@ -31,13 +31,13 @@ The estimation algorithms are designed using a Strategy pattern so that individu
 
 ## 2. Configuration & Parameter Management
 
-- **Hydra Configs**: All parameters (dataset globs, camera intrinsics, model choices, RANSAC thresholds, sweep limits) are managed via YAML files in the `config/` directory.
-- **Main Config Entrypoint**: `config/config.yaml`.
-- **Interpolations**: Intrinsics/extrinsics are interpolated into the model params using Hydra (e.g. `${camera.extrinsic}`).
-- **CLI Overrides**: Override configuration parameters directly when running python scripts:
-  - Run inspection: `uv run inspect_pose.py mode=random random_samples=2 model=ransac`
-  - Run benchmark: `uv run benchmark.py model=ppf eval_size=5`
-  - Run Optuna sweep: `uv run benchmark.py model=ransac sweep=true trials=5`
+- **tyro CLI**: All parameters (dataset globs, camera intrinsics, model choices, RANSAC thresholds, sweep limits) are plain Python dataclasses in `cli_config.py` at the repo root -- no YAML config tree.
+- **Main entrypoint dataclasses**: `BenchmarkArgs` and `InspectArgs` in `cli_config.py`, built via `tyro.cli(...)` at the top of each script's `main()`.
+- **Model selection**: a 2-level subcommand choice, `model:<algorithm>` then `model.profile:<tuning>` (e.g. `model:ransac3dof model.profile:acc-opt`) -- both required, no implicit default. See `docs/explanation/tyro_cli_config.md` for why.
+- **CLI Overrides**: Override configuration parameters directly when running python scripts (scalar options before the subcommand tokens):
+  - Run inspection: `uv run inspect_pose.py --mode random --random-samples 2 model:ransac model.profile:default`
+  - Run benchmark: `uv run benchmark.py --eval-size 5 model:ppf model.profile:default`
+  - Run Optuna sweep: `uv run benchmark.py --sweep --trials 5 model:ransac model.profile:default`
 
 ---
 

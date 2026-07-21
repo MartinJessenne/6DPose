@@ -43,23 +43,25 @@ This script performs the following tasks:
 
 ## Running Pose Estimation in <10 Minutes
 
-The project uses Meta's **Hydra** configuration framework. You can run runs and override any model parameters directly from the command line.
+The project uses [tyro](https://brentyi.github.io/tyro/) for its CLI: every option is a typed
+dataclass field in `cli_config.py`, so you get `--help` and validation for free. See the
+[Configuration tutorial](tutorials/03_config_system.md) for the full picture.
 
 ### 1. Run Random Pose Inspection
 Run the pipeline on 2 random samples from the test set using RANSAC registration, and export the output alignment scenes as `.glb` files into the `debug_output/` folder:
 ```bash
-uv run inspect_pose.py mode=random random_samples=2 model=ransac
+uv run inspect_pose.py --mode random --random-samples 2 model:ransac model.profile:default
 ```
 
 ### 2. Run Pipeline Benchmarks
 Evaluate the PPF-ICP pose estimator performance metrics (Translation/Rotation error, execution speed, match success rate) over 5 validation samples:
 ```bash
-uv run benchmark.py model=ppf eval_size=5
+uv run benchmark.py --eval-size 5 model:ppf model.profile:default
 ```
 
 ### 3. Run Hyperparameter Tuning
 Optimize matching thresholds, voxel sizes, or ICP correspondence distances using multi-objective Bayesian optimization via Optuna:
 ```bash
-uv run benchmark.py model=ransac sweep=true trials=5 eval_size=2
+uv run benchmark.py --sweep --trials 5 --eval-size 2 model:ransac model.profile:default
 ```
-Outputs and sweep trials are persisted in a local sqlite database `optuna_Sweep.db`.
+Outputs and sweep trials are persisted in a local sqlite database `sweeps/optuna_Sweep.db`.

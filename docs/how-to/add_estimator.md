@@ -9,21 +9,22 @@ This guide provides step-by-step instructions on how to implement, register, and
 All estimators must inherit from `BasePoseEstimator` defined in `methods/base.py`. Create a new file under `methods/` (e.g., `methods/my_new_model.py`) and define your estimator:
 
 ```python
+from dataclasses import dataclass
 import numpy as np
 import open3d as o3d
 from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
 
+@dataclass(frozen=True)
 class MyNewModelParams:
     """Hyperparameters specific to your new method."""
-    def __init__(self, my_threshold: float = 0.05, icp_max_iterations: int = 50):
-        self.my_threshold = my_threshold
-        self.icp_max_iterations = icp_max_iterations
+    my_threshold: float = 0.05
+    icp_max_iterations: int = 50
 
 class MyNewModelEstimator(BasePoseEstimator):
     """Implementation of your new 6D Pose Estimation method."""
 
     def __init__(self, params: MyNewModelParams | dict = None, extrinsic: list | np.ndarray = None):
-        # Handle dict input from Hydra configuration instantiations
+        # Handle dict input (e.g. from Optuna's suggest_params during a sweep)
         if isinstance(params, dict):
             self.params = MyNewModelParams(**params)
         else:
@@ -64,31 +65,47 @@ class MyNewModelEstimator(BasePoseEstimator):
 ---
 
 > [!NOTE]
-> Previously, new estimators had to be registered manually in a `get_estimator` factory function. Since the codebase now uses Hydra for parameter management, factory functions are no longer required; estimators are dynamically resolved and instantiated via the `_target_` parameter in their YAML configuration.
+> There is no `get_estimator` factory function or Hydra `_target_` string resolution to wire up. Registering a new algorithm is one addition to `cli_config.py`, described below -- see [Configuration with tyro](../explanation/tyro_cli_config.md) for the full picture of how `ModelPreset` is built.
 
-## Step 2: Create the Hydra Configuration
+## Step 2: Register It in cli_config.py
 
-To enable command-line overrides and automatic instantiation, add a YAML config file for your model under `config/model/my_new_model.yaml`:
+Add a `*Profile` dataclass, a `*ProfileSelect` union (even with just one "default" entry -- you can add more tuned profiles later, see [the config tutorial](../tutorials/03_config_system.md)), a `*Preset` dataclass naming your estimator class, and one new entry in the top-level `ModelPreset` union:
 
-```yaml
-# config/model/my_new_model.yaml
-_target_: methods.my_new_model.MyNewModelEstimator
-params:
-  my_threshold: 0.05
-  icp_max_iterations: 50
-extrinsic: ${camera.extrinsic}
+```python
+# In cli_config.py
+
+@dataclass(frozen=True)
+class MyNewModelProfile:
+    params: MyNewModelParams = field(default_factory=MyNewModelParams)
+    depth_trunc: float = 3.0
+
+MyNewModelProfileSelect = Union[
+    Annotated[MyNewModelProfile, tyro.conf.subcommand(name="default")],
+]
+
+@dataclass(frozen=True)
+class MyNewModelPreset:
+    ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = MyNewModelEstimator
+    profile: MyNewModelProfileSelect
+
+ModelPreset = Union[
+    Annotated[PPFPreset, tyro.conf.subcommand(name="ppf")],
+    Annotated[RansacPreset, tyro.conf.subcommand(name="ransac")],
+    Annotated[Ransac3DoFPreset, tyro.conf.subcommand(name="ransac3dof")],
+    Annotated[MyNewModelPreset, tyro.conf.subcommand(name="my_new_model")],  # <-- new
+]
 ```
 
 ---
 
 ## Step 3: Run and Verify
 
-You can now select and run your new model using standard Hydra CLI overrides:
+You can now select and run your new model from the CLI:
 
 ```bash
 # Run random pose inspection
-uv run inspect_pose.py mode=random model=my_new_model
+uv run inspect_pose.py --mode random model:my-new-model model.profile:default
 
 # Run pipeline benchmark
-uv run benchmark.py model=my_new_model
+uv run benchmark.py model:my-new-model model.profile:default
 ```

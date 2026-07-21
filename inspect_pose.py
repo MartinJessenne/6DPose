@@ -2,25 +2,25 @@
 Unified 6D Pose Validation & Inspection Utility.
 
 This script acts as the main execution and debugging interface for the 6D Pose Estimation
-pipeline. It loads the streaming Parquet dataset (test split), runs YOLO segmentation, 
+pipeline. It loads the streaming Parquet dataset (test split), runs YOLO segmentation,
 reconstructs 3D point clouds from RGB-D inputs, aligns reference CAD models using PPF or RANSAC,
 and compares predictions against Isaac Sim ground truths.
 
 Usage Modes:
 ------------
-1. Random Validation Mode (mode=random)
+1. Random Validation Mode (--mode random)
    Selects a set of random test samples, runs the full estimation pipeline, and exports
    the output alignment scenes as .glb files to the `debug_output/` folder.
    By default, it wipes the previous `debug_output/` directory so only the current
    run's results are present.
-   
-   Example (PPF):
-     uv run inspect_pose.py mode=random random_samples=10 model=ppf
-     
-   Example (RANSAC):
-     uv run inspect_pose.py mode=random random_samples=10 model=ransac
 
-2. Targeted Debugging Mode (mode=indices)
+   Example (PPF):
+     uv run inspect_pose.py --mode random --random-samples 10 model:ppf model.profile:default
+
+   Example (RANSAC):
+     uv run inspect_pose.py --mode random --random-samples 10 model:ransac model.profile:default
+
+2. Targeted Debugging Mode (--mode indices)
    Takes specific sample indices from the test set split (0-1481) and performs a deep
    dive debug. It exports three files per index to the `debug_failures/` folder:
      - yolo_prediction_{idx}.png : 2D bounding boxes and masks plotted on the RGB image.
@@ -29,32 +29,34 @@ Usage Modes:
                                       (green), and ground truth CAD model (blue).
    By default, it wipes the previous `debug_failures/` directory so only the current
    debug run's outputs are present.
-   
+
    Example:
-     uv run inspect_pose.py mode=indices indices=[37,52,88] model=ppf
+     uv run inspect_pose.py --mode indices --indices 37 52 88 model:ppf model.profile:default
 
 CLI Configuration Overrides:
 ----------------------------
-  mode=random|indices      The validation mode to run.
-  random_samples=NUM       Number of random samples to run in random validation mode (default: 10).
-  indices=[IDX, IDX, ...]  Specific test sample indices to debug in targeted mode.
-  model=ppf|ransac         The 6D pose estimation method to use (default: 'ppf').
-  output_dir=PATH          Directory path to save GLB outputs.
+  --mode random|indices          The validation mode to run (required).
+  --random-samples NUM           Number of random samples to run in random validation mode (default: 10).
+  --indices IDX [IDX ...]        Specific test sample indices to debug in targeted mode.
+  model:ppf|ransac|ransac3dof    The 6D pose estimation method to use (required, no default).
+  model.profile:<name>           Tuning profile for the chosen method (required).
+  --output-dir PATH              Directory path to save GLB outputs.
 """
 
 
 import os
 import shutil
+from datetime import datetime
 import numpy as np
 import cv2
 import copy
 import trimesh
-import hydra
-from omegaconf import DictConfig
+import tyro
 
 import open3d as o3d
 from datasets import Dataset
 
+from cli_config import InspectArgs
 # Import utility classes and functions from pipeline.py
 from pipeline import (
     Camera, load_hf_model, load_parquet_dataset,
@@ -62,11 +64,6 @@ from pipeline import (
     instance_detected, load_cad_meshes
 )
 from methods.base import BasePoseEstimator
-from enum import Enum
-
-class ExecutionMode(Enum):
-    RANDOM = "random"
-    INDICES = "indices"
 
 
 # =====================================================================
@@ -295,70 +292,68 @@ def run_targeted_inspection(
 # =====================================================================
 # 3. CLI ARGUMENT PARSER AND MAIN ENTRY POINT
 # =====================================================================
-@hydra.main(config_path="config", config_name="inspect_config", version_base=None)
-def main(cfg: DictConfig):
-    from hydra.core.hydra_config import HydraConfig
-    hydra_dir = HydraConfig.get().runtime.output_dir if HydraConfig.initialized() else "."
+def main():
+    args = tyro.cli(InspectArgs)
+
+    # Hydra used to auto-manage a per-run timestamped working directory
+    # (HydraConfig.get().runtime.output_dir); tyro has no equivalent feature,
+    # so we roll our own. This directory is disposable -- wiped by
+    # run_random_inspection/run_targeted_inspection on every run and already
+    # gitignored -- so a plain timestamp is enough, no extra enrichment.
+    debug_root = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     # Load pipeline assets
     print("Loading pipeline assets...")
     model = load_hf_model(
-        local_model_path=cfg.yolo.local_path,
-        repo_id=cfg.yolo.repo,
-        filename=cfg.yolo.file
+        local_model_path=args.yolo.local_path,
+        repo_id=args.yolo.repo,
+        filename=args.yolo.file
     )
     camera = Camera(
-        fx=cfg.camera.fx, fy=cfg.camera.fy,
-        cx=cfg.camera.cx, cy=cfg.camera.cy
+        fx=args.camera.fx, fy=args.camera.fy,
+        cx=args.camera.cx, cy=args.camera.cy
     )
     dataset = load_parquet_dataset(
-        dataset_path=cfg.dataset.path,
-        test_glob=cfg.dataset.test_glob
+        dataset_path=args.dataset.path,
+        test_glob=args.dataset.test_glob
     )
-    
+
     # Hoist CAD mesh loading
     meshes = load_cad_meshes()
-    
-    # Instantiate chosen estimator dynamically via Hydra
-    estimator = hydra.utils.instantiate(cfg.model)
-    
+
+    # Directly construct the chosen preset's estimator -- no _target_ string
+    # resolution needed, args.model.ESTIMATOR_CLS is already the concrete class.
+    extrinsic = np.array(args.camera.extrinsic, dtype=np.float64)
+    estimator = args.model.ESTIMATOR_CLS(params=args.model.profile.params, extrinsic=extrinsic)
+
     # Pre-prepare all meshes on estimator
     for cart_type, mesh in meshes.items():
         estimator.prepare(mesh, cart_type)
-    
-    # Select execution mode from config
-    mode_str = cfg.get("mode", "")
-    try:
-        mode = ExecutionMode(mode_str.lower().strip())
-    except ValueError:
-        mode = None
 
-    if mode == ExecutionMode.RANDOM:
+    # args.mode is a Literal["random", "indices"] -- tyro already validated it
+    # up front, so there's no invalid-mode branch to handle here anymore.
+    if args.mode == "random":
         run_random_inspection(
-            num_samples=cfg.random_samples,
+            num_samples=args.random_samples,
             model=model,
             camera=camera,
             dataset=dataset,
             estimator=estimator,
             meshes=meshes,
-            output_dir=os.path.join(hydra_dir, cfg.output_dir),
-            depth_trunc=cfg.depth_trunc
-        )
-    elif mode == ExecutionMode.INDICES:
-        run_targeted_inspection(
-            indices=list(cfg.indices),
-            model=model,
-            camera=camera,
-            dataset=dataset,
-            estimator=estimator,
-            meshes=meshes,
-            output_dir=os.path.join(hydra_dir, "debug_failures"),
-            depth_trunc=cfg.depth_trunc
+            output_dir=os.path.join(debug_root, args.output_dir),
+            depth_trunc=args.model.profile.depth_trunc
         )
     else:
-        print(f"Invalid mode '{mode_str}'. Please specify mode=random or mode=indices on the command line.")
-        print("Example: uv run inspect_pose.py mode=random random_samples=5")
-        print("Example: uv run inspect_pose.py mode=indices indices=[37,52]")
+        run_targeted_inspection(
+            indices=list(args.indices),
+            model=model,
+            camera=camera,
+            dataset=dataset,
+            estimator=estimator,
+            meshes=meshes,
+            output_dir=os.path.join(debug_root, "debug_failures"),
+            depth_trunc=args.model.profile.depth_trunc
+        )
 
 if __name__ == "__main__":
     main()
