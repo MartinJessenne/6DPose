@@ -281,7 +281,13 @@ ModelPreset = Union[
 # =====================================================================
 @dataclass(frozen=True)
 class BenchmarkArgs:
-    """uv run benchmark.py model:<algo> profile:<tuning> [options]"""
+    """uv run benchmark.py [options] model:<algo> model.profile:<tuning>
+
+    BOTH subcommand tokens are required -- e.g. model:ransac3dof model.profile:acc-opt.
+    Run with model:<algo> --help (after picking an algorithm) to list that
+    algorithm's profile choices, since they differ per algorithm and can't
+    all be shown in this top-level --help.
+    """
     model: ModelPreset
     yolo: YoloConfig = field(default_factory=YoloConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
@@ -295,7 +301,13 @@ class BenchmarkArgs:
 
 @dataclass(frozen=True)
 class InspectArgs:
-    """uv run inspect_pose.py model:<algo> profile:<tuning> --mode {random,indices} [options]"""
+    """uv run inspect_pose.py --mode {random,indices} [options] model:<algo> model.profile:<tuning>
+
+    BOTH subcommand tokens are required -- e.g. model:ransac3dof model.profile:acc-opt.
+    Run with model:<algo> --help (after picking an algorithm) to list that
+    algorithm's profile choices, since they differ per algorithm and can't
+    all be shown in this top-level --help.
+    """
     model: ModelPreset
     mode: Literal["random", "indices"]  # tyro validates this choice up front -- no null/"" sentinel needed.
     yolo: YoloConfig = field(default_factory=YoloConfig)

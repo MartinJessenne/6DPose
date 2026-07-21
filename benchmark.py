@@ -43,6 +43,7 @@ CLI Configuration Overrides:
   --model.profile.depth-trunc <value>      Override the chosen profile's depth truncation.
 """
 
+import dataclasses
 import os
 import time
 
@@ -51,6 +52,7 @@ import numpy as np
 import open3d as o3d
 import optuna
 import tyro
+import wandb
 from datasets import Dataset
 
 import logging
@@ -337,48 +339,76 @@ def run_parameter_sweep(
     def objective(trial: optuna.Trial) -> tuple[float, float]:
         # 1. Suggest global parameters
         depth_trunc = trial.suggest_float("depth_trunc", 2.0, 7.0, step=0.1)
-        
+
         # 2. Dynamically suggest model-specific parameters
         suggested_params = estimator_cls.suggest_params(trial)
-        
-        # 3. Instantiate model with trial parameters
-        trial_estimator = estimator_cls(params=suggested_params, extrinsic=extrinsic)
-        
-        # Offline CAD mesh preparation (voxelization, normals, and FPFH/PPF database generation).
-        # We prepare the model CAD representations outside the timed evaluation loop so that 
-        # offline preparation costs are not charged to the online pose estimation latency metric.
-        for cart_type, mesh in meshes.items():
-            trial_estimator.prepare(mesh, cart_type)
-        
-        error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
-            dataset, model, camera, trial_estimator, sweep_indices, meshes, depth_trunc=depth_trunc
-        )
-        
-        total_failed = det_failed + pose_failed
-        total_matched = len(error_metrics)
-        total_evaluated = total_matched + total_failed
-        
-        # Calculate Average Recall
-        ar = compute_average_recall(error_metrics, total_evaluated)
-        accuracy_score = 1.0 - ar
-        
-        # Calculate p95 execution time over actual successful runs only.
-        # Failures are already counted as misses in Obj 1 (AR); penalizing them
-        # again with fabricated latencies would corrupt the latency objective.
-        p95_time = float(np.percentile(times, 95)) if times else float('inf')
-        
-        # Save trial diagnostics
-        trial.set_user_attr("average_recall", ar)
-        trial.set_user_attr("p95_time", p95_time)
-        trial.set_user_attr("detection_failures", det_failed)
-        trial.set_user_attr("pose_failures", pose_failed)
-        
-        if total_matched > 0:
-            flips = sum(1 for e in error_metrics if abs(e.yaw) > 90.0)
-            trial.set_user_attr("flip_rate", flips / total_matched)
-        else:
-            trial.set_user_attr("flip_rate", 0.0)
-            
+
+        # One W&B run per trial. reinit="create_new" forces a genuinely new
+        # run every call even though objective() runs repeatedly in this same
+        # process across trials (confirmed by testing: without it, or with
+        # the module-level wandb.log() shorthand instead of run.log(), a
+        # subsequent trial can silently fail to get its own run). The `with`
+        # block guarantees run.finish() runs even if this trial raises.
+        with wandb.init(
+            project="6dpose",
+            group=estimator_cls.__name__,
+            job_type="sweep",
+            tags=[study_name],
+            name=f"{study_name}-trial-{trial.number}",
+            config={**suggested_params, "depth_trunc": depth_trunc},
+            reinit="create_new",
+        ) as run:
+            # 3. Instantiate model with trial parameters
+            trial_estimator = estimator_cls(params=suggested_params, extrinsic=extrinsic)
+
+            # Offline CAD mesh preparation (voxelization, normals, and FPFH/PPF database generation).
+            # We prepare the model CAD representations outside the timed evaluation loop so that
+            # offline preparation costs are not charged to the online pose estimation latency metric.
+            for cart_type, mesh in meshes.items():
+                trial_estimator.prepare(mesh, cart_type)
+
+            error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
+                dataset, model, camera, trial_estimator, sweep_indices, meshes, depth_trunc=depth_trunc
+            )
+
+            total_failed = det_failed + pose_failed
+            total_matched = len(error_metrics)
+            total_evaluated = total_matched + total_failed
+
+            # Calculate Average Recall
+            ar = compute_average_recall(error_metrics, total_evaluated)
+            accuracy_score = 1.0 - ar
+
+            # Calculate p95 execution time over actual successful runs only.
+            # Failures are already counted as misses in Obj 1 (AR); penalizing them
+            # again with fabricated latencies would corrupt the latency objective.
+            p95_time = float(np.percentile(times, 95)) if times else float('inf')
+
+            # Save trial diagnostics (Optuna's own record, independent of W&B)
+            trial.set_user_attr("average_recall", ar)
+            trial.set_user_attr("p95_time", p95_time)
+            trial.set_user_attr("detection_failures", det_failed)
+            trial.set_user_attr("pose_failures", pose_failed)
+
+            if total_matched > 0:
+                flip_rate = sum(1 for e in error_metrics if abs(e.yaw) > 90.0) / total_matched
+            else:
+                flip_rate = 0.0
+            trial.set_user_attr("flip_rate", flip_rate)
+
+            # Mirror the same diagnostics into W&B -- this is the whole reason
+            # for manual logging instead of relying on WeightsAndBiasesCallback
+            # alone: the callback only captures trial.params + the two
+            # objective values, not these extra user_attrs.
+            run.log({
+                "accuracy_score": accuracy_score,
+                "p95_time": p95_time,
+                "average_recall": ar,
+                "detection_failures": det_failed,
+                "pose_failures": pose_failed,
+                "flip_rate": flip_rate,
+            })
+
         return accuracy_score, p95_time
 
     print(f"Sweep results are being saved to SQLite database: '{db_name}'")
@@ -483,74 +513,114 @@ def main():
         print(f"Seed: {seed}")
         print(f"Indices: {eval_indices}\n")
 
-        error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
-            dataset, model, camera, estimator, eval_indices, meshes, depth_trunc=args.model.profile.depth_trunc
-        )
-        
-        successful = len(error_metrics)
-        total_failed = det_failed + pose_failed
-        total = successful + total_failed
-        
-        print("\n" + "=" * 50)
-        print("BENCHMARK REPORT (Default Parameters)")
-        print("=" * 50)
-        print(f"Detections & Matches: {successful} / {total} (Success rate: {successful/total*100:.1f}%)")
-        print(f"  - YOLO detection failures: {det_failed}")
-        print(f"  - Pose estimation failures: {pose_failed}")
-        
-        if successful > 0:
-            ar = compute_average_recall(error_metrics, total)
-            print(f"Average Recall (BOP-style AR): {ar:.4f}")
-            
-            p95_latency = float(np.percentile(times, 95)) if times else float('inf')
-            print(f"p95 Latency: {p95_latency:.4f}s")
-            
-            # Decompose errors
-            trans_xy_errs = [e.trans_xy for e in error_metrics]
-            trans_z_errs = [e.trans_z for e in error_metrics]
-            yaw_errs = [e.yaw for e in error_metrics]
-            pitch_errs = [e.pitch for e in error_metrics]
-            roll_errs = [e.roll for e in error_metrics]
-            geodesic_errs = [e.geodesic_rot for e in error_metrics]
-            
-            print(f"Translation Error (XY in meters):")
-            print(f"  - Mean:   {np.mean(trans_xy_errs):.4f}")
-            print(f"  - Median: {np.median(trans_xy_errs):.4f}")
-            print(f"Translation Error (Z in meters):")
-            print(f"  - Bias (signed mean): {np.mean(trans_z_errs):+.4f}")
-            print(f"  - MAE:                {np.mean(np.abs(trans_z_errs)):.4f}")
-            print(f"  - Median (abs):       {np.median(np.abs(trans_z_errs)):.4f}")
-            
-            print(f"Yaw Rotation Error (degrees):")
-            print(f"  - Mean:   {np.mean(np.abs(yaw_errs)):.2f}°")
-            print(f"  - Median: {np.median(np.abs(yaw_errs)):.2f}°")
-            print(f"Pitch Rotation Error (degrees):")
-            print(f"  - Mean:   {np.mean(np.abs(pitch_errs)):.2f}°")
-            print(f"  - Median: {np.median(np.abs(pitch_errs)):.2f}°")
-            print(f"Roll Rotation Error (degrees):")
-            print(f"  - Mean:   {np.mean(np.abs(roll_errs)):.2f}°")
-            print(f"  - Median: {np.median(np.abs(roll_errs)):.2f}°")
-            print(f"Geodesic Rotation Error (degrees):")
-            print(f"  - Mean:   {np.mean(geodesic_errs):.2f}°")
-            print(f"  - Median: {np.median(geodesic_errs):.2f}°")
-            
-            # Flip rate
-            flips = sum(1 for e in error_metrics if abs(e.yaw) > 90.0)
-            print(f"Flip Rate (among successful matches): {flips/successful*100:.1f}% ({flips}/{successful})")
-            
-            # Median error on non-flipped samples
-            non_flipped_metrics = [e for e in error_metrics if abs(e.yaw) <= 90.0]
-            if non_flipped_metrics:
-                non_flipped_xy = [e.trans_xy for e in non_flipped_metrics]
-                non_flipped_yaw = [e.yaw for e in non_flipped_metrics]
-                print(f"Median errors on non-flipped samples:")
-                print(f"  - Translation XY: {np.median(non_flipped_xy):.4f}m")
-                print(f"  - Yaw Rotation:   {np.median(np.abs(non_flipped_yaw)):.2f}°")
+        wandb_config = {
+            **dataclasses.asdict(args.model.profile.params),
+            "depth_trunc": args.model.profile.depth_trunc,
+            "eval_size": args.eval_size,
+            "seed": seed,
+        }
+        with wandb.init(
+            project="6dpose",
+            group=estimator_cls.__name__,
+            job_type="benchmark",
+            config=wandb_config,
+        ) as run:
+            error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
+                dataset, model, camera, estimator, eval_indices, meshes, depth_trunc=args.model.profile.depth_trunc
+            )
+
+            successful = len(error_metrics)
+            total_failed = det_failed + pose_failed
+            total = successful + total_failed
+
+            print("\n" + "=" * 50)
+            print("BENCHMARK REPORT (Default Parameters)")
+            print("=" * 50)
+            print(f"Detections & Matches: {successful} / {total} (Success rate: {successful/total*100:.1f}%)")
+            print(f"  - YOLO detection failures: {det_failed}")
+            print(f"  - Pose estimation failures: {pose_failed}")
+            run.log({
+                "success_rate": successful / total * 100 if total else 0.0,
+                "detection_failures": det_failed,
+                "pose_failures": pose_failed,
+            })
+
+            if successful > 0:
+                ar = compute_average_recall(error_metrics, total)
+                print(f"Average Recall (BOP-style AR): {ar:.4f}")
+
+                p95_latency = float(np.percentile(times, 95)) if times else float('inf')
+                print(f"p95 Latency: {p95_latency:.4f}s")
+
+                # Decompose errors
+                trans_xy_errs = [e.trans_xy for e in error_metrics]
+                trans_z_errs = [e.trans_z for e in error_metrics]
+                yaw_errs = [e.yaw for e in error_metrics]
+                pitch_errs = [e.pitch for e in error_metrics]
+                roll_errs = [e.roll for e in error_metrics]
+                geodesic_errs = [e.geodesic_rot for e in error_metrics]
+
+                print(f"Translation Error (XY in meters):")
+                print(f"  - Mean:   {np.mean(trans_xy_errs):.4f}")
+                print(f"  - Median: {np.median(trans_xy_errs):.4f}")
+                print(f"Translation Error (Z in meters):")
+                print(f"  - Bias (signed mean): {np.mean(trans_z_errs):+.4f}")
+                print(f"  - MAE:                {np.mean(np.abs(trans_z_errs)):.4f}")
+                print(f"  - Median (abs):       {np.median(np.abs(trans_z_errs)):.4f}")
+
+                print(f"Yaw Rotation Error (degrees):")
+                print(f"  - Mean:   {np.mean(np.abs(yaw_errs)):.2f}°")
+                print(f"  - Median: {np.median(np.abs(yaw_errs)):.2f}°")
+                print(f"Pitch Rotation Error (degrees):")
+                print(f"  - Mean:   {np.mean(np.abs(pitch_errs)):.2f}°")
+                print(f"  - Median: {np.median(np.abs(pitch_errs)):.2f}°")
+                print(f"Roll Rotation Error (degrees):")
+                print(f"  - Mean:   {np.mean(np.abs(roll_errs)):.2f}°")
+                print(f"  - Median: {np.median(np.abs(roll_errs)):.2f}°")
+                print(f"Geodesic Rotation Error (degrees):")
+                print(f"  - Mean:   {np.mean(geodesic_errs):.2f}°")
+                print(f"  - Median: {np.median(geodesic_errs):.2f}°")
+
+                # Flip rate
+                flips = sum(1 for e in error_metrics if abs(e.yaw) > 90.0)
+                print(f"Flip Rate (among successful matches): {flips/successful*100:.1f}% ({flips}/{successful})")
+
+                run.log({
+                    "average_recall": ar,
+                    "p95_latency": p95_latency,
+                    "trans_xy_mean": float(np.mean(trans_xy_errs)),
+                    "trans_xy_median": float(np.median(trans_xy_errs)),
+                    "trans_z_bias": float(np.mean(trans_z_errs)),
+                    "trans_z_mae": float(np.mean(np.abs(trans_z_errs))),
+                    "trans_z_median_abs": float(np.median(np.abs(trans_z_errs))),
+                    "yaw_mean": float(np.mean(np.abs(yaw_errs))),
+                    "yaw_median": float(np.median(np.abs(yaw_errs))),
+                    "pitch_mean": float(np.mean(np.abs(pitch_errs))),
+                    "pitch_median": float(np.median(np.abs(pitch_errs))),
+                    "roll_mean": float(np.mean(np.abs(roll_errs))),
+                    "roll_median": float(np.median(np.abs(roll_errs))),
+                    "geodesic_mean": float(np.mean(geodesic_errs)),
+                    "geodesic_median": float(np.median(geodesic_errs)),
+                    "flip_rate": flips / successful * 100,
+                })
+
+                # Median error on non-flipped samples
+                non_flipped_metrics = [e for e in error_metrics if abs(e.yaw) <= 90.0]
+                if non_flipped_metrics:
+                    non_flipped_xy = [e.trans_xy for e in non_flipped_metrics]
+                    non_flipped_yaw = [e.yaw for e in non_flipped_metrics]
+                    print(f"Median errors on non-flipped samples:")
+                    print(f"  - Translation XY: {np.median(non_flipped_xy):.4f}m")
+                    print(f"  - Yaw Rotation:   {np.median(np.abs(non_flipped_yaw)):.2f}°")
+                    run.log({
+                        "non_flipped_trans_xy_median": float(np.median(non_flipped_xy)),
+                        "non_flipped_yaw_median": float(np.median(np.abs(non_flipped_yaw))),
+                    })
+                else:
+                    print("All successful matches were flipped.")
             else:
-                print("All successful matches were flipped.")
-        else:
-            print("No samples were successfully matched.")
-        print("=" * 50)
+                print("No samples were successfully matched.")
+            print("=" * 50)
 
 if __name__ == "__main__":
     main()

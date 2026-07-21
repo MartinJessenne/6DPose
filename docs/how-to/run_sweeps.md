@@ -31,9 +31,9 @@ uv run benchmark.py --sweep --trials 50 --eval-size 30 --name "PPF_Tuning" model
 
 ## Step 2: Locate and Inspect the Optuna Database
 
-- **File Output**: The sweep results are saved to an SQLite database file matching the structure `optuna_<name>.db` in the workspace root directory.
-  - E.g., `--name PPF_Tuning` generates `optuna_PPF_Tuning.db`.
-- **Git Ignore**: These `.db` files are ignored by `.gitignore` to prevent committing experimental databases to source control.
+- **File Output**: The sweep results are saved to an SQLite database file matching the structure `sweeps/optuna_<name>.db`.
+  - E.g., `--name PPF_Tuning` generates `sweeps/optuna_PPF_Tuning.db`.
+- **Git Ignore**: New `.db` files under `sweeps/` are ignored by `.gitignore` to prevent committing experimental databases to source control (a few already-committed ones predate this and remain tracked deliberately).
 
 ### Programmatic Inspection in Python
 
@@ -45,7 +45,7 @@ import optuna
 # Re-load the study from the SQLite database
 study = optuna.load_study(
     study_name="PPF_Tuning",
-    storage="sqlite:///optuna_PPF_Tuning.db"
+    storage="sqlite:///sweeps/optuna_PPF_Tuning.db"
 )
 
 # Print best trials on the Pareto Front
@@ -56,3 +56,15 @@ for trial in study.best_trials:
     print(f"  - Duration:      {trial.values[1]:.4f}s")
     print("  - Params:", trial.params)
 ```
+
+---
+
+## Step 3: The Same Sweep in Weights & Biases
+
+Every trial also opens its own W&B run (project `6dpose`, tagged with the study name), logging
+the trial's suggested hyperparameters plus the diagnostics also stored as Optuna user-attrs
+(`average_recall`, `detection_failures`, `pose_failures`, `flip_rate`). The Optuna SQLite study
+above remains the source of truth for resuming/inspecting a sweep programmatically; W&B is a
+parallel, browsable record of the same trials -- useful for the parallel-coordinates/comparison
+views its UI gives you for free. See [Experiment Tracking with W&B](../explanation/wandb_tracking.md)
+for why it's wired this way (manual logging, not the `WeightsAndBiasesCallback` helper).
