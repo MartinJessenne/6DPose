@@ -35,7 +35,8 @@ CLI Configuration Overrides:
   model.profile:<name>          Tuning profile for the chosen method (required); run
                                 `uv run benchmark.py model:<algo> --help` to list them.
   --sweep / --no-sweep          Flag to execute the Optuna hyperparameter sweep (default: no-sweep).
-  --name NAME                   Custom name for the sweep (creates 'optuna_<NAME>.db' storage).
+  --name NAME                   Name for this run -- the Optuna study (-> 'optuna_<NAME>.db')
+                                in sweep mode, or this benchmark's W&B run name otherwise.
   --trials NUM                  Number of optimization trials to execute (default: 30).
   --eval-size NUM                Number of validation samples to evaluate per trial/benchmark (default: 20).
   --seed NUM                    Optional fixed seed to ensure reproducibility.
@@ -521,6 +522,7 @@ def main():
         }
         with wandb.init(
             project="6dpose",
+            name=args.name,
             group=estimator_cls.__name__,
             job_type="benchmark",
             config=wandb_config,
