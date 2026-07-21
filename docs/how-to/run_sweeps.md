@@ -61,10 +61,13 @@ for trial in study.best_trials:
 
 ## Step 3: The Same Sweep in Weights & Biases
 
-Every trial also opens its own W&B run (project `6dpose`, tagged with the study name), logging
-the trial's suggested hyperparameters plus the diagnostics also stored as Optuna user-attrs
-(`average_recall`, `detection_failures`, `pose_failures`, `flip_rate`). The Optuna SQLite study
-above remains the source of truth for resuming/inspecting a sweep programmatically; W&B is a
-parallel, browsable record of the same trials -- useful for the parallel-coordinates/comparison
-views its UI gives you for free. See [Experiment Tracking with W&B](../explanation/wandb_tracking.md)
-for why it's wired this way (manual logging, not the `WeightsAndBiasesCallback` helper).
+The whole sweep -- one CLI execution -- opens exactly one W&B run (project `6dpose`, named after
+the study), with every trial logging its suggested hyperparameters and diagnostics
+(`average_recall`, `detection_failures`, `pose_failures`, `flip_rate`) into that same run at
+`step=trial.number`. Once the sweep finishes (or is interrupted), that run gets a native scatter
+chart -- `p95_time` vs. `accuracy_score`, one point per completed trial -- built from every
+`COMPLETE` trial in the Optuna study, giving you the same Pareto-front view Optuna Dashboard shows,
+inside W&B. The Optuna SQLite study above remains the source of truth for resuming/inspecting a
+sweep programmatically; W&B is a parallel, browsable record built from it. See
+[Experiment Tracking with W&B](../explanation/wandb_tracking.md) for the full design (why one run
+per sweep and not one per trial, why manual logging and not `WeightsAndBiasesCallback`).
