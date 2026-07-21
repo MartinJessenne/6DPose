@@ -1,9 +1,0 @@
-_target_: methods.ppf.PPFEstimator
-params:
-  ppf_sampling_step: 0.1
-  ppf_distance_step: 0.02
-  ppf_match_threshold: 0.06
-  ppf_match_tolerance: 0.03
-  icp_max_correspondence_distance: 0.17528702727791115
-  icp_max_iterations: 10
-extrinsic: ${camera.extrinsic}

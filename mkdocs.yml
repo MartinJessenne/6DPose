@@ -27,7 +27,7 @@ nav:
     - Overview: tutorials/index.md
     - Visualizing the 3D Pipeline: tutorials/01_pose_estimation.md
     - Comparing RANSAC vs PPF: tutorials/02_method_comparison.md
-    - Configuration with Hydra: tutorials/03_config_system.md
+    - Configuration with tyro: tutorials/03_config_system.md
   - How-to Guides:
     - Overview: how-to/index.md
     - Add a New Model: how-to/add_estimator.md
@@ -37,6 +37,7 @@ nav:
     - System Architecture: explanation/architecture.md
     - Coordinate Frames & Math: explanation/coordinate_frames.md
     - Pipeline Symmetries & Sinks: explanation/limitations.md
+    - Configuration with tyro: explanation/tyro_cli_config.md
   - API Reference:
     - Overview: reference/index.md
     - Core Pipeline (pipeline): reference/pipeline.md

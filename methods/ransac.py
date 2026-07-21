@@ -1,5 +1,6 @@
 import copy
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 import numpy as np
 import open3d as o3d
@@ -12,28 +13,20 @@ if TYPE_CHECKING:
 # =====================================================================
 # 1. PARAMETER CLASS
 # =====================================================================
+@dataclass(frozen=True)
 class RansacParams:
-    """Hyperparameters specific to the FPFH + RANSAC + ICP matching method."""
-    def __init__(
-        self,
-        voxel_size: float = 0.06,
-        ransac_max_iterations: int = 100000,
-        icp_max_correspondence_distance: float = 0.15,
-        icp_max_iterations: int = 100
-    ):
-        """
-        Initializes hyperparameters for RANSAC global registration and ICP.
-        
-        Args:
-            voxel_size (float): Voxel size (in meters) for downsampling point clouds.
-            ransac_max_iterations (int): Maximum iterations for RANSAC validation checking.
-            icp_max_correspondence_distance (float): Max correspondence distance threshold for ICP.
-            icp_max_iterations (int): Max iteration count for the final ICP refinement.
-        """
-        self.voxel_size = voxel_size
-        self.ransac_max_iterations = ransac_max_iterations
-        self.icp_max_correspondence_distance = icp_max_correspondence_distance
-        self.icp_max_iterations = icp_max_iterations
+    """Hyperparameters specific to the FPFH + RANSAC + ICP matching method.
+
+    Attributes:
+        voxel_size: Voxel size (in meters) for downsampling point clouds.
+        ransac_max_iterations: Maximum iterations for RANSAC validation checking.
+        icp_max_correspondence_distance: Max correspondence distance threshold for ICP.
+        icp_max_iterations: Max iteration count for the final ICP refinement.
+    """
+    voxel_size: float = 0.06
+    ransac_max_iterations: int = 100000
+    icp_max_correspondence_distance: float = 0.15
+    icp_max_iterations: int = 100
 
 
 # =====================================================================

@@ -2,6 +2,7 @@ import unittest
 import copy
 import numpy as np
 import open3d as o3d
+from cli_config import CameraConfig
 from methods.base import BasePoseEstimator
 from methods.ppf import PPFEstimator, PPFParams
 from methods.ransac import RansacEstimator, RansacParams
@@ -11,14 +12,10 @@ class TestEstimatorPreparation(unittest.TestCase):
     def setUp(self):
         # Clear global cache before each test
         BasePoseEstimator._PREPARATION_CACHE.clear()
-        
-        # Load extrinsic from config as the source of truth
-        import yaml
-        import os
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "camera", "default.yaml")
-        with open(config_path) as f:
-            cam_cfg = yaml.safe_load(f)
-        self.extrinsic = np.array(cam_cfg["extrinsic"], dtype=np.float64)
+
+        # Load extrinsic from cli_config's CameraConfig as the source of truth
+        # (replaces config/camera/default.yaml, removed in the tyro migration).
+        self.extrinsic = np.array(CameraConfig().extrinsic, dtype=np.float64)
 
         # Create a simple box mesh to act as a CAD model
         self.mesh = o3d.geometry.TriangleMesh.create_box(width=1.0, height=1.0, depth=1.0)
@@ -145,13 +142,8 @@ class TestEstimatorPreparation(unittest.TestCase):
 
     def test_transform_chain_regression(self):
         # Expected robot frame ground truth translation is [3.2056, 0.0, 0.0100] when using orthonormal matrix
-        # Load extrinsic from the single source of truth (config/camera/default.yaml)
-        import yaml
-        import os
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "camera", "default.yaml")
-        with open(config_path) as f:
-            cam_cfg = yaml.safe_load(f)
-        T_robot_camera = np.array(cam_cfg["extrinsic"], dtype=np.float64)
+        # Load extrinsic from cli_config's CameraConfig, the single source of truth.
+        T_robot_camera = np.array(CameraConfig().extrinsic, dtype=np.float64)
         
         T_world_camera = np.eye(4)
         

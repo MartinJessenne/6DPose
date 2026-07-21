@@ -1,6 +1,6 @@
 # How to Run Parameter Sweeps
 
-This guide explains how to execute multi-objective hyperparameter optimization sweeps using Optuna and Hydra configuration overrides.
+This guide explains how to execute multi-objective hyperparameter optimization sweeps using Optuna, with model/algorithm selection via tyro CLI overrides.
 
 ---
 
@@ -8,21 +8,23 @@ This guide explains how to execute multi-objective hyperparameter optimization s
 
 Parameter sweeps optimize matching thresholds, downsampling parameters, and solver limits to find the Pareto-optimal frontier between **Accuracy** (low translation and rotation error) and **Execution Time**. The optimization results are logged directly to a local SQLite database file.
 
+The sweep mechanics themselves (Optuna's `suggest_params`/multi-objective study/Pareto front) are unchanged by the tyro migration -- only the CLI syntax for picking a starting model/profile changed. See [Configuration with tyro](../explanation/tyro_cli_config.md) for the full CLI picture.
+
 ---
 
 ## Step 1: Run a Parameter Sweep
 
-To start a sweep, set `sweep=true` and choose your model on the CLI. 
+To start a sweep, pass `--sweep` and choose your algorithm + a starting profile on the CLI (the sweep explores its own hyperparameter search space regardless of which profile you pick -- see `suggest_params` in each `methods/*.py` file -- but `model:<algo>` still selects *which* estimator class is being tuned).
 
 ### Basic Command:
 ```bash
-uv run benchmark.py model=ransac sweep=true
+uv run benchmark.py --sweep model:ransac model.profile:default
 ```
 
 ### Config Customizations:
-You can specify the number of Optuna trials, the size of the validation evaluation slice per trial, and a unique name for the Optuna study:
+You can specify the number of Optuna trials, the size of the validation evaluation slice per trial, and a unique name for the Optuna study. Remember: scalar options come *before* the subcommand tokens.
 ```bash
-uv run benchmark.py model=ppf sweep=true trials=50 eval_size=30 name="PPF_Tuning"
+uv run benchmark.py --sweep --trials 50 --eval-size 30 --name "PPF_Tuning" model:ppf model.profile:default
 ```
 
 ---
