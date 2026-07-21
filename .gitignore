@@ -30,3 +30,11 @@ site/
 frame_*.npy
 outputs/
 outputs
+
+# W&B local run-metadata cache (still uploaded to the cloud project; this is
+# just the local mirror wandb.init() writes even when online).
+wandb/
+
+# Sweep result databases: small enough to keep deliberately-committed ones
+# (see git history), but new sweep runs shouldn't get auto-added by accident.
+sweeps/*.db

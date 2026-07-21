@@ -38,6 +38,7 @@ nav:
     - Coordinate Frames & Math: explanation/coordinate_frames.md
     - Pipeline Symmetries & Sinks: explanation/limitations.md
     - Configuration with tyro: explanation/tyro_cli_config.md
+    - Experiment Tracking with W&B: explanation/wandb_tracking.md
   - API Reference:
     - Overview: reference/index.md
     - Core Pipeline (pipeline): reference/pipeline.md
