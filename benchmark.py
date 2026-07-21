@@ -52,6 +52,7 @@ import numpy as np
 
 import open3d as o3d
 import optuna
+import plotly.graph_objects as go
 import tyro
 import wandb
 from datasets import Dataset
@@ -263,6 +264,85 @@ def evaluate_pipeline(
 # =====================================================================
 # 3. OPTUNA SWEEP STUDY (MULTI-OBJECTIVE OPTIMIZATION)
 # =====================================================================
+def build_pareto_figure(pareto, dominated, param_names, study_name):
+    """Build the interactive Pareto-front scatter logged to W&B at sweep end.
+
+    x = p95 latency (objective 2), y = accuracy loss / 1-AR (objective 1); both are
+    minimized, so the bottom-left corner is best. Dominated trials form a recessive
+    gray field, Pareto-optimal trials (study.best_trials) are highlighted in blue and
+    connected by the frontier line. Every point's hover carries its trial number and
+    full hyperparameter set, so any point on the frontier is traceable straight back
+    to the iteration and config that produced it -- which a bare wandb.plot.scatter
+    (fixed tooltip, x/y only) cannot do.
+    """
+    BLUE, GRAY, GRID, AXIS = "#2a78d6", "#898781", "#e1e0d9", "#c3c2b7"
+    INK, INK2, SURFACE = "#0b0b0b", "#52514e", "#fcfcfb"
+
+    # customdata columns, in order: trial_number, *params, average_recall, flip_rate.
+    def customdata(trials):
+        return [
+            [t.number]
+            + [t.params.get(name) for name in param_names]
+            + [t.user_attrs.get("average_recall"), t.user_attrs.get("flip_rate")]
+            for t in trials
+        ]
+
+    hover_lines = [
+        "<b>Trial %{customdata[0]}</b>",
+        "accuracy loss (1−AR): %{y:.4f}",
+        "p95 latency: %{x:.3f}s",
+    ]
+    for i, name in enumerate(param_names, start=1):
+        hover_lines.append(f"{name}: %{{customdata[{i}]}}")
+    hover_lines.append(f"average_recall: %{{customdata[{len(param_names) + 1}]:.3f}}")
+    hover_lines.append(f"flip_rate: %{{customdata[{len(param_names) + 2}]:.3f}}")
+    hovertemplate = "<br>".join(hover_lines) + "<extra></extra>"
+
+    fig = go.Figure()
+
+    # Dominated trials -- recessive gray field, drawn first (underneath).
+    fig.add_trace(go.Scatter(
+        x=[t.values[1] for t in dominated], y=[t.values[0] for t in dominated],
+        mode="markers", name="Dominated trials",
+        marker=dict(color=GRAY, size=8, opacity=0.55),
+        customdata=customdata(dominated), hovertemplate=hovertemplate,
+    ))
+
+    # Pareto frontier -- straight line through the optimal trials sorted by latency.
+    pareto_sorted = sorted(pareto, key=lambda t: t.values[1])
+    fig.add_trace(go.Scatter(
+        x=[t.values[1] for t in pareto_sorted], y=[t.values[0] for t in pareto_sorted],
+        mode="lines", name="Pareto frontier",
+        line=dict(color=BLUE, width=2), hoverinfo="skip",
+    ))
+
+    # Pareto-optimal trials -- highlighted, drawn on top.
+    fig.add_trace(go.Scatter(
+        x=[t.values[1] for t in pareto], y=[t.values[0] for t in pareto],
+        mode="markers", name="Pareto-optimal",
+        marker=dict(color=BLUE, size=12, line=dict(color=SURFACE, width=1.5)),
+        customdata=customdata(pareto), hovertemplate=hovertemplate,
+    ))
+
+    fig.update_layout(
+        title=dict(text=f"Pareto Front — {study_name}", font=dict(size=18, color=INK)),
+        template="plotly_white",
+        paper_bgcolor=SURFACE, plot_bgcolor=SURFACE,
+        font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif", color=INK2, size=13),
+        xaxis=dict(title="p95 latency (s)  →  slower", gridcolor=GRID, zeroline=False,
+                   linecolor=AXIS, ticks="outside", tickcolor=AXIS),
+        yaxis=dict(title="accuracy loss (1 − AR)  →  worse", gridcolor=GRID, zeroline=False,
+                   linecolor=AXIS, ticks="outside", tickcolor=AXIS),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hoverlabel=dict(bgcolor="white", font_size=12, bordercolor=GRID),
+        margin=dict(l=70, r=30, t=70, b=90),
+        annotations=[dict(text="← better (fast & accurate)", x=0.01, y=0.02,
+                          xref="paper", yref="paper", showarrow=False,
+                          font=dict(color=GRAY, size=12))],
+    )
+    return fig
+
+
 def run_parameter_sweep(
     dataset, model, camera, study_name, estimator_cls: type[BasePoseEstimator], 
     sweep_size: int, n_trials: int, meshes: dict[str, o3d.geometry.TriangleMesh],
@@ -434,6 +514,10 @@ def run_parameter_sweep(
             completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
             if completed:
                 param_names = list(completed[0].params.keys())
+
+                # Sortable/filterable raw table -- keeps the per-trial data
+                # queryable in W&B alongside the chart (and is the searchable
+                # companion to the frontier plot's per-point hover).
                 columns = ["trial_number", *param_names, "accuracy_score", "p95_time", "average_recall", "flip_rate"]
                 rows = [
                     [
@@ -446,11 +530,16 @@ def run_parameter_sweep(
                     ]
                     for t in completed
                 ]
-                table = wandb.Table(columns=columns, data=rows)
+
+                # Split trials into Pareto-optimal (study.best_trials, the
+                # non-dominated set) vs. everything else (dominated).
+                best_numbers = {t.number for t in study.best_trials}
+                pareto = [t for t in completed if t.number in best_numbers]
+                dominated = [t for t in completed if t.number not in best_numbers]
+
                 run.log({
-                    "pareto_front": wandb.plot.scatter(
-                        table, "p95_time", "accuracy_score", title=f"Pareto Front - {study_name}"
-                    )
+                    "pareto_front": build_pareto_figure(pareto, dominated, param_names, study_name),
+                    "pareto_table": wandb.Table(columns=columns, data=rows),
                 })
 
     print("\n" + "=" * 50)
