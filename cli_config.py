@@ -262,9 +262,30 @@ class Ransac3DoFPreset:
 
 
 ModelPreset = Union[
-    Annotated[PPFPreset, tyro.conf.subcommand(name="ppf")],
-    Annotated[RansacPreset, tyro.conf.subcommand(name="ransac")],
-    Annotated[Ransac3DoFPreset, tyro.conf.subcommand(name="ransac3dof")],
+    Annotated[
+        PPFPreset,
+        tyro.conf.subcommand(
+            name="ppf",
+            description="profiles: model.profile:default, model.profile:rt-opt",
+        ),
+    ],
+    Annotated[
+        RansacPreset,
+        tyro.conf.subcommand(
+            name="ransac",
+            description=(
+                "profiles: model.profile:default, model.profile:pareto1, "
+                "model.profile:realtime, model.profile:rt-opt"
+            ),
+        ),
+    ],
+    Annotated[
+        Ransac3DoFPreset,
+        tyro.conf.subcommand(
+            name="ransac3dof",
+            description="profiles: model.profile:default, model.profile:acc-opt, model.profile:rt-opt",
+        ),
+    ],
 ]
 
 
