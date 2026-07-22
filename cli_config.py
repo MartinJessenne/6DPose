@@ -106,6 +106,24 @@ PPFProfileSelect = Union[
             ),
         ),
     ],
+    Annotated[
+        PPFProfile,
+        tyro.conf.subcommand(
+            name="trial28",
+            # Optuna sweep Trial #28: accuracy ~93.0%, p95 latency ~0.56s, AR ~7.0%, flip rate ~42.5%.
+            default=PPFProfile(
+                params=PPFParams(
+                    ppf_sampling_step=0.04,
+                    ppf_distance_step=0.05,
+                    ppf_match_threshold=0.05,
+                    ppf_match_tolerance=0.04,
+                    icp_max_correspondence_distance=0.124003893980807,
+                    icp_max_iterations=20,
+                ),
+                depth_trunc=2.6,
+            ),
+        ),
+    ],
 ]
 
 
@@ -166,6 +184,21 @@ RansacProfileSelect = Union[
             ),
         ),
     ],
+    Annotated[
+        RansacProfile,
+        tyro.conf.subcommand(
+            name="trial15",
+            # Optuna sweep Trial #15: accuracy ~94.8%, p95 latency ~0.40s, AR ~5.2%, flip rate ~56.4%.
+            default=RansacProfile(
+                params=RansacParams(
+                    voxel_size=0.1,
+                    icp_max_correspondence_distance=0.222396429505729,
+                    icp_max_iterations=50,
+                ),
+                depth_trunc=5.6,
+            ),
+        ),
+    ],
 ]
 
 
@@ -196,23 +229,21 @@ Ransac3DoFProfileSelect = Union[
         Ransac3DoFProfile,
         tyro.conf.subcommand(
             name="acc_opt",
-            # Optuna sweep Ransac3dofZgate (+ later front-crop sweep): best
-            # accuracy trade-off found. front_crop_depth kills 180-degree
-            # flips (A/B on 40 samples: AR 0.069 -> 0.154, flip 45.9% -> 21.4%).
+            # Optuna sweep optuna_Ransac3DofCrop_Sweep Trial #1: highest average recall (~0.251, p95 latency ~1.67s).
             default=Ransac3DoFProfile(
                 params=Ransac3DoFParams(
                     voxel_size=0.02,
-                    ransac_max_iterations=14029,
-                    icp_max_correspondence_distance=0.07280260785158235,
-                    icp_max_iterations=80,
+                    ransac_max_iterations=8192,
+                    icp_max_correspondence_distance=0.10100435818212444,
+                    icp_max_iterations=70,
                     z_offset=0.01,
-                    z_gate_threshold=0.24838996628120097,
-                    edge_length_threshold=0.8315299309347685,
-                    front_crop_depth=0.32839186866723463,
+                    z_gate_threshold=0.30986258444115694,
+                    edge_length_threshold=0.85427888273254,
+                    front_crop_depth=0.8092762136127303,
                     ransac_confidence=0.999,
                     seed=0,
                 ),
-                depth_trunc=3.8,
+                depth_trunc=3.2,
             ),
         ),
     ],
@@ -220,33 +251,81 @@ Ransac3DoFProfileSelect = Union[
         Ransac3DoFProfile,
         tyro.conf.subcommand(
             name="rt_opt",
-            # Optuna sweep: real-time deployment trade-off.
+            # Optuna sweep optuna_Ransac3DofCrop_Sweep Trial #35: real-time profile (p95 latency ~0.295s, flip rate ~17.6%).
             default=Ransac3DoFProfile(
                 params=Ransac3DoFParams(
-                    voxel_size=0.04,
-                    ransac_max_iterations=2772,
-                    icp_max_correspondence_distance=0.06404478356487074,
-                    icp_max_iterations=50,
+                    voxel_size=0.07,
+                    ransac_max_iterations=2572,
+                    icp_max_correspondence_distance=0.053439448281393,
+                    icp_max_iterations=10,
                     z_offset=0.01,
-                    z_gate_threshold=0.12938125580720045,
-                    edge_length_threshold=0.831518113921687,
-                    front_crop_depth=0.47964349266741707,
+                    z_gate_threshold=0.1343018655763445,
+                    edge_length_threshold=0.826763881996128,
+                    front_crop_depth=1.5094694353528446,
                     ransac_confidence=0.999,
                     seed=0,
                 ),
-                depth_trunc=2.2,
+                depth_trunc=2.6,
             ),
         ),
     ],
 ]
 
 
-def _ransac3dof_fullmesh_default_profile() -> Ransac3DoFProfile:
-    # Deliberately does NOT reuse Ransac3DoFProfileSelect's "default" -- that
-    # one bakes in front_crop_depth=0.35, which would silently defeat the
-    # point of this no-crop ablation baseline in eval mode. z_offset is kept
-    # (a sensor-rig measurement, unrelated to cropping).
-    return Ransac3DoFProfile(params=Ransac3DoFParams(z_offset=0.01), depth_trunc=3.0)
+Ransac3DoFFullMeshProfileSelect = Union[
+    Annotated[
+        Ransac3DoFProfile,
+        tyro.conf.subcommand(
+            name="default",
+            default=Ransac3DoFProfile(
+                params=Ransac3DoFParams(z_offset=0.01),
+                depth_trunc=3.0,
+            ),
+        ),
+    ],
+    Annotated[
+        Ransac3DoFProfile,
+        tyro.conf.subcommand(
+            name="acc_opt",
+            # Optuna sweep optuna_Ransac3DofFullMesh_Sweep Trial #25: accuracy-focused full mesh profile
+            default=Ransac3DoFProfile(
+                params=Ransac3DoFParams(
+                    voxel_size=0.04,
+                    ransac_max_iterations=39267,
+                    icp_max_correspondence_distance=0.07851111384977721,
+                    icp_max_iterations=40,
+                    z_offset=0.01,
+                    z_gate_threshold=0.3186998846185683,
+                    edge_length_threshold=0.8389466396574985,
+                    ransac_confidence=0.999,
+                    seed=0,
+                ),
+                depth_trunc=3.0,
+            ),
+        ),
+    ],
+    Annotated[
+        Ransac3DoFProfile,
+        tyro.conf.subcommand(
+            name="rt_opt",
+            # Optuna sweep optuna_Ransac3DofFullMesh_Sweep Trial #34: real-time full mesh profile
+            default=Ransac3DoFProfile(
+                params=Ransac3DoFParams(
+                    voxel_size=0.06,
+                    ransac_max_iterations=2847,
+                    icp_max_correspondence_distance=0.08274659221521605,
+                    icp_max_iterations=50,
+                    z_offset=0.01,
+                    z_gate_threshold=0.17182370500647015,
+                    edge_length_threshold=0.8556119078087416,
+                    ransac_confidence=0.999,
+                    seed=0,
+                ),
+                depth_trunc=4.1,
+            ),
+        ),
+    ],
+]
 
 
 @dataclass(frozen=True)
@@ -277,7 +356,7 @@ class Ransac3DoFPreset:
 class Ransac3DoFFullMeshPreset:
     """No-crop ablation baseline -- see Ransac3DoFFullMeshEstimator."""
     ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = Ransac3DoFFullMeshEstimator
-    profile: Ransac3DoFProfile = field(default_factory=_ransac3dof_fullmesh_default_profile)
+    profile: Ransac3DoFFullMeshProfileSelect
 
 
 ModelPreset = Union[
@@ -285,7 +364,7 @@ ModelPreset = Union[
         PPFPreset,
         tyro.conf.subcommand(
             name="ppf",
-            description="profiles: model.profile:default, model.profile:rt-opt",
+            description="profiles: model.profile:default, model.profile:rt-opt, model.profile:trial28",
         ),
     ],
     Annotated[
@@ -294,7 +373,7 @@ ModelPreset = Union[
             name="ransac",
             description=(
                 "profiles: model.profile:default, model.profile:pareto1, "
-                "model.profile:realtime, model.profile:rt-opt"
+                "model.profile:realtime, model.profile:rt-opt, model.profile:trial15"
             ),
         ),
     ],
@@ -309,11 +388,7 @@ ModelPreset = Union[
         Ransac3DoFFullMeshPreset,
         tyro.conf.subcommand(
             name="ransac3dof-fullmesh",
-            description=(
-                "SE(2) no-crop ablation baseline (historical, pre-front-crop). "
-                "No profile subcommand -- single fixed default, override via "
-                "--model.profile.params.<field>."
-            ),
+            description="profiles: model.profile:default, model.profile:acc-opt, model.profile:rt-opt",
         ),
     ],
 ]
