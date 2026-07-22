@@ -45,6 +45,7 @@ CLI Configuration Overrides:
 """
 
 import dataclasses
+import glob
 import os
 import time
 
@@ -264,6 +265,28 @@ def evaluate_pipeline(
 # =====================================================================
 # 3. OPTUNA SWEEP STUDY (MULTI-OBJECTIVE OPTIMIZATION)
 # =====================================================================
+def log_input_artifacts(run, yolo_cfg, dataset_cfg):
+    """Register the YOLO weights and test dataset as W&B *reference* artifacts.
+
+    checksum=True records a content hash of each referenced file -- no bytes are
+    uploaded, so an unchanged model/dataset produces no new version while any
+    modification mints one. That version bump is the "was this input touched?"
+    signal for the cross-commit report.
+    """
+    model_art = wandb.Artifact("yolo-detector", type="model",
+                               metadata={"hf_repo": yolo_cfg.repo, "hf_file": yolo_cfg.file})
+    model_art.add_reference(f"file://{os.path.abspath(yolo_cfg.local_path)}", checksum=True)
+    run.log_artifact(model_art)
+
+    # dataset_cfg.path is the HF builder name ("parquet"), not a filesystem path;
+    # the real data are the shards matching test_glob.
+    dataset_art = wandb.Artifact("test-dataset", type="dataset",
+                                 metadata={"test_glob": dataset_cfg.test_glob})
+    for shard in sorted(glob.glob(dataset_cfg.test_glob)):
+        dataset_art.add_reference(f"file://{os.path.abspath(shard)}", checksum=True)
+    run.log_artifact(dataset_art)
+
+
 def build_pareto_figure(pareto, dominated, param_names, study_name):
     """Build the interactive Pareto-front scatter logged to W&B at sweep end.
 
@@ -344,8 +367,9 @@ def build_pareto_figure(pareto, dominated, param_names, study_name):
 
 
 def run_parameter_sweep(
-    dataset, model, camera, study_name, estimator_cls: type[BasePoseEstimator], 
+    dataset, model, camera, study_name, estimator_cls: type[BasePoseEstimator],
     sweep_size: int, n_trials: int, meshes: dict[str, o3d.geometry.TriangleMesh],
+    yolo_cfg, dataset_cfg,
     extrinsic: np.ndarray = None, seed: int = None
 ):
     """
@@ -430,6 +454,8 @@ def run_parameter_sweep(
         tags=[study_name],
         config={"eval_size": sweep_size, "n_trials": n_trials, "seed": seed},
     ) as run:
+
+        log_input_artifacts(run, yolo_cfg, dataset_cfg)
 
         def objective(trial: optuna.Trial) -> tuple[float, float]:
             # 1. Suggest global parameters
@@ -603,6 +629,8 @@ def main():
             sweep_size=args.eval_size,
             n_trials=args.trials,
             meshes=meshes,
+            yolo_cfg=args.yolo,
+            dataset_cfg=args.dataset,
             extrinsic=extrinsic,
             seed=args.seed
         )
@@ -645,6 +673,8 @@ def main():
             job_type="benchmark",
             config=wandb_config,
         ) as run:
+            log_input_artifacts(run, args.yolo, args.dataset)
+
             error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
                 dataset, model, camera, estimator, eval_indices, meshes, depth_trunc=args.model.profile.depth_trunc
             )
