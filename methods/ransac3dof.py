@@ -85,6 +85,9 @@ class Ransac3DoFParams(RansacParams):
             towing face) instead of the full cart. The slab is asymmetric,
             which disambiguates the 180-degree flip. None (default) uses the
             full mesh.
+        free_space_threshold: Maximum ratio of free-space depth projection
+            violations allowed before triggering the 180-degree flip search.
+        free_space_margin: Depth margin in meters for free-space violation checks.
     """
     z_offset: float | None = None
     z_gate_threshold: float = 0.09
@@ -92,6 +95,8 @@ class Ransac3DoFParams(RansacParams):
     ransac_confidence: float = 0.999
     seed: int | None = 0
     front_crop_depth: float | None = None
+    free_space_threshold: float = 0.02
+    free_space_margin: float = 0.03
 
 
 # =====================================================================
@@ -131,6 +136,8 @@ class Ransac3DoFEstimator(RansacEstimator):
 
         super().__init__(params=params, extrinsic=extrinsic)
         self._active_z_offset = 0.0
+        self._active_frame = None
+        self._active_cart_type = None
 
     def _get_prep_params_key(self) -> tuple:
         # front_crop_depth changes the prepared model representation, so it
@@ -138,9 +145,57 @@ class Ransac3DoFEstimator(RansacEstimator):
         return (self.params.voxel_size, self.params.front_crop_depth)
 
     def prepare(self, cad_mesh, cart_type: str) -> None:
+        prep_params = self._get_prep_params_key()
+        cache_key = (self.__class__.__name__, cart_type, prep_params)
+        if cache_key in self._PREPARATION_CACHE:
+            return
+
+        stale_keys = [
+            k for k in self._PREPARATION_CACHE
+            if k[0] == self.__class__.__name__ and k[1] == cart_type and k[2] != prep_params
+        ]
+        for k in stale_keys:
+            del self._PREPARATION_CACHE[k]
+
+        mesh_copy = copy.deepcopy(cad_mesh)
+        mesh_copy.compute_vertex_normals()
+
+        # Full CAD model point cloud for complete SE(2) ICP alignment accuracy
+        model_pc = mesh_copy.sample_points_uniformly(number_of_points=2000)
+
+        # Dedicated front-slab point cloud for hypothesis selection filter
+        crop_depth = self.params.front_crop_depth if self.params.front_crop_depth is not None else 0.35
+        try:
+            slab_mesh = crop_front_face(mesh_copy, depth=crop_depth)
+            front_slab_pc = slab_mesh.sample_points_uniformly(number_of_points=1000)
+        except Exception:
+            front_slab_pc = copy.deepcopy(model_pc)
+
+        # RANSAC registration geometry
         if self.params.front_crop_depth is not None:
-            cad_mesh = crop_front_face(cad_mesh, self.params.front_crop_depth)
-        super().prepare(cad_mesh, cart_type)
+            try:
+                ransac_mesh = crop_front_face(mesh_copy, depth=self.params.front_crop_depth)
+            except Exception:
+                ransac_mesh = mesh_copy
+        else:
+            ransac_mesh = mesh_copy
+
+        voxel_size = self.params.voxel_size
+        ransac_pc = ransac_mesh.sample_points_uniformly(number_of_points=2000)
+        model_down = ransac_pc.voxel_down_sample(voxel_size)
+        model_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
+
+        model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+            model_down,
+            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
+        )
+
+        self._PREPARATION_CACHE[cache_key] = {
+            "model_pc": model_pc,
+            "front_slab_pc": front_slab_pc,
+            "model_down": model_down,
+            "model_fpfh": model_fpfh,
+        }
 
     def estimate_pose(self, pcd, cad_mesh, cart_type=None, **kwargs):
         # Resolve the z offset for THIS cart before the pipeline runs: the
@@ -151,6 +206,9 @@ class Ransac3DoFEstimator(RansacEstimator):
             self._active_z_offset = self.params.z_offset
         else:
             self._active_z_offset = derive_z_offset(cad_mesh)
+
+        self._active_frame = kwargs.get("frame", None)
+        self._active_cart_type = cart_type
 
         # Only crop cad_mesh for lazy local fallback (when cart_type is None).
         # When cart_type is specified, prepare() has already cached the cropped
@@ -194,6 +252,14 @@ class Ransac3DoFEstimator(RansacEstimator):
                 "prepare_scene_point_cloud, which estimates and orients them."
             )
 
+        front_slab_pc = None
+        if hasattr(self, "_active_cart_type") and self._active_cart_type is not None:
+            cache_key = (self.__class__.__name__, self._active_cart_type, self._get_prep_params_key())
+            if cache_key in self._PREPARATION_CACHE:
+                front_slab_pc = self._PREPARATION_CACHE[cache_key].get("front_slab_pc")
+
+        frame = getattr(self, "_active_frame", None)
+
         result = refine_pose_dual_hypothesis_se2(
             model_points=np.asarray(model_pc.points),
             scene_points=scene_points,
@@ -201,6 +267,11 @@ class Ransac3DoFEstimator(RansacEstimator):
             T_init=np.asarray(T_init),
             max_correspondence_distance=self.params.icp_max_correspondence_distance,
             max_iterations=self.params.icp_max_iterations,
+            front_slab_pc=front_slab_pc,
+            frame=frame,
+            extrinsic=self.extrinsic,
+            free_space_threshold=self.params.free_space_threshold,
+            free_space_margin=self.params.free_space_margin,
         )
         return result.transformation
 
@@ -237,6 +308,7 @@ class Ransac3DoFEstimator(RansacEstimator):
         # halved the flip rate and doubled AR in A/B benchmarks; the slab
         # depth trades feature support against re-imported symmetry.
         params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 10.0)
+        params["free_space_threshold"] = trial.suggest_float("free_space_threshold", 0.005, 0.08)
         return params
 
 

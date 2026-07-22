@@ -448,36 +448,39 @@ def process_and_reconstruct(
     depth_bytes: bytes,
     result: list,
     camera: Camera,
-    depth_trunc: float = 3.0
-) -> tuple[str, o3d.geometry.PointCloud]:
+    depth_trunc: float = 3.0,
+    return_frame: bool = False
+) -> tuple[str, o3d.geometry.PointCloud] | tuple[str, o3d.geometry.PointCloud, MaskedImageFrame]:
     """
     Extracts the target cart segmentation mask, crops depth and RGB data,
     and reconstructs the 3D point cloud of the target instance in the camera frame.
-    
+
     Args:
         img (np.ndarray): Original raw RGB image.
         depth_bytes (bytes): The raw depth buffer bytes.
         result: The YOLO Results object.
         camera (Camera): The Camera intrinsics instance.
         depth_trunc (float): Max depth to include in the point cloud.
-        
+        return_frame (bool): If True, also returns the intermediate MaskedImageFrame.
+
     Returns:
         tuple containing:
             - cart_type (str): The recognized class name (e.g., 'picanol').
             - pcd (o3d.geometry.PointCloud): Reconstructed 3D point cloud in camera frame.
+            - frame (MaskedImageFrame, optional): Returned if return_frame is True.
     """
     # Prepare depth tensor dynamically using the shape of the original image
     depth_1d = np.frombuffer(depth_bytes, np.float32)
     img_np = np.array(img)
     height, width = img_np.shape[:2]
     depth_tensor = torch.tensor(depth_1d.reshape((height, width)).copy())
-    
+
     # Select target mask and crop parameters
     cart_type, bbox, mask = select_target_detection(result)
-    
+
     # Convert original RGB image (from BGR YOLO result) to a PyTorch tensor on CPU
     orig_img_tensor = torch.from_numpy(result[0].orig_img[..., ::-1].copy())
-    
+
     # Crop and mask inputs, producing the type-safe MaskedImageFrame
     frame = crop_and_mask_inputs(
         orig_img=orig_img_tensor,
@@ -486,11 +489,15 @@ def process_and_reconstruct(
         bbox=bbox,
         camera=camera
     )
-    
+
     # Reconstruct 3D Point Cloud using camera properties and MaskedImageFrame
     pcd = point_cloud_processing(frame, depth_trunc=depth_trunc)
-    
+
+    if return_frame:
+        return cart_type, pcd, frame
+
     return cart_type, pcd
+
 
 
 def load_cad_meshes(meshes_dir: str = None) -> dict[str, o3d.geometry.TriangleMesh]:

@@ -215,7 +215,9 @@ def evaluate_pipeline(
             
         # 2. Segment and Reconstruct Point Cloud
         try:
-            cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera, depth_trunc=depth_trunc)
+            cart_type, pcd, frame = process_and_reconstruct(
+                img, depth_bytes, result, camera, depth_trunc=depth_trunc, return_frame=True
+            )
         except Exception:
             logging.exception(f"PointCloud processing failed for index {sample_idx}")
             pose_failures += 1
@@ -231,7 +233,7 @@ def evaluate_pipeline(
         # 3. Perform 6D Pose Estimation with timing
         start_time = time.time()
         try:
-            T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type)
+            T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type, frame=frame)
             if T_final is None:
                 logging.error(f"Pose estimator returned None for index {sample_idx}")
                 pose_failures += 1

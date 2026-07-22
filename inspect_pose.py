@@ -178,7 +178,9 @@ def run_random_inspection(
             
         # 2. Segment and Reconstruct 3D Point Cloud
         # This isolates the cart points and projects them to camera-frame 3D coordinates.
-        cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera, depth_trunc=depth_trunc)
+        cart_type, pcd, frame = process_and_reconstruct(
+            img, depth_bytes, result, camera, depth_trunc=depth_trunc, return_frame=True
+        )
         print(f"Recognized class: {cart_type}")
         
         # Retrieve preloaded mesh
@@ -189,7 +191,7 @@ def run_random_inspection(
         
         # 3. Perform 6D Pose Estimation
         # This executes the selected estimation method (e.g. PPF+ICP or RANSAC+ICP)
-        T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type)
+        T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type, frame=frame)
         if T_final is None:
             print(f"Skipping Index {sample_idx}: Pose estimation failed.")
             continue
@@ -257,7 +259,9 @@ def run_targeted_inspection(
             continue
             
         # 2. Segment and Reconstruct Point Cloud
-        cart_type, pcd = process_and_reconstruct(img, depth_bytes, result, camera, depth_trunc=depth_trunc)
+        cart_type, pcd, frame = process_and_reconstruct(
+            img, depth_bytes, result, camera, depth_trunc=depth_trunc, return_frame=True
+        )
         print(f"Recognized class: {cart_type}")
         
         # Transform the point cloud to the robot frame using the estimator's extrinsic
@@ -271,7 +275,7 @@ def run_targeted_inspection(
         # 3. Load reference CAD mesh and run Pose Estimation
         cad_mesh = meshes.get(cart_type)
         if cad_mesh is not None:
-            T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type)
+            T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type, frame=frame)
             
             if T_final is not None:
                 # Retrieve ground truth pose matrix in base_link coordinates
