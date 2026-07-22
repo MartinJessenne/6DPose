@@ -1,0 +1,1577 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../limitations/">
+      
+      
+        <link rel="next" href="../wandb_tracking/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Configuration with tyro - 6DPose Project Documentation</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="cyan">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#configuration-with-tyro" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="6DPose Project Documentation" class="md-header__button md-logo" aria-label="6DPose Project Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            6DPose Project Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Configuration with tyro
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="cyan"  aria-hidden="true"  type="radio" name="__palette" id="__palette_0">
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../tutorials/" class="md-tabs__link">
+          
+  
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../how-to/" class="md-tabs__link">
+          
+  
+  
+  How-to Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Explanation
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="6DPose Project Documentation" class="md-nav__button md-logo" aria-label="6DPose Project Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    6DPose Project Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/01_pose_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Visualizing the 3D Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/02_method_comparison/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comparing RANSAC vs PPF
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/03_config_system/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration with tyro
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How-to Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    How-to Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../how-to/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../how-to/add_estimator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a New Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../how-to/run_sweeps/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run Parameter Sweeps
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Explanation
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Explanation
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    System Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../coordinate_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coordinate Frames & Math
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../limitations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Symmetries & Sinks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration with tyro
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration with tyro
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-core-idea-a-cli-is-just-a-typed-function-signature" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The core idea: a CLI is just a typed function signature
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-frozentrue-and-classvar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why frozen=True and ClassVar
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-nested-preset-hierarchy-modelpreset-preset-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The nested preset hierarchy: ModelPreset → *Preset → *Profile
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The nested preset hierarchy: ModelPreset → *Preset → *Profile">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#why-depth_trunc-lives-on-the-profile-not-the-preset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why depth_trunc lives on the profile, not the preset
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-real-tyro-gotcha-found-by-testing-not-documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A real tyro gotcha, found by testing, not documentation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-hydra-could-do-that-tyro-cant-run-directory-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What Hydra could do that tyro can't: run-directory management
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-needed-no-replacement-at-all-cameraextrinsic" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What needed no replacement at all: ${camera.extrinsic}
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#adding-a-new-algorithm-or-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a new algorithm or profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wandb_tracking/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Experiment Tracking with W&B
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Pipeline (pipeline)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/base/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Base Estimators (base)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/ransac/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RANSAC Estimator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/ppf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    PPF Estimator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-core-idea-a-cli-is-just-a-typed-function-signature" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The core idea: a CLI is just a typed function signature
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-frozentrue-and-classvar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why frozen=True and ClassVar
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-nested-preset-hierarchy-modelpreset-preset-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The nested preset hierarchy: ModelPreset → *Preset → *Profile
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The nested preset hierarchy: ModelPreset → *Preset → *Profile">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#why-depth_trunc-lives-on-the-profile-not-the-preset" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why depth_trunc lives on the profile, not the preset
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#a-real-tyro-gotcha-found-by-testing-not-documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        A real tyro gotcha, found by testing, not documentation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-hydra-could-do-that-tyro-cant-run-directory-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What Hydra could do that tyro can't: run-directory management
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-needed-no-replacement-at-all-cameraextrinsic" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What needed no replacement at all: ${camera.extrinsic}
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#adding-a-new-algorithm-or-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a new algorithm or profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="configuration-with-tyro">Configuration with tyro</h1>
+<p>This explains <em>why</em> the project moved from Hydra+OmegaConf to <a href="https://brentyi.github.io/tyro/">tyro</a>
+for its CLI/config system, and how the pieces in <code>cli_config.py</code> fit together. For hands-on usage,
+see the <a href="../../tutorials/03_config_system/">Configuration tutorial</a>.</p>
+<hr />
+<h2 id="the-core-idea-a-cli-is-just-a-typed-function-signature">The core idea: a CLI is just a typed function signature</h2>
+<p>Hydra builds its config tree from YAML files plus a <code>defaults:</code> composition list, then resolves
+<code>_target_</code> strings to dynamically import and construct classes. tyro does the equivalent job
+starting from the opposite end: you write a plain Python
+<a href="https://docs.python.org/3/library/dataclasses.html"><code>dataclass</code></a>, and <code>tyro.cli(YourDataclass)</code>
+inspects its type hints to build an <code>argparse</code>-style parser automatically. Every field becomes a
+<code>--flag</code>, nested dataclasses become dotted flag groups (<code>--camera.fx</code>), and there is no string
+that has to match a class path anywhere -- the type hint <em>is</em> the class reference.</p>
+<pre><code class="language-python">@dataclass(frozen=True)
+class CameraConfig:
+    fx: float = 639.99768
+    ...
+
+args = tyro.cli(BenchmarkArgs)   # args.camera.fx is already a float, validated
+</code></pre>
+<p>This is why <code>hydra.utils.get_class(cfg.model._target_)</code> (a runtime string → class lookup) has no
+tyro equivalent and needs none: <code>args.model.ESTIMATOR_CLS</code> is already the concrete class object,
+because the dataclass field itself was typed to be that class's config.</p>
+<h2 id="why-frozentrue-and-classvar">Why <code>frozen=True</code> and <code>ClassVar</code></h2>
+<p>Every config/params dataclass in this project (<code>RansacParams</code>, <code>Ransac3DoFParams</code>, <code>PPFParams</code> in
+<code>methods/*.py</code>, and everything in <code>cli_config.py</code>) is declared <code>@dataclass(frozen=True)</code>. This is
+a deliberate, project-wide convention, not a tyro requirement: these objects are settings, read
+once after parsing and never mutated, so making them immutable documents that intent and rules
+out an entire class of accidental-mutation bugs. (A repo-wide grep confirmed nothing ever wrote to
+<code>.params.&lt;field&gt;</code> after construction, so this cost nothing in practice.)</p>
+<p><code>ESTIMATOR_CLS</code> on each <code>*Preset</code> dataclass is annotated <code>ClassVar[type[BasePoseEstimator]]</code>
+rather than a regular field:</p>
+<pre><code class="language-python">@dataclass(frozen=True)
+class Ransac3DoFPreset:
+    ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = Ransac3DoFEstimator
+    profile: Ransac3DoFProfileSelect
+</code></pre>
+<p><code>ClassVar</code> tells both Python's <code>dataclasses</code> module and tyro "this is not an instance field" --
+it's invisible to <code>tyro.cli()</code>'s parser generation entirely. Without it, tyro would try to expose
+a nonsensical <code>--model.estimator-cls</code> flag letting you type in a class name; with it,
+<code>ESTIMATOR_CLS</code> is just a fixed piece of Python-level metadata you read as
+<code>args.model.ESTIMATOR_CLS</code>.</p>
+<h2 id="the-nested-preset-hierarchy-modelpreset-preset-profile">The nested preset hierarchy: <code>ModelPreset</code> → <code>*Preset</code> → <code>*Profile</code></h2>
+<p>The old <code>config/model/*.yaml</code> had 9 files across 3 algorithms (PPF, RANSAC, RANSAC-3DoF), each
+file being one YAML-level "preset." Structurally that's a <strong>flat list</strong>, not a tree -- Hydra's
+config groups are just directories of alternative files.</p>
+<p>Under tyro, model selection is a genuine <strong>2-level subcommand hierarchy</strong> instead:</p>
+<ol>
+<li><code>model:&lt;algorithm&gt;</code> -- exactly 3 choices, the real invariant (there really are only 3
+   estimator classes).</li>
+<li><code>model.profile:&lt;tuning&gt;</code> -- 2 to 4 choices <em>per algorithm</em>, each a <code>{params, depth_trunc}</code>
+   bundle transcribed from one of the old YAML files.</li>
+</ol>
+<pre><code class="language-python">Ransac3DoFProfileSelect = Union[
+    Annotated[Ransac3DoFProfile, tyro.conf.subcommand(name=&quot;default&quot;, default=...)],
+    Annotated[Ransac3DoFProfile, tyro.conf.subcommand(name=&quot;acc_opt&quot;, default=...)],
+    Annotated[Ransac3DoFProfile, tyro.conf.subcommand(name=&quot;rt_opt&quot;, default=...)],
+]
+
+@dataclass(frozen=True)
+class Ransac3DoFPreset:
+    ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = Ransac3DoFEstimator
+    profile: Ransac3DoFProfileSelect
+
+ModelPreset = Union[
+    Annotated[PPFPreset, tyro.conf.subcommand(name=&quot;ppf&quot;)],
+    Annotated[RansacPreset, tyro.conf.subcommand(name=&quot;ransac&quot;)],
+    Annotated[Ransac3DoFPreset, tyro.conf.subcommand(name=&quot;ransac3dof&quot;)],
+]
+</code></pre>
+<p>Why 2 levels instead of a flat 9-entry union: adding a new tuned profile to, say,
+RANSAC-3DoF only ever touches <code>Ransac3DoFProfileSelect</code> -- the top-level <code>ModelPreset</code> union
+(exactly 3 entries, one per real algorithm) never grows. The cost is one extra CLI token per
+invocation (<code>model:ransac3dof model.profile:acc-opt</code> instead of a single
+<code>model:ransac3dof_acc_opt</code>).</p>
+<h3 id="why-depth_trunc-lives-on-the-profile-not-the-preset">Why <code>depth_trunc</code> lives on the <em>profile</em>, not the <em>preset</em></h3>
+<p>In the old YAML tree, 6 of the 9 model files were <code># @package _global_</code> rewrites that set the
+<em>global</em> <code>depth_trunc</code> alongside the estimator params, while the other 3 didn't touch it at all --
+two different mechanisms for what was conceptually one atomic choice ("here is a tuned setup").
+<code>Ransac3DoFProfile</code> (and its PPF/RANSAC siblings) bundles <code>params</code> and <code>depth_trunc</code> together in
+one dataclass specifically so selecting a profile can't leave <code>depth_trunc</code> at a mismatched value
+-- there's exactly one mechanism now, and it can't desync.</p>
+<h2 id="a-real-tyro-gotcha-found-by-testing-not-documentation">A real tyro gotcha, found by testing, not documentation</h2>
+<p>While wiring this up, giving the outer <code>*Preset.profile</code> field its own default
+(<code>field(default_factory=Ransac3DoFProfile)</code>) turned out to silently break subcommand dispatch:
+tyro would just use that concrete default value regardless of which <code>model.profile:&lt;name&gt;</code> token
+was passed on the CLI, with no error. Minimal repro:</p>
+<pre><code class="language-python">@dataclass(frozen=True)
+class P:
+    x: int = 1
+    y: int = 2
+
+Sel = Union[
+    Annotated[P, tyro.conf.subcommand(name=&quot;default&quot;)],
+    Annotated[P, tyro.conf.subcommand(name=&quot;tuned&quot;, default=P(x=99, y=100))],
+]
+
+@dataclass(frozen=True)
+class Outer:
+    profile: Sel = field(default_factory=P)   # &lt;-- this default wins, always
+
+tyro.cli(Outer, args=[&quot;profile:tuned&quot;])   # returns P(x=1, y=2), NOT P(x=99, y=100)!
+</code></pre>
+<p>Removing the outer default fixes it -- but the trade-off (confirmed by testing every
+combination) is that a subcommand-typed field is <em>either</em> always required and fully switchable
+via CLI token, <em>or</em> has an implicit default but can never be switched via CLI token at all. There
+is no middle ground in this version of tyro. We chose <strong>always required</strong>: <code>model:&lt;algo&gt;</code> and
+<code>model.profile:&lt;tuning&gt;</code> must be given explicitly on every invocation now -- there's no more
+implicit "if you don't say anything you get <code>ppf</code>" the way Hydra's <code>defaults:</code> list gave for free.</p>
+<p>Two more sharp edges worth knowing, also found by running the actual CLI rather than assuming:</p>
+<ul>
+<li><strong>Option ordering matters.</strong> Top-level scalar flags (<code>--eval-size</code>, <code>--sweep</code>, ...) must come
+  <em>before</em> the subcommand tokens (<code>model:ransac3dof model.profile:acc-opt</code>), not after --
+  tyro's own error message ("Arguments are applied to the directly preceding subcommand") explains
+  why once you hit it.</li>
+<li><strong>Subcommand name tokens always render and require hyphens</strong>, even when written with
+  underscores in <code>cli_config.py</code> (<code>tyro.conf.subcommand(name="acc_opt")</code> → you type
+  <code>model.profile:acc-opt</code>). This matches <code>--flag</code> naming, but unlike flags (which accept
+  <code>--foo_bar</code> and <code>--foo-bar</code> interchangeably), subcommand tokens only match the hyphenated form.</li>
+</ul>
+<h2 id="what-hydra-could-do-that-tyro-cant-run-directory-management">What Hydra could do that tyro can't: run-directory management</h2>
+<p><code>inspect_pose.py</code> used <code>HydraConfig.get().runtime.output_dir</code> to get Hydra's auto-generated,
+timestamped per-run working directory for debug output. tyro has no equivalent feature -- it's a
+CLI parser, not a run-orchestration framework. The replacement is a one-line, hand-rolled
+<code>datetime.now().strftime(...)</code> directory name. This is fine here because that directory is
+disposable: wiped on every run and already gitignored, so no enrichment (git commit hash, etc.)
+was worth adding.</p>
+<h2 id="what-needed-no-replacement-at-all-cameraextrinsic">What needed <em>no</em> replacement at all: <code>${camera.extrinsic}</code></h2>
+<p>Hydra's <code>${camera.extrinsic}</code> interpolation let <code>config/model/*.yaml</code> reference the camera preset's
+extrinsic matrix without duplicating it. Under plain dataclasses there's simply nothing to
+resolve -- <code>args.camera.extrinsic</code> is already a real Python tuple, read directly wherever it's
+needed (<code>ESTIMATOR_CLS(params=..., extrinsic=args.camera.extrinsic)</code>). No lazy resolution, no
+circular-reference risk, no "what if the camera preset changes after the model preset is built"
+ordering question -- the interpolation wasn't a feature that got dropped, it was solved by not
+needing a config-composition step at all.</p>
+<h2 id="adding-a-new-algorithm-or-profile">Adding a new algorithm or profile</h2>
+<ul>
+<li><strong>New tuning profile for an existing algorithm</strong>: add one entry to that algorithm's
+  <code>*ProfileSelect</code> union in <code>cli_config.py</code>. See the
+  <a href="../../tutorials/03_config_system/#4-adding-a-new-tuning-profile">Configuration tutorial</a>.</li>
+<li><strong>New algorithm entirely</strong> (a new estimator class): see
+  <a href="../../how-to/add_estimator/">How to Add a New Model</a> -- it's one <code>*Profile</code> + <code>*ProfileSelect</code> +
+  <code>*Preset</code> block, plus one new entry in the top-level <code>ModelPreset</code> union. No YAML file, no
+  <code>_target_</code> string, no factory function registration.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

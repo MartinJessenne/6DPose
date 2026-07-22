@@ -1,0 +1,1555 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../tyro_cli_config/">
+      
+      
+        <link rel="next" href="../../reference/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Experiment Tracking with W&B - 6DPose Project Documentation</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="cyan">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#experiment-tracking-with-weights-biases" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="6DPose Project Documentation" class="md-header__button md-logo" aria-label="6DPose Project Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            6DPose Project Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Experiment Tracking with W&B
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="cyan"  aria-hidden="true"  type="radio" name="__palette" id="__palette_0">
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../tutorials/" class="md-tabs__link">
+          
+  
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../how-to/" class="md-tabs__link">
+          
+  
+  
+  How-to Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Explanation
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="6DPose Project Documentation" class="md-nav__button md-logo" aria-label="6DPose Project Documentation" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    6DPose Project Documentation
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/01_pose_estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Visualizing the 3D Pipeline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/02_method_comparison/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Comparing RANSAC vs PPF
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/03_config_system/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration with tyro
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    How-to Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    How-to Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../how-to/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../how-to/add_estimator/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Add a New Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../how-to/run_sweeps/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Run Parameter Sweeps
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Explanation
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Explanation
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    System Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../coordinate_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coordinate Frames & Math
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../limitations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Symmetries & Sinks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tyro_cli_config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration with tyro
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Experiment Tracking with W&B
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Experiment Tracking with W&B
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-problem-this-solves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The problem this solves
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#wb-vocabulary-mapped-directly-onto-this-codebase" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W&amp;B vocabulary, mapped directly onto this codebase
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-history-vs-run-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run history vs. Run summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-manual-logging-not-weightsandbiasescallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why manual logging, not WeightsAndBiasesCallback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-run-per-sweep-not-one-per-trial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One run per sweep, not one per trial
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#seeing-the-pareto-front-in-wb-wandbtable-wandbplotscatter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Seeing the Pareto front in W&amp;B: wandb.Table + wandb.plot.scatter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#git-commit-capture-is-automatic" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Git commit capture is automatic
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#setup-prerequisite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setup prerequisite
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/pipeline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Pipeline (pipeline)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/base/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Base Estimators (base)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/ransac/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RANSAC Estimator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/ppf/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    PPF Estimator
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-problem-this-solves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The problem this solves
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#wb-vocabulary-mapped-directly-onto-this-codebase" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W&amp;B vocabulary, mapped directly onto this codebase
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-history-vs-run-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run history vs. Run summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-manual-logging-not-weightsandbiasescallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why manual logging, not WeightsAndBiasesCallback
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-run-per-sweep-not-one-per-trial" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One run per sweep, not one per trial
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#seeing-the-pareto-front-in-wb-wandbtable-wandbplotscatter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Seeing the Pareto front in W&amp;B: wandb.Table + wandb.plot.scatter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#git-commit-capture-is-automatic" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Git commit capture is automatic
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#setup-prerequisite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setup prerequisite
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="experiment-tracking-with-weights-biases">Experiment Tracking with Weights &amp; Biases</h1>
+<p>This explains why W&amp;B was added on top of the existing print-statement reports and Optuna SQLite
+studies, and how its concepts map onto <code>benchmark.py</code>. For the CLI/config side of this codebase,
+see <a href="../tyro_cli_config/">Configuration with tyro</a>.</p>
+<hr />
+<h2 id="the-problem-this-solves">The problem this solves</h2>
+<p>Before this, a benchmark run's results existed only as terminal output, copy-pasted by hand into
+notes if you wanted to keep them. Sweep results fared better (Optuna's own SQLite study), but
+that's per-study and isn't easily browsed alongside <em>other</em> studies, other algorithms, or
+one-off benchmark runs. W&amp;B gives every run -- whether a single fixed-parameter benchmark or one
+trial of a sweep -- a permanent, queryable, cloud-hosted record: what commit it ran on, what
+hyperparameters it used, and what it measured.</p>
+<h2 id="wb-vocabulary-mapped-directly-onto-this-codebase">W&amp;B vocabulary, mapped directly onto this codebase</h2>
+<ul>
+<li><strong>Project</strong>: the top-level container. This project uses <strong>one shared project, <code>"6dpose"</code></strong>,
+  across all three algorithms (rather than one project per algorithm) specifically because the
+  whole point of this benchmark suite is comparing PPF vs. RANSAC vs. RANSAC-3DoF against each
+  other -- splitting them into separate projects would fragment that exact comparison.</li>
+<li><strong>Group</strong> / <strong>Job type</strong>: the finer-grained facets <em>within</em> the shared project.
+  <code>group=estimator_cls.__name__</code> (e.g. <code>"Ransac3DoFEstimator"</code>) groups runs by algorithm;
+  <code>job_type="benchmark"</code> vs. <code>job_type="sweep"</code> distinguishes a single fixed-parameter evaluation
+  from one trial of a hyperparameter sweep.</li>
+<li><strong>Run</strong>: one <code>wandb.init()</code> → ... → <code>run.finish()</code> lifecycle. <strong>One CLI execution is always
+  exactly one run</strong> -- the default-eval branch opens one run for the whole evaluation; the sweep
+  branch opens <em>one run for the entire sweep</em>, not one per trial (see below for why, and how each
+  trial still gets its own point in that run's history).</li>
+<li><strong>Config</strong>: hyperparameters logged once, at <code>wandb.init(config=...)</code> time. For a benchmark run,
+  this is <code>dataclasses.asdict(args.model.profile.params)</code> plus <code>depth_trunc</code>/<code>eval_size</code>/<code>seed</code> --
+  literally the same frozen dataclass you already have from the tyro CLI, no re-encoding needed.
+  For a sweep run, config is the sweep-level settings (<code>eval_size</code>, <code>n_trials</code>, <code>seed</code>) since no
+  single set of hyperparameters describes the whole sweep -- each trial's own params are logged
+  as metrics instead (see below).</li>
+<li><strong>Metrics</strong>: <code>run.log({...})</code>, called as many times as you like within a run, optionally with an
+  explicit <code>step=</code>. Every number the benchmark report already prints (success rate, AR, p95
+  latency, translation/rotation error mean+median per axis, flip rate, non-flipped-sample medians)
+  gets logged this way in the benchmark branch. In the sweep branch, <code>step=trial.number</code> is what
+  turns "log once per trial" into a real per-trial trend line instead of a single point -- see
+  <a href="#run-history-vs-run-summary">Run history vs. Run summary</a> below.</li>
+<li><strong>Tags</strong>: free-form labels for filtering in the UI. The sweep run is tagged with the Optuna
+  <code>study_name</code> (redundant with its <code>name=</code> here, but convenient if you ever rename runs later).</li>
+</ul>
+<h2 id="run-history-vs-run-summary">Run history vs. Run summary</h2>
+<p>Two different views of the same logged data, easy to conflate from the console output alone:</p>
+<ul>
+<li><strong>History</strong> is the full time series: every <code>run.log(..., step=N)</code> call appends a row. If the
+  same metric key is logged at multiple steps, its history is a real multi-point trend -- this is
+  what the sweep branch relies on, logging every trial's params + metrics at <code>step=trial.number</code>.</li>
+<li><strong>Summary</strong> is just a snapshot: the most recently logged value per key. It's what shows up in
+  W&amp;B's run-comparison tables.</li>
+</ul>
+<p>In the benchmark branch, every metric is logged exactly once per run, so history and summary
+trivially coincide (a single point). In the sweep branch, with N trials logged at N different
+steps, history is a genuine N-point trend per metric/parameter -- which is also exactly the data
+<code>wandb.Table</code> draws on for the Pareto-front scatter described next.</p>
+<h2 id="why-manual-logging-not-weightsandbiasescallback">Why manual logging, not <code>WeightsAndBiasesCallback</code></h2>
+<p><code>optuna-integration</code> ships an official <code>WeightsAndBiasesCallback</code> that can be passed to
+<code>study.optimize(objective, callbacks=[wandbc])</code>. We deliberately did <strong>not</strong> use it, for two
+reasons:</p>
+<ol>
+<li><strong>It only captures what Optuna itself knows about a trial</strong> -- the suggested params and the
+   objective's return values. It has no idea about <code>trial.set_user_attr(...)</code> diagnostics
+   (<code>average_recall</code>, <code>detection_failures</code>, <code>pose_failures</code>, <code>flip_rate</code> in this codebase's
+   <code>objective()</code>), so those would need manual <code>wandb.log()</code> calls inside the objective regardless
+   -- at which point the callback isn't saving much.</li>
+<li><strong>It's genuinely marked deprecated in the version installed here.</strong> Both
+   <code>WeightsAndBiasesCallback</code> and <code>MLflowCallback</code> carry an explicit
+   <code>@deprecated_class("4.9.0", "6.0.0")</code> decorator in <code>optuna-integration==4.9.0</code> (the current
+   release, confirmed by reading the installed source directly, not inferred from the separate
+   fact that Optuna moved third-party integrations into their own package a while back -- that
+   package move itself isn't a deprecation signal, but this specific decorator on this specific
+   class is). Instantiating either class emits a real runtime warning: <em>"Deprecated in v4.9.0
+   ... removal ... currently scheduled for v6.0.0, but this schedule is subject to change."</em>
+   Since we do the three lines of <code>wandb.init()</code>/<code>run.log()</code>/<code>finish()</code> ourselves, this code path
+   never touches that deprecated class at all -- unaffected by whatever happens in v6.0.0.</li>
+</ol>
+<p>The manual approach is exactly as much code as the callback would have needed anyway (one
+<code>wandb.init()</code> block, one <code>run.log()</code> call), and it's easier to see and understand exactly what
+gets logged, which mattered more here than saving a few lines.</p>
+<h2 id="one-run-per-sweep-not-one-per-trial">One run per sweep, not one per trial</h2>
+<p>The first version of this integration opened a fresh W&amp;B run per Optuna trial (via
+<code>wandb.init(..., reinit="create_new")</code> inside <code>objective()</code>), mirroring the "multirun" pattern
+<code>WeightsAndBiasesCallback</code> uses. That works, but a 200-trial sweep means 200 separate run pages
+cluttering the workspace's run list -- not what you want when browsing.</p>
+<p>The fix: open <strong>one run for the entire sweep</strong>, before <code>study.optimize()</code> starts, and have every
+trial log into that same run at <code>step=trial.number</code> instead of creating its own run:</p>
+<pre><code class="language-python">with wandb.init(project=&quot;6dpose&quot;, name=study_name, ...) as run:
+    def objective(trial):
+        ...
+        run.log({**suggested_params, &quot;depth_trunc&quot;: depth_trunc, &quot;accuracy_score&quot;: ..., ...},
+                 step=trial.number)
+        return accuracy_score, p95_time
+
+    try:
+        study.optimize(objective, n_trials=remaining)
+    finally:
+        # build + log the Pareto-front scatter here (see below) -- in a
+        # `finally` so it still runs even if the sweep is Ctrl+C'd partway
+</code></pre>
+<p>One real gotcha found while iterating on the per-trial-run version (worth knowing even though the
+final design doesn't hit it): that version used <code>reinit="create_new"</code> to force a genuinely new run
+on every <code>wandb.init()</code> call in the same process, and with that setting, the module-level
+<code>wandb.log(...)</code> shorthand silently failed to find an active run
+(<code>wandb.errors.errors.Error: You must call wandb.init() before wandb.log()</code>) -- only calling
+<code>.log(...)</code> on the <code>run</code> object returned by <code>wandb.init()</code> worked. The current one-run-per-sweep
+design only calls <code>wandb.init()</code> once, so this specific trap no longer applies, but <code>run.log(...)</code>
+(never the bare <code>wandb.log(...)</code>) is still used everywhere for consistency -- one convention,
+not "whichever happens to work in this branch."</p>
+<p>(Note for completeness: <code>WeightsAndBiasesCallback</code>'s <em>default</em> mode, <code>as_multirun=False</code>, already
+behaves similarly -- one run for the whole study, trial-indexed logging via <code>step=</code>. It just
+doesn't know about <code>trial.set_user_attr(...)</code> diagnostics or build a Pareto-front chart, and per
+the deprecation note above, this codebase doesn't depend on that class either way.)</p>
+<h2 id="seeing-the-pareto-front-in-wb-wandbtable-wandbplotscatter">Seeing the Pareto front in W&amp;B: <code>wandb.Table</code> + <code>wandb.plot.scatter</code></h2>
+<p>Optuna Dashboard's Pareto-front view was the target to match. After <code>study.optimize()</code> finishes
+(or is interrupted -- the <code>finally</code> block runs either way), the sweep branch reads every
+<code>COMPLETE</code> trial directly from <code>study.trials</code> (Optuna's own persistent record, not just whatever
+ran in this process -- so a resumed sweep's chart always reflects the complete study, not just the
+newly-added trials), builds a <code>wandb.Table</code> with one row per trial (params + <code>accuracy_score</code> +
+<code>p95_time</code> + <code>average_recall</code> + <code>flip_rate</code>), and logs a scatter of it:</p>
+<pre><code class="language-python">table = wandb.Table(columns=[...], data=rows)
+run.log({&quot;pareto_front&quot;: wandb.plot.scatter(table, &quot;p95_time&quot;, &quot;accuracy_score&quot;, title=...)})
+</code></pre>
+<p>This renders as a native scatter panel on the run page -- speed on one axis, accuracy on the
+other, one point per trial, exactly the Pareto-front comparison view <code>study.best_trials</code> gives you
+textually in the console output already. Verified directly (not assumed): a small offline-mode
+script confirmed both the <code>Run history</code> becoming a genuine multi-point trend under <code>step=</code>
+logging, and the scatter chart materializing as a real logged artifact
+(<code>files/media/table/*.table.json</code> on disk) rather than silently no-op-ing.</p>
+<h2 id="git-commit-capture-is-automatic">Git commit capture is automatic</h2>
+<p><code>wandb.init()</code> records the current commit SHA (and an uncommitted-diff patch, if any) on the run
+page with zero extra code, as long as it's run inside a git working directory. No manual tagging
+needed to answer "what code produced this result."</p>
+<h2 id="setup-prerequisite">Setup prerequisite</h2>
+<p>Cloud-hosted W&amp;B needs network access and an authenticated API key on whatever machine actually
+runs <code>benchmark.py</code> -- run <code>wandb login</code> once on that machine (the free educational tier is what
+this project uses). This can't be done from a machine that never runs the pipeline itself.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
