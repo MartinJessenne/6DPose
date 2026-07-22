@@ -109,6 +109,11 @@ tyro would just use that concrete default value regardless of which `model.profi
 was passed on the CLI, with no error. Minimal repro:
 
 ```python
+@dataclass(frozen=True)
+class P:
+    x: int = 1
+    y: int = 2
+
 Sel = Union[
     Annotated[P, tyro.conf.subcommand(name="default")],
     Annotated[P, tyro.conf.subcommand(name="tuned", default=P(x=99, y=100))],
@@ -138,16 +143,6 @@ Two more sharp edges worth knowing, also found by running the actual CLI rather 
   underscores in `cli_config.py` (`tyro.conf.subcommand(name="acc_opt")` → you type
   `model.profile:acc-opt`). This matches `--flag` naming, but unlike flags (which accept
   `--foo_bar` and `--foo-bar` interchangeably), subcommand tokens only match the hyphenated form.
-
-## Golden-value tests caught a real bug
-
-`tests/test_cli_config.py` pins every one of the 9 transcribed profiles against the exact numbers
-from the old YAML files. It caught a real mistake during the migration: `ransac3dof.yaml`'s
-"default" preset pinned concrete `z_offset: 0.01` / `front_crop_depth: 0.35` values, but
-`Ransac3DoFParams`'s own class defaults are `None`/`None` ("auto-derive"). The naive assumption
-that "the default profile = the bare params constructor" was wrong for exactly this one case --
-caught immediately by the test, not by a silent behavior change during a later benchmark run.
-This is the whole point of transcribing tuned numbers into tests instead of trusting them by eye.
 
 ## What Hydra could do that tyro can't: run-directory management
 
