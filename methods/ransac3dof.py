@@ -236,5 +236,26 @@ class Ransac3DoFEstimator(RansacEstimator):
         # Registering the asymmetric front slab instead of the full cart
         # halved the flip rate and doubled AR in A/B benchmarks; the slab
         # depth trades feature support against re-imported symmetry.
-        params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.2, 0.6)
+        params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 10.0)
+        return params
+
+
+class Ransac3DoFFullMeshEstimator(Ransac3DoFEstimator):
+    """Ransac3DoFEstimator variant that never crops the CAD mesh.
+
+    front_crop_depth is simply never suggested, so it stays at its
+    Ransac3DoFParams default of None (full mesh). This is the "before crop"
+    ablation baseline for the SE(2) benchmark report -- superseded by
+    Ransac3DoFEstimator once front-crop tuning landed, kept only to
+    reproduce that historical data point.
+    """
+
+    @classmethod
+    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
+        params = RansacEstimator.suggest_params(trial)
+        params["edge_length_threshold"] = trial.suggest_float("edge_length_threshold", 0.8, 0.95)
+        params["z_gate_threshold"] = trial.suggest_float("z_gate_threshold", 0.05, 0.35)
+        params["ransac_max_iterations"] = trial.suggest_int(
+            "ransac_max_iterations", 2000, 100000, log=True
+        )
         return params

@@ -17,7 +17,11 @@ import tyro
 from methods.base import BasePoseEstimator
 from methods.ppf import PPFEstimator, PPFParams
 from methods.ransac import RansacEstimator, RansacParams
-from methods.ransac3dof import Ransac3DoFEstimator, Ransac3DoFParams
+from methods.ransac3dof import (
+    Ransac3DoFEstimator,
+    Ransac3DoFFullMeshEstimator,
+    Ransac3DoFParams,
+)
 
 
 # =====================================================================
@@ -237,6 +241,14 @@ Ransac3DoFProfileSelect = Union[
 ]
 
 
+def _ransac3dof_fullmesh_default_profile() -> Ransac3DoFProfile:
+    # Deliberately does NOT reuse Ransac3DoFProfileSelect's "default" -- that
+    # one bakes in front_crop_depth=0.35, which would silently defeat the
+    # point of this no-crop ablation baseline in eval mode. z_offset is kept
+    # (a sensor-rig measurement, unrelated to cropping).
+    return Ransac3DoFProfile(params=Ransac3DoFParams(z_offset=0.01), depth_trunc=3.0)
+
+
 @dataclass(frozen=True)
 class PPFPreset:
     ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = PPFEstimator
@@ -259,6 +271,13 @@ class RansacPreset:
 class Ransac3DoFPreset:
     ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = Ransac3DoFEstimator
     profile: Ransac3DoFProfileSelect
+
+
+@dataclass(frozen=True)
+class Ransac3DoFFullMeshPreset:
+    """No-crop ablation baseline -- see Ransac3DoFFullMeshEstimator."""
+    ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = Ransac3DoFFullMeshEstimator
+    profile: Ransac3DoFProfile = field(default_factory=_ransac3dof_fullmesh_default_profile)
 
 
 ModelPreset = Union[
@@ -284,6 +303,17 @@ ModelPreset = Union[
         tyro.conf.subcommand(
             name="ransac3dof",
             description="profiles: model.profile:default, model.profile:acc-opt, model.profile:rt-opt",
+        ),
+    ],
+    Annotated[
+        Ransac3DoFFullMeshPreset,
+        tyro.conf.subcommand(
+            name="ransac3dof-fullmesh",
+            description=(
+                "SE(2) no-crop ablation baseline (historical, pre-front-crop). "
+                "No profile subcommand -- single fixed default, override via "
+                "--model.profile.params.<field>."
+            ),
         ),
     ],
 ]
