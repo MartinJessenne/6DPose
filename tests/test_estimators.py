@@ -53,6 +53,7 @@ class TestEstimatorSweeps(unittest.TestCase):
             "ransac_max_iterations": 20000,
             "front_crop_depth": 0.35,
             "free_space_threshold": 0.02,
+            "free_space_margin": 0.03,
         }
         trial = optuna.trial.FixedTrial(fixed_values)
         suggested = Ransac3DoFEstimator.suggest_params(trial)

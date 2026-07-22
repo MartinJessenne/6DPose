@@ -309,6 +309,7 @@ class Ransac3DoFEstimator(RansacEstimator):
         # depth trades feature support against re-imported symmetry.
         params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 10.0)
         params["free_space_threshold"] = trial.suggest_float("free_space_threshold", 0.005, 0.08)
+        params["free_space_margin"] = trial.suggest_float("free_space_margin", 0.01, 0.08)
         return params
 
 

@@ -76,3 +76,14 @@ uv run mkdocs build --strict
 # Run local preview server
 uv run mkdocs serve
 ```
+
+---
+
+## 5. Running Tests (pytest)
+
+- **Single-Threaded Execution Mandatory**: `open3d`, `opencv-contrib-python`, `torch`, and `scipy`/OpenMP spawn multi-threaded worker pools scaled to all available CPU cores by default. Running tests without limiting thread pools causes severe thread contention and high RAM usage that can crash the container/instance.
+- **Always set single-threaded environment variables when executing pytest**:
+  ```bash
+  OMP_NUM_THREADS=1 OPEN3D_CPU_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 .venv/bin/pytest
+  ```
+
