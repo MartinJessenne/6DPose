@@ -89,6 +89,12 @@ class Ransac3DoFParams(RansacParams):
         free_space_threshold: Maximum ratio of free-space depth projection
             violations allowed before triggering the 180-degree flip search.
         free_space_margin: Depth margin in meters for free-space violation checks.
+        free_space_min_observed: Minimum number of model points that must
+            land on valid (unmasked, in-bounds) depth pixels before a
+            free-space violation ratio is trusted for flip disambiguation.
+            Below this, the view doesn't show enough of the cart to judge
+            front from back by visibility alone, and the decision falls
+            through to front-slab fitness / ICP tiebreaker instead.
     """
     z_offset: float | None = None
     z_gate_threshold: float = 0.09
@@ -98,6 +104,7 @@ class Ransac3DoFParams(RansacParams):
     front_crop_depth: float | None = None
     free_space_threshold: float = 0.02
     free_space_margin: float = 0.03
+    free_space_min_observed: int = 30
 
 
 # =====================================================================
@@ -273,6 +280,7 @@ class Ransac3DoFEstimator(RansacEstimator):
             extrinsic=self.extrinsic,
             free_space_threshold=self.params.free_space_threshold,
             free_space_margin=self.params.free_space_margin,
+            free_space_min_observed=self.params.free_space_min_observed,
         )
         return result.transformation
 
@@ -307,8 +315,11 @@ class Ransac3DoFEstimator(RansacEstimator):
         )
         # Registering the asymmetric front slab instead of the full cart
         # halved the flip rate and doubled AR in A/B benchmarks; the slab
-        # depth trades feature support against re-imported symmetry.
-        params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 10.0)
+        # depth trades feature support against re-imported symmetry. Upper
+        # bound is the longest cart in the fleet (colruyt, ~2.57 m x-extent):
+        # beyond that the crop no longer removes any mesh, silently
+        # re-introducing the front/back symmetry this parameter exists to break.
+        params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 2.5)
         params["free_space_threshold"] = trial.suggest_float("free_space_threshold", 0.005, 0.08)
         params["free_space_margin"] = trial.suggest_float("free_space_margin", 0.01, 0.08)
         return params

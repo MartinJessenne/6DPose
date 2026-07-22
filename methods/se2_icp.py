@@ -145,6 +145,7 @@ def refine_pose_dual_hypothesis_se2(
     extrinsic=None,
     free_space_threshold=0.02,
     free_space_margin=0.03,
+    free_space_min_observed=30,
 ):
     """
     SE(2)-constrained counterpart of methods.base.refine_pose_dual_hypothesis with
@@ -157,6 +158,14 @@ def refine_pose_dual_hypothesis_se2(
     3. Fallback Path (potential flip): Runs SE(2) ICP Pass 2 on T_init @ T_flip (180° rotated).
        Evaluates front-slab fitness (front_slab_pc) and free-space violations for both hypotheses,
        and selects the non-flipped winner.
+
+    Free-space evidence (the early-exit gate and decision A below) is only trusted when at
+    least `free_space_min_observed` model points landed on valid depth pixels for the
+    hypothesis being judged. A depth crop with too few valid pixels near the model (front face
+    barely visible, masked out, or out of frame) yields a 0/0 "clean" ratio that carries no
+    information; without this guard that degenerate case is indistinguishable from a genuinely
+    unambiguous pose and wrongly short-circuits disambiguation, which defeats the point of this
+    check exactly on the hard, ambiguous views it exists for.
     """
     T_flip = np.diag([-1.0, -1.0, 1.0, 1.0])
 
@@ -167,17 +176,17 @@ def refine_pose_dual_hypothesis_se2(
     )
 
     # 2. Fast Free-Space Early-Exit Check
-    viol_ratio_1 = None
+    n_obs_1, viol_ratio_1 = None, None
     if frame is not None and extrinsic is not None:
         from methods.free_space import compute_free_space_violations
         full_pts = np.asarray(model_points.points if hasattr(model_points, "points") else model_points)
-        _, _, viol_ratio_1 = compute_free_space_violations(
+        _, n_obs_1, viol_ratio_1 = compute_free_space_violations(
             full_pts, result_1.transformation, extrinsic, frame, margin=free_space_margin
         )
-        if viol_ratio_1 < free_space_threshold:
+        if n_obs_1 >= free_space_min_observed and viol_ratio_1 < free_space_threshold:
             logging.info(
                 f"SE(2) ICP orientation selected: Original [Early Exit - clean free space] "
-                f"(Violations: {viol_ratio_1:.2%}, Fitness: {result_1.fitness:.4f}, RMSE: {result_1.inlier_rmse:.4f})"
+                f"(Violations: {viol_ratio_1:.2%} over {n_obs_1} obs, Fitness: {result_1.fitness:.4f}, RMSE: {result_1.inlier_rmse:.4f})"
             )
             return result_1
 
@@ -187,11 +196,11 @@ def refine_pose_dual_hypothesis_se2(
         max_correspondence_distance, max_iterations,
     )
 
-    viol_ratio_2 = None
+    n_obs_2, viol_ratio_2 = None, None
     if frame is not None and extrinsic is not None:
         from methods.free_space import compute_free_space_violations
         full_pts = np.asarray(model_points.points if hasattr(model_points, "points") else model_points)
-        _, _, viol_ratio_2 = compute_free_space_violations(
+        _, n_obs_2, viol_ratio_2 = compute_free_space_violations(
             full_pts, result_2.transformation, extrinsic, frame, margin=free_space_margin
         )
 
@@ -203,8 +212,13 @@ def refine_pose_dual_hypothesis_se2(
         slab_fit_2 = _evaluate_slab_fitness(slab_pts, scene_points, result_2.transformation, max_correspondence_distance)
 
     # Decision logic:
-    # A. If free-space violation ratios differ significantly (>2%), pick lower violation ratio
-    if viol_ratio_1 is not None and viol_ratio_2 is not None and abs(viol_ratio_1 - viol_ratio_2) > 0.02:
+    # A. If free-space violation ratios differ significantly (>2%), pick lower violation ratio.
+    # Only trusted when both hypotheses had enough observed points to make the ratio meaningful.
+    free_space_reliable = (
+        viol_ratio_1 is not None and viol_ratio_2 is not None
+        and n_obs_1 >= free_space_min_observed and n_obs_2 >= free_space_min_observed
+    )
+    if free_space_reliable and abs(viol_ratio_1 - viol_ratio_2) > 0.02:
         if viol_ratio_1 < viol_ratio_2:
             best, label = result_1, f"Original (Free-space: {viol_ratio_1:.2%} vs {viol_ratio_2:.2%})"
         else:
