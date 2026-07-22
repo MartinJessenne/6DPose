@@ -104,6 +104,17 @@ class TestPPFProfiles(unittest.TestCase):
         self.assertEqual(p.icp_max_correspondence_distance, 0.1724415146443418)
         self.assertEqual(p.icp_max_iterations, 60)
 
+    def test_trial28_matches_sweep_values(self):
+        r = _select("ppf", "profile:trial28")
+        self.assertEqual(r.profile.depth_trunc, 2.6)
+        p = r.profile.params
+        self.assertEqual(p.ppf_sampling_step, 0.04)
+        self.assertEqual(p.ppf_distance_step, 0.05)
+        self.assertEqual(p.ppf_match_threshold, 0.05)
+        self.assertEqual(p.ppf_match_tolerance, 0.04)
+        self.assertEqual(p.icp_max_correspondence_distance, 0.124003893980807)
+        self.assertEqual(p.icp_max_iterations, 20)
+
 
 class TestRansacProfiles(unittest.TestCase):
     """One block per config/model/ransac*.yaml file (excluding ransac3dof*)."""
@@ -145,6 +156,15 @@ class TestRansacProfiles(unittest.TestCase):
         self.assertEqual(p.icp_max_iterations, 20)
         self.assertEqual(p.ransac_max_iterations, 100000)
 
+    def test_trial15_matches_sweep_values(self):
+        r = _select("ransac", "profile:trial15")
+        self.assertEqual(r.profile.depth_trunc, 5.6)
+        p = r.profile.params
+        self.assertEqual(p.voxel_size, 0.1)
+        self.assertEqual(p.icp_max_correspondence_distance, 0.222396429505729)
+        self.assertEqual(p.icp_max_iterations, 50)
+        self.assertEqual(p.ransac_max_iterations, 100000)
+
 
 class TestRansac3DoFProfiles(unittest.TestCase):
     """One block per config/model/ransac3dof*.yaml file."""
@@ -164,35 +184,70 @@ class TestRansac3DoFProfiles(unittest.TestCase):
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
 
-    def test_acc_opt_matches_ransac3dof_acc_opt_yaml(self):
+    def test_acc_opt_matches_trial1(self):
         r = _select("ransac3dof", "profile:acc-opt")
-        self.assertEqual(r.profile.depth_trunc, 3.8)
+        self.assertEqual(r.profile.depth_trunc, 3.2)
         p = r.profile.params
         self.assertEqual(p.voxel_size, 0.02)
-        self.assertEqual(p.ransac_max_iterations, 14029)
-        self.assertEqual(p.icp_max_correspondence_distance, 0.07280260785158235)
-        self.assertEqual(p.icp_max_iterations, 80)
+        self.assertEqual(p.ransac_max_iterations, 8192)
+        self.assertEqual(p.icp_max_correspondence_distance, 0.10100435818212444)
+        self.assertEqual(p.icp_max_iterations, 70)
         self.assertEqual(p.z_offset, 0.01)
-        self.assertEqual(p.z_gate_threshold, 0.24838996628120097)
-        self.assertEqual(p.edge_length_threshold, 0.8315299309347685)
-        self.assertEqual(p.front_crop_depth, 0.32839186866723463)
+        self.assertEqual(p.z_gate_threshold, 0.30986258444115694)
+        self.assertEqual(p.edge_length_threshold, 0.85427888273254)
+        self.assertEqual(p.front_crop_depth, 0.8092762136127303)
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
 
-    def test_rt_opt_matches_ransac3dof_rt_opt_yaml(self):
+    def test_rt_opt_matches_trial35(self):
         r = _select("ransac3dof", "profile:rt-opt")
-        self.assertEqual(r.profile.depth_trunc, 2.2)
+        self.assertEqual(r.profile.depth_trunc, 2.6)
         p = r.profile.params
-        self.assertEqual(p.voxel_size, 0.04)
-        self.assertEqual(p.ransac_max_iterations, 2772)
-        self.assertEqual(p.icp_max_correspondence_distance, 0.06404478356487074)
-        self.assertEqual(p.icp_max_iterations, 50)
+        self.assertEqual(p.voxel_size, 0.07)
+        self.assertEqual(p.ransac_max_iterations, 2572)
+        self.assertEqual(p.icp_max_correspondence_distance, 0.053439448281393)
+        self.assertEqual(p.icp_max_iterations, 10)
         self.assertEqual(p.z_offset, 0.01)
-        self.assertEqual(p.z_gate_threshold, 0.12938125580720045)
-        self.assertEqual(p.edge_length_threshold, 0.831518113921687)
-        self.assertEqual(p.front_crop_depth, 0.47964349266741707)
+        self.assertEqual(p.z_gate_threshold, 0.1343018655763445)
+        self.assertEqual(p.edge_length_threshold, 0.826763881996128)
+        self.assertEqual(p.front_crop_depth, 1.5094694353528446)
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
+
+
+class TestRansac3DoFFullMeshProfiles(unittest.TestCase):
+    def test_default(self):
+        r = _select("ransac3dof-fullmesh", "profile:default")
+        self.assertEqual(r.profile.depth_trunc, 3.0)
+        p = r.profile.params
+        self.assertEqual(p.z_offset, 0.01)
+        self.assertIsNone(p.front_crop_depth)
+
+    def test_acc_opt_matches_trial25(self):
+        r = _select("ransac3dof-fullmesh", "profile:acc-opt")
+        self.assertEqual(r.profile.depth_trunc, 3.0)
+        p = r.profile.params
+        self.assertEqual(p.voxel_size, 0.04)
+        self.assertEqual(p.ransac_max_iterations, 39267)
+        self.assertEqual(p.icp_max_correspondence_distance, 0.07851111384977721)
+        self.assertEqual(p.icp_max_iterations, 40)
+        self.assertEqual(p.z_offset, 0.01)
+        self.assertEqual(p.z_gate_threshold, 0.3186998846185683)
+        self.assertEqual(p.edge_length_threshold, 0.8389466396574985)
+        self.assertIsNone(p.front_crop_depth)
+
+    def test_rt_opt_matches_trial34(self):
+        r = _select("ransac3dof-fullmesh", "profile:rt-opt")
+        self.assertEqual(r.profile.depth_trunc, 4.1)
+        p = r.profile.params
+        self.assertEqual(p.voxel_size, 0.06)
+        self.assertEqual(p.ransac_max_iterations, 2847)
+        self.assertEqual(p.icp_max_correspondence_distance, 0.08274659221521605)
+        self.assertEqual(p.icp_max_iterations, 50)
+        self.assertEqual(p.z_offset, 0.01)
+        self.assertEqual(p.z_gate_threshold, 0.17182370500647015)
+        self.assertEqual(p.edge_length_threshold, 0.8556119078087416)
+        self.assertIsNone(p.front_crop_depth)
 
 
 if __name__ == "__main__":
