@@ -12,8 +12,6 @@ np.ndarray inputs and does not depend on open3d. Point-to-plane residuals use
 the SCENE normals (target normals), matching Open3D's
 TransformationEstimationPointToPlane convention.
 """
-from ultralytics.models.yolo import world
-
 import logging
 
 import numpy as np
@@ -123,17 +121,6 @@ def icp_point_to_plane_se2(
     return RansacResult(T, fitness, inlier_rmse)
 
 
-def _evaluate_slab_fitness(slab_pts, scene_points, T, max_corr_dist):
-    """Evaluates inlier fitness ratio over the front slab points."""
-    if slab_pts is None or len(slab_pts) == 0 or scene_points is None or len(scene_points) == 0:
-        return 0.0
-    scene_tree = cKDTree(scene_points)
-    transformed = slab_pts @ T[:3, :3].T + T[:3, 3]
-    dists, _ = scene_tree.query(transformed, k=1, distance_upper_bound=max_corr_dist)
-    valid = np.isfinite(dists)
-    return float(valid.sum() / len(slab_pts))
-
-
 def refine_pose_dual_hypothesis_se2(
     model_points,
     scene_points,
@@ -141,7 +128,6 @@ def refine_pose_dual_hypothesis_se2(
     T_init,
     max_correspondence_distance,
     max_iterations=100,
-    front_slab_pc=None,
     frame=None,
     extrinsic=None,
     free_space_threshold=0.02,
@@ -152,13 +138,15 @@ def refine_pose_dual_hypothesis_se2(
     SE(2)-constrained counterpart of methods.base.refine_pose_dual_hypothesis with
     Phase 1 flip disambiguation:
 
-    1. Runs SE(2) ICP Pass 1 on primary hypothesis T_init using full model_points.
+    1. Runs SE(2) ICP Pass 1 on primary hypothesis T_init using model_points (the
+       discriminative front slab when the caller crops for asymmetry; ICP and RANSAC
+       register against the same geometry, so this fitness already reflects slab fit).
     2. Early-Exit Gate: If frame & extrinsic are provided, evaluates free-space violations.
        If violation_ratio < free_space_threshold (default 2%), T_init is clean (not flipped).
        Returns Pass 1 result immediately (fast path, <0.5 ms overhead).
     3. Fallback Path (potential flip): Runs SE(2) ICP Pass 2 on T_init @ T_flip (180° rotated).
-       Evaluates front-slab fitness (front_slab_pc) and free-space violations for both hypotheses,
-       and selects the non-flipped winner.
+       Evaluates free-space violations for both hypotheses and, absent a reliable free-space
+       signal, compares ICP fitness with a noise margin before falling back to an RMSE tiebreak.
 
     Free-space evidence (the early-exit gate and decision A below) is only trusted when at
     least `free_space_min_observed` model points landed on valid depth pixels for the
@@ -169,7 +157,7 @@ def refine_pose_dual_hypothesis_se2(
     check exactly on the hard, ambiguous views it exists for.
     """
 
-    # Pass 1: ICP refinement on primary hypothesis using full model cloud
+    # Pass 1: ICP refinement on primary hypothesis using model_points
     result_1 = icp_point_to_plane_se2(
         model_points, scene_points, scene_normals, T_init,
         max_correspondence_distance, max_iterations,
@@ -217,13 +205,6 @@ def refine_pose_dual_hypothesis_se2(
             full_pts, result_2.transformation, extrinsic, frame, margin=free_space_margin
         )
 
-    # Evaluate Front-Slab Fitness if front_slab_pc is provided
-    slab_fit_1, slab_fit_2 = None, None
-    if front_slab_pc is not None:
-        slab_pts = np.asarray(front_slab_pc.points if hasattr(front_slab_pc, "points") else front_slab_pc)
-        slab_fit_1 = _evaluate_slab_fitness(slab_pts, scene_points, result_1.transformation, max_correspondence_distance)
-        slab_fit_2 = _evaluate_slab_fitness(slab_pts, scene_points, result_2.transformation, max_correspondence_distance)
-
     # Decision logic:
     # A. If free-space violation ratios differ significantly (>2%), pick lower violation ratio.
     # Only trusted when both hypotheses had enough observed points to make the ratio meaningful.
@@ -236,15 +217,17 @@ def refine_pose_dual_hypothesis_se2(
             best, label = result_1, f"Original (Free-space: {viol_ratio_1:.2%} vs {viol_ratio_2:.2%})"
         else:
             best, label = result_2, f"Flipped 180° (Free-space: {viol_ratio_2:.2%} vs {viol_ratio_1:.2%})"
-    # B. Else if front-slab fitness differs (>2%), pick higher slab fitness
-    elif slab_fit_1 is not None and slab_fit_2 is not None and abs(slab_fit_1 - slab_fit_2) > 0.02:
-        if slab_fit_1 > slab_fit_2:
-            best, label = result_1, f"Original (Front-slab fit: {slab_fit_1:.4f} vs {slab_fit_2:.4f})"
+    # B. Else if ICP fitness differs significantly (>2%), pick higher fitness. This margin
+    # avoids letting a coin-flip-sized fitness gap decide the hard, near-tied cases that flip
+    # disambiguation exists for.
+    elif abs(result_1.fitness - result_2.fitness) > 0.02:
+        if result_1.fitness > result_2.fitness:
+            best, label = result_1, f"Original (Fitness: {result_1.fitness:.4f} vs {result_2.fitness:.4f})"
         else:
-            best, label = result_2, f"Flipped 180° (Front-slab fit: {slab_fit_2:.4f} vs {slab_fit_1:.4f})"
-    # C. Fallback: Full cloud ICP fitness / RMSE tiebreaker
+            best, label = result_2, f"Flipped 180° (Fitness: {result_2.fitness:.4f} vs {result_1.fitness:.4f})"
+    # C. Fallback: RMSE tiebreaker
     else:
-        if (result_1.fitness, -result_1.inlier_rmse) >= (result_2.fitness, -result_2.inlier_rmse):
+        if result_1.inlier_rmse <= result_2.inlier_rmse:
             best, label = result_1, "Original [Tie breaker]"
         else:
             best, label = result_2, "Flipped 180° [Tie breaker]"
