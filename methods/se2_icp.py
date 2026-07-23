@@ -12,6 +12,7 @@ np.ndarray inputs and does not depend on open3d. Point-to-plane residuals use
 the SCENE normals (target normals), matching Open3D's
 TransformationEstimationPointToPlane convention.
 """
+from ultralytics.models.yolo import world
 
 import logging
 
@@ -167,7 +168,6 @@ def refine_pose_dual_hypothesis_se2(
     unambiguous pose and wrongly short-circuits disambiguation, which defeats the point of this
     check exactly on the hard, ambiguous views it exists for.
     """
-    T_flip = np.diag([-1.0, -1.0, 1.0, 1.0])
 
     # Pass 1: ICP refinement on primary hypothesis using full model cloud
     result_1 = icp_point_to_plane_se2(
@@ -191,8 +191,21 @@ def refine_pose_dual_hypothesis_se2(
             return result_1
 
     # 3. Fallback Path: Pass 2 on 180°-flipped hypothesis
+
+    T_init_array = np.asarray(T_init)
+    world_pts = model_points @ T_init_array[:3, :3].T + T_init_array[:3, 3] 
+    cx = 0.5 * (world_pts[:,0].min() + world_pts[:,0].max())
+    cy = 0.5 * (world_pts[:,1].min() + world_pts[:,1].max())
+
+    T_flip = np.eye(4)
+    T_flip[:2,:2] = np.array([[-1, 0],
+                                     [0, -1]])
+    T_flip[0, 3] = 2.0*cx
+    T_flip[1, 3] = 2.0*cy
+    
+
     result_2 = icp_point_to_plane_se2(
-        model_points, scene_points, scene_normals, np.asarray(T_init) @ T_flip,
+        model_points, scene_points, scene_normals, T_flip @ T_init_array,
         max_correspondence_distance, max_iterations,
     )
 

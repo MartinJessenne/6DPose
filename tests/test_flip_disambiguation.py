@@ -100,7 +100,12 @@ class TestFlipDisambiguation(unittest.TestCase):
         model_pc = o3d.geometry.TriangleMesh.create_box(width=1.0, height=0.5, depth=0.5).sample_points_uniformly(200)
         model_points = np.asarray(model_pc.points)
 
-        T_flip = np.diag([-1.0, -1.0, 1.0, 1.0])
+        cx = 0.5 * (model_points[:, 0].min() + model_points[:, 0].max())
+        cy = 0.5 * (model_points[:, 1].min() + model_points[:, 1].max())
+        T_flip = np.eye(4)
+        T_flip[:2, :2] = np.array([[-1, 0], [0, -1]])
+        T_flip[0, 3] = 2.0 * cx
+        T_flip[1, 3] = 2.0 * cy
         scene_points = model_points @ T_flip[:3, :3].T + T_flip[:3, 3]
         scene_normals = np.zeros_like(scene_points)
         scene_normals[:, 2] = 1.0

@@ -87,3 +87,24 @@ uv run mkdocs serve
   OMP_NUM_THREADS=1 OPEN3D_CPU_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 .venv/bin/pytest
   ```
 
+---
+
+## 6. Collaboration Workflow (owner writes the code)
+
+The project owner is rebuilding first-hand understanding of this codebase and wants to stay
+the one typing the changes, not just approving them. This changes the agent's role for any
+new feature or fix:
+
+- **Default mode: describe, don't write.** When a change is needed, explain what the change
+  is and why, then point to the exact spot(s) to edit — file path, function/line, the specific
+  before/after — in enough detail that the owner can make the edit themselves without having
+  to also design it. Treat this like a precise code-review comment, not a vague pointer.
+- **If code must be written by the agent** (e.g. the owner explicitly asks for a diff, or the
+  change is too fiddly to describe in prose), walk through the diff afterward line by line —
+  what changed, why that specific change, and what would break if it were done differently —
+  rather than just presenting the patch.
+- **Don't silently batch multiple unrelated changes.** Small, explainable steps over one large
+  edit, so each step can actually be understood before moving to the next.
+- This mode applies to implementation work. Read-only investigation, debugging discussion, and
+  running tests/benchmarks the owner asks for are unaffected.
+
