@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import open3d as o3d
+import trimesh
 
 from methods.constrained_ransac import constrained_ransac_se2, project_to_se2
 from methods.ransac import RansacEstimator, RansacParams
@@ -14,9 +15,13 @@ if TYPE_CHECKING:
     import optuna
 
 
-def crop_front_face(cad_mesh: "o3d.geometry.TriangleMesh", depth: float) -> "o3d.geometry.TriangleMesh":
+def crop_front_face(cad_mesh: "o3d.geometry.TriangleMesh",
+                    depth: float,
+                    min_height: float = 0.16
+                    ) -> "o3d.geometry.TriangleMesh":
     """
-    Keeps only the slab within `depth` meters of the mesh's +x extreme.
+    Keeps only the slab within `depth` meters of the mesh's +x extreme, and at
+    least `min_height` meters above the floor.
 
     CAD convention for the cart fleet (colruyt/leanflow/picanol): origin on
     the floor at the towing face center bottom (x ~ 0), body extending toward -x,
@@ -24,25 +29,49 @@ def crop_front_face(cad_mesh: "o3d.geometry.TriangleMesh", depth: float) -> "o3d
     symmetry that causes flipped registrations: the remaining face is
     asymmetric, so the dual-hypothesis selection can tell front from back.
 
+    The height cut excludes the wheels/casters: their steering angle is fixed
+    in the CAD (and in the synthetic training data) but arbitrary in reality,
+    so they're a spurious registration cue rather than a useful one.
+
+    Both cuts are true geometric plane slices (via trimesh), not a mesh.crop()
+    bounding-box filter -- crop() only keeps triangles whose vertices already
+    fall inside the box, so it snaps to existing mesh topology instead of
+    cutting cleanly at the requested plane (observed drift up to ~9 cm on
+    this fleet's meshes). Slicing re-triangulates at the exact cut plane.
+
     The cropped mesh is NOT recentered — it stays in the original CAD frame,
     so estimated poses remain directly comparable to full-model ground truth.
     """
+
     # vertices is an (N, 3) array where col 0 is X (longitudinal), col 1 is Y (transverse), col 2 is Z (height).
     vertices = np.asarray(cad_mesh.vertices)
     # x_max is the maximum X coordinate across all vertices, representing the front-most tip of the cart face.
     x_max = float(vertices[:, 0].max())
-    # Big value (1e6) forms an unconstrained half-space along Y and Z, isolating only the front X-slab.
-    big = 1e6
-    aabb = o3d.geometry.AxisAlignedBoundingBox(
-        min_bound=(x_max - depth, -big, -big),
-        max_bound=(x_max + big, big, big),
-    )
-    cropped = cad_mesh.crop(aabb)
-    if len(cropped.vertices) == 0:
+    z_floor = float(vertices[:, 2].min())
+
+    # Two chained single-plane slices (X-depth, then Z-height). cap=False (the
+    # default) deliberately leaves the cut open rather than sealing it with a
+    # flat polygon: a real depth camera never sees an artificial cut face, so
+    # capping would inject a fake planar surface into the FPFH/ICP point cloud.
+    tm = trimesh.Trimesh(vertices=vertices, faces=np.asarray(cad_mesh.triangles))
+    tm = trimesh.intersections.slice_mesh_plane(tm, plane_normal=[1, 0, 0], plane_origin=[x_max - depth, 0, 0])
+    tm = trimesh.intersections.slice_mesh_plane(tm, plane_normal=[0, 0, 1], plane_origin=[0, 0, z_floor + min_height])
+
+    if len(tm.vertices) == 0:
         raise ValueError(
-            f"front_crop_depth={depth} left an empty mesh (mesh x range "
-            f"[{vertices[:, 0].min():.3f}, {x_max:.3f}])."
+            f"front_crop_depth={depth}, min_height={min_height} left an empty mesh "
+            f"(mesh x range [{vertices[:, 0].min():.3f}, {x_max:.3f}], "
+            f"z range [{z_floor:.3f}, {float(vertices[:, 2].max()):.3f}])."
         )
+
+    cropped = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(tm.vertices),
+        o3d.utility.Vector3iVector(tm.faces),
+    )
+    # Slicing rebuilds the vertex set (including new vertices on the cut
+    # plane), so normals from the source mesh don't carry over automatically
+    # the way they did with crop()'s subset-preserving behavior.
+    cropped.compute_vertex_normals()
     return cropped
 
 
@@ -168,29 +197,24 @@ class Ransac3DoFEstimator(RansacEstimator):
         mesh_copy = copy.deepcopy(cad_mesh)
         mesh_copy.compute_vertex_normals()
 
-        # Full CAD model point cloud for complete SE(2) ICP alignment accuracy
-        model_pc = mesh_copy.sample_points_uniformly(number_of_points=2000)
-
-        # Dedicated front-slab point cloud for hypothesis selection filter
-        crop_depth = self.params.front_crop_depth if self.params.front_crop_depth is not None else 0.35
-        try:
-            slab_mesh = crop_front_face(mesh_copy, depth=crop_depth)
-            front_slab_pc = slab_mesh.sample_points_uniformly(number_of_points=1000)
-        except Exception:
-            front_slab_pc = copy.deepcopy(model_pc)
-
-        # RANSAC registration geometry
+        # Single front-slab crop, shared by RANSAC (downsampled + FPFH) and ICP
+        # (dense model_pc): the crop is what breaks the front/back symmetry, so
+        # both stages should register against the same asymmetric geometry
+        # instead of RANSAC seeing a crop while ICP falls back to the full,
+        # near-symmetric cart. front_crop_depth=None (Ransac3DoFFullMeshEstimator's
+        # ablation baseline) means no crop at all, not a fallback depth.
         if self.params.front_crop_depth is not None:
             try:
-                ransac_mesh = crop_front_face(mesh_copy, depth=self.params.front_crop_depth)
+                slab_mesh = crop_front_face(mesh_copy, depth=self.params.front_crop_depth)
             except Exception:
-                ransac_mesh = mesh_copy
+                slab_mesh = mesh_copy
         else:
-            ransac_mesh = mesh_copy
+            slab_mesh = mesh_copy
+
+        model_pc = slab_mesh.sample_points_uniformly(number_of_points=2000)
 
         voxel_size = self.params.voxel_size
-        ransac_pc = ransac_mesh.sample_points_uniformly(number_of_points=2000)
-        model_down = ransac_pc.voxel_down_sample(voxel_size)
+        model_down = model_pc.voxel_down_sample(voxel_size)
         model_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
 
         model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
@@ -200,7 +224,6 @@ class Ransac3DoFEstimator(RansacEstimator):
 
         self._PREPARATION_CACHE[cache_key] = {
             "model_pc": model_pc,
-            "front_slab_pc": front_slab_pc,
             "model_down": model_down,
             "model_fpfh": model_fpfh,
         }
@@ -260,12 +283,6 @@ class Ransac3DoFEstimator(RansacEstimator):
                 "prepare_scene_point_cloud, which estimates and orients them."
             )
 
-        front_slab_pc = None
-        if hasattr(self, "_active_cart_type") and self._active_cart_type is not None:
-            cache_key = (self.__class__.__name__, self._active_cart_type, self._get_prep_params_key())
-            if cache_key in self._PREPARATION_CACHE:
-                front_slab_pc = self._PREPARATION_CACHE[cache_key].get("front_slab_pc")
-
         frame = getattr(self, "_active_frame", None)
 
         result = refine_pose_dual_hypothesis_se2(
@@ -275,7 +292,6 @@ class Ransac3DoFEstimator(RansacEstimator):
             T_init=np.asarray(T_init),
             max_correspondence_distance=self.params.icp_max_correspondence_distance,
             max_iterations=self.params.icp_max_iterations,
-            front_slab_pc=front_slab_pc,
             frame=frame,
             extrinsic=self.extrinsic,
             free_space_threshold=self.params.free_space_threshold,
