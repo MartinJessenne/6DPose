@@ -43,10 +43,7 @@ You can load the study database to analyze the results or extract the best trial
 import optuna
 
 # Re-load the study from the SQLite database
-study = optuna.load_study(
-    study_name="PPF_Tuning",
-    storage="sqlite:///sweeps/optuna_PPF_Tuning.db"
-)
+study = optuna.load_study(study_name="PPF_Tuning", storage="sqlite:///sweeps/optuna_PPF_Tuning.db")
 
 # Print best trials on the Pareto Front
 print(f"Number of Pareto-optimal trials: {len(study.best_trials)}")

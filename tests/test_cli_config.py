@@ -17,13 +17,15 @@ from cli_config import (
     DatasetConfig,
     ModelPreset,
     PPFPreset,
-    RansacPreset,
     Ransac3DoFPreset,
+    RansacPreset,
+    VSACSe2Preset,
     YoloConfig,
 )
 from methods.ppf import PPFEstimator
 from methods.ransac import RansacEstimator
 from methods.ransac3dof import Ransac3DoFEstimator
+from methods.vsac_se2 import VSACSe2Estimator
 
 
 class TestYoloConfig(unittest.TestCase):
@@ -77,6 +79,9 @@ class TestModelPresetEstimatorClasses(unittest.TestCase):
 
     def test_ransac3dof_targets_ransac3dof_estimator(self):
         self.assertIs(Ransac3DoFPreset.ESTIMATOR_CLS, Ransac3DoFEstimator)
+
+    def test_vsac3dof_targets_vsacse2_estimator(self):
+        self.assertIs(VSACSe2Preset.ESTIMATOR_CLS, VSACSe2Estimator)
 
 
 class TestPPFProfiles(unittest.TestCase):
@@ -248,6 +253,36 @@ class TestRansac3DoFFullMeshProfiles(unittest.TestCase):
         self.assertEqual(p.z_gate_threshold, 0.17182370500647015)
         self.assertEqual(p.edge_length_threshold, 0.8556119078087416)
         self.assertIsNone(p.front_crop_depth)
+
+
+class TestVSACSe2Profiles(unittest.TestCase):
+    """
+    VSACSe2ProfileSelect has only 2 arms (default, bare) instead of the usual
+    3+ specifically because Python's typing.Union[X] collapses a single-member
+    Union down to bare X, which silently breaks tyro's subcommand dispatch --
+    confirmed by testing: model.profile:default stopped being an accepted
+    token, and even without a token the field fell back to VSACSe2Params()'s
+    unmeasured class defaults instead of the subcommand's specified default.
+    "bare" exists to keep this a real 2-member Union, not as filler; these
+    tests exist to catch that regression if the Union is ever "simplified"
+    back down to one arm.
+    """
+
+    def test_default_matches_ransac3dof_default(self):
+        r = _select("vsac3dof", "profile:default")
+        self.assertEqual(r.profile.depth_trunc, 3.0)
+        p = r.profile.params
+        self.assertEqual(p.z_offset, 0.01)
+        self.assertEqual(p.front_crop_depth, 0.35)
+        self.assertEqual(p.rho, 0.3)
+
+    def test_bare_uses_unmeasured_class_defaults(self):
+        r = _select("vsac3dof", "profile:bare")
+        self.assertEqual(r.profile.depth_trunc, 3.0)
+        p = r.profile.params
+        self.assertIsNone(p.z_offset)
+        self.assertIsNone(p.front_crop_depth)
+        self.assertEqual(p.rho, 0.3)
 
 
 if __name__ == "__main__":

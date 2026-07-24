@@ -1,14 +1,14 @@
 from __future__ import annotations
+
 import os
 import shutil
-import copy
+
 import numpy as np
-import torch
 import open3d as o3d
-from datasets import load_dataset, Dataset
+import torch
+from datasets import Dataset, load_dataset
 from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
-
 
 # =====================================================================
 # SYSTEM ARCHITECTURE AND DATAFLOW DIAGRAM
@@ -134,16 +134,15 @@ from ultralytics import YOLO
 # Configuration is managed via tyro (see cli_config.py).
 
 
-
 # 2. DATASET AND MODEL LIFECYCLE HELPERS
 # =====================================================================
 def load_parquet_dataset(dataset_path: str = None, test_glob: str = None) -> Dataset:
     """
     Loads the parquet test dataset split directly in Map-style format (non-streaming).
-    
+
     Returns:
         Dataset: The loaded Hugging Face test split.
-        
+
     Example:
         >>> dataset = load_parquet_dataset()
         >>> first_sample = dataset[0]
@@ -153,9 +152,7 @@ def load_parquet_dataset(dataset_path: str = None, test_glob: str = None) -> Dat
     glob_pattern = test_glob if test_glob is not None else "dataset/data/test-*-of-00016.parquet"
     dataset = load_dataset(
         path,
-        data_files={
-            "test": glob_pattern
-        },
+        data_files={"test": glob_pattern},
         streaming=False,
     )
     return dataset["test"]
@@ -165,10 +162,10 @@ def load_hf_model(local_model_path: str = None, repo_id: str = None, filename: s
     """
     Loads the YOLO segmentation model from a local file. If the file is not present,
     it downloads it from the Hugging Face Hub, saves it locally, and then loads it.
-    
+
     Returns:
         YOLO: The initialized Ultralytics YOLO segmentation model.
-        
+
     Example:
         >>> model = load_hf_model()
         >>> result = model("test_image.png")
@@ -182,11 +179,11 @@ def load_hf_model(local_model_path: str = None, repo_id: str = None, filename: s
         print(f"Model not found locally at {local_path}. Downloading from Hugging Face...")
         cached_path = hf_hub_download(repo, file)
         # shutil is a standard Python library used here to copy the cached model file to the local directory
-        shutil.copy(cached_path, local_path) 
+        shutil.copy(cached_path, local_path)
         print(f"Model saved locally to {local_path}")
     else:
         print(f"Loading model from local path: {local_path}")
-        
+
     model = YOLO(local_path)
     print("finished loading the model")
     return model
@@ -198,13 +195,13 @@ def load_hf_model(local_model_path: str = None, repo_id: str = None, filename: s
 def compute_bbox_area(bbox: torch.Tensor) -> float:
     """
     Computes the area of a bounding box.
-    
+
     Args:
         bbox (torch.Tensor): A tensor representing coordinates [x, y, w, h].
-        
+
     Returns:
         float: The area of the bounding box in pixels.
-        
+
     Example:
         >>> bbox = torch.tensor([10.0, 20.0, 50.0, 80.0])
         >>> area = compute_bbox_area(bbox)
@@ -216,20 +213,20 @@ def compute_bbox_area(bbox: torch.Tensor) -> float:
 def select_target_detection(result: list) -> tuple[str, list[int], torch.Tensor]:
     """
     Selects the YOLO prediction with the largest bounding box area from the result.
-    This is the initial opinionated choice we make. Later on, we might compose that with a lookup_cart variable, e.g. if the model detects a picanol and a colruyt cart, while lookup_cart = picanol, 
+    This is the initial opinionated choice we make. Later on, we might compose that with a lookup_cart variable, e.g. if the model detects a picanol and a colruyt cart, while lookup_cart = picanol,
     It will only recognize and output the detected picanol and ignore all other carts class.
-    And if there are 2 picanols it will fallback to the current mechanism, retaining the one with the largest bounding box area, 
-    even there need to consider the edge case where the two bounding boxes have the exact same area. 
-    
+    And if there are 2 picanols it will fallback to the current mechanism, retaining the one with the largest bounding box area,
+    even there need to consider the edge case where the two bounding boxes have the exact same area.
+
     Args:
         result: The YOLO Results object for a single image.
-        
+
     Returns:
         tuple containing:
             - class_name (str): The name of the predicted class (e.g. 'picanol').
             - bbox (list[int]): Bounding box coordinates [xmin, ymin, xmax, ymax].
             - mask (torch.Tensor): The segmentation mask of shape [H, W] on CPU.
-            
+
     Example:
         >>> results = model(img)
         >>> class_name, bbox, mask = select_target_detection(results)
@@ -238,23 +235,20 @@ def select_target_detection(result: list) -> tuple[str, list[int], torch.Tensor]
     # For a real-time/streaming multi-image batch pipeline, this indexing must be updated
     # to iterate over the batch elements robustly.
     result_img = result[0]
-    
+
     # Enumerate the bounding boxes and select the index with the largest area
-    idx, _ = max(
-        enumerate(result_img.boxes.xywh),
-        key=lambda pair: compute_bbox_area(pair[1])
-    )
-    
+    idx, _ = max(enumerate(result_img.boxes.xywh), key=lambda pair: compute_bbox_area(pair[1]))
+
     # Retrieve the class ID and look up its string name
     class_id = int(result_img.boxes.cls[idx].item())
     class_name = result_img.names[class_id]
-    
+
     # Retrieve coordinates
     bbox = result_img.boxes.xyxy[idx].round().int().tolist()
-    
+
     # Extract the binary mask
     mask = result_img.masks[idx].data.bool().squeeze(0).cpu()
-    
+
     return class_name, bbox, mask
 
 
@@ -273,13 +267,9 @@ class MaskedImageFrame:
     immutable-like frame, we guarantee that the correct crop-adjusted camera intrinsics are always computed
     dynamically in get_o3d_intrinsics().
     """
+
     def __init__(
-        self,
-        rgb: torch.Tensor,
-        depth: torch.Tensor,
-        camera: Camera,
-        xmin: int,
-        ymin: int
+        self, rgb: torch.Tensor, depth: torch.Tensor, camera: Camera, xmin: int, ymin: int
     ):
         self.rgb = rgb
         self.depth = depth
@@ -303,9 +293,12 @@ class MaskedImageFrame:
         crop_cx = self.camera.cx - self.xmin
         crop_cy = self.camera.cy - self.ymin
         return o3d.camera.PinholeCameraIntrinsic(
-            width=self.width, height=self.height,
-            fx=self.camera.fx, fy=self.camera.fy,
-            cx=crop_cx, cy=crop_cy
+            width=self.width,
+            height=self.height,
+            fx=self.camera.fx,
+            fy=self.camera.fy,
+            cx=crop_cx,
+            cy=crop_cy,
         )
 
 
@@ -314,7 +307,7 @@ def crop_and_mask_inputs(
     mask: torch.Tensor,
     depth_tensor: torch.Tensor,
     bbox: list[int],
-    camera: Camera
+    camera: Camera,
 ) -> MaskedImageFrame:
     """
     Crops the original RGB image, depth tensor, and segmentation mask using the bounding box,
@@ -331,34 +324,34 @@ def crop_and_mask_inputs(
         MaskedImageFrame: Packaged crop and mask results.
     """
     xmin, ymin, xmax, ymax = bbox
-    
+
     # Crop RGB image and segmentation mask
     rgb_cropped = orig_img[ymin:ymax, xmin:xmax, :]
     cropped_mask = mask[ymin:ymax, xmin:xmax]
-    
+
     # Black out background pixels
     blacked_out_rgb_cropped = torch.where(cropped_mask.unsqueeze(-1), rgb_cropped, 0)
-    
+
     # Crop and black out depth values
     cropped_depth = depth_tensor[ymin:ymax, xmin:xmax]
     blacked_out_cropped_depth = torch.where(cropped_mask, cropped_depth, 0)
-    
+
     return MaskedImageFrame(
         rgb=blacked_out_rgb_cropped,
         depth=blacked_out_cropped_depth,
         camera=camera,
         xmin=xmin,
-        ymin=ymin
+        ymin=ymin,
     )
 
 
 def instance_detected(result: list) -> bool:
     """
     Checks if any segmented instances were detected by the YOLO model in the inference result.
-    
+
     Args:
         result: The YOLO Results object list.
-        
+
     Returns:
         bool: True if at least one instance has a valid segmentation mask, False otherwise.
     """
@@ -370,6 +363,7 @@ def instance_detected(result: list) -> bool:
 # =====================================================================
 class Camera:
     """Represents a pinhole camera model and manages coordinates for image cropping."""
+
     def __init__(self, fx: float, fy: float, cx: float, cy: float):
         self.fx = fx
         self.fy = fy
@@ -378,16 +372,15 @@ class Camera:
 
 
 def point_cloud_processing(
-    frame: MaskedImageFrame,
-    depth_trunc: float = 3.0
+    frame: MaskedImageFrame, depth_trunc: float = 3.0
 ) -> o3d.geometry.PointCloud:
     """
     Converts a MaskedImageFrame into an Open3D PointCloud object using the cropped intrinsics.
-    
+
     Args:
         frame (MaskedImageFrame): Packaged cropped and masked image frame.
         depth_trunc (float): Max depth to include in the point cloud.
-        
+
     Returns:
         o3d.geometry.PointCloud: Reconstructed point cloud in the cameras local coordinate frame.
     """
@@ -397,45 +390,44 @@ def point_cloud_processing(
 
     color_o3d = o3d.geometry.Image(rgb_np)
     depth_o3d = o3d.geometry.Image(depth_np)
-    
+
     rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-        color_o3d, 
-        depth_o3d, 
+        color_o3d,
+        depth_o3d,
         depth_scale=1.0,
-        depth_trunc=depth_trunc, 
+        depth_trunc=depth_trunc,
         convert_rgb_to_intensity=False,
     )
-    
+
     intrinsics = frame.get_o3d_intrinsics()
-    
+
     return o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, intrinsics)
-
-
-
 
 
 # =====================================================================
 # 5. COORDINATE TRANSFORMS AND 6D POSE ESTIMATION
 # =====================================================================
-def compute_ground_truth_pose(T_world_camera: np.ndarray, T_world_cart: np.ndarray, T_robot_camera: np.ndarray) -> np.ndarray:
+def compute_ground_truth_pose(
+    T_world_camera: np.ndarray, T_world_cart: np.ndarray, T_robot_camera: np.ndarray
+) -> np.ndarray:
     """
     Computes the ground truth 6D pose of the cart in the robot's base frame.
-    
+
     The function transforms the cart pose from global world coordinates (arbitrary USD origin)
-    to the camera coordinate frame (adjusting for USD to OpenCV conventions), and projects 
+    to the camera coordinate frame (adjusting for USD to OpenCV conventions), and projects
     it into the robot's base_link frame.
-    
+
     Args:
         T_world_camera (np.ndarray): 4x4 transform from world to camera.
         T_world_cart (np.ndarray): 4x4 transform from world to cart.
         T_robot_camera (np.ndarray): 4x4 extrinsic transform from camera to robot base link.
-        
+
     Returns:
         np.ndarray: A 4x4 homogeneous transformation matrix in the robot's base frame.
     """
     # 2. Define USD (Z-back, Y-up) to OpenCV (Z-forward, Y-down) coordinate change matrix
     T_usd_to_cv = np.diag([1, -1, -1, 1])
-    
+
     # 3. Compute final coordinate multiplication chain
     return T_robot_camera @ T_usd_to_cv @ T_world_camera @ T_world_cart
 
@@ -449,7 +441,7 @@ def process_and_reconstruct(
     result: list,
     camera: Camera,
     depth_trunc: float = 3.0,
-    return_frame: bool = False
+    return_frame: bool = False,
 ) -> tuple[str, o3d.geometry.PointCloud] | tuple[str, o3d.geometry.PointCloud, MaskedImageFrame]:
     """
     Extracts the target cart segmentation mask, crops depth and RGB data,
@@ -483,11 +475,7 @@ def process_and_reconstruct(
 
     # Crop and mask inputs, producing the type-safe MaskedImageFrame
     frame = crop_and_mask_inputs(
-        orig_img=orig_img_tensor,
-        mask=mask,
-        depth_tensor=depth_tensor,
-        bbox=bbox,
-        camera=camera
+        orig_img=orig_img_tensor, mask=mask, depth_tensor=depth_tensor, bbox=bbox, camera=camera
     )
 
     # Reconstruct 3D Point Cloud using camera properties and MaskedImageFrame
@@ -499,26 +487,26 @@ def process_and_reconstruct(
     return cart_type, pcd
 
 
-
 def load_cad_meshes(meshes_dir: str = None) -> dict[str, o3d.geometry.TriangleMesh]:
     """
     Loads all PLY CAD meshes from the meshes/ directory.
-    
+
     Args:
-        meshes_dir: Absolute path to the meshes directory. If None, uses 
+        meshes_dir: Absolute path to the meshes directory. If None, uses
                     the 'meshes/' directory relative to this script.
-    
+
     Returns:
         dict mapping cart type name (e.g. 'colruyt') to the loaded TriangleMesh.
-        
+
     Raises:
         RuntimeError: If no meshes are found.
     """
     import glob as _glob
+
     if meshes_dir is None:
         project_root = os.path.dirname(os.path.abspath(__file__))
         meshes_dir = os.path.join(project_root, "meshes")
-    
+
     mesh_pattern = os.path.join(meshes_dir, "*.ply")
     mesh_files = _glob.glob(mesh_pattern)
     meshes = {}

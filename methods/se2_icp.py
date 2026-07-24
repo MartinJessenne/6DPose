@@ -12,6 +12,7 @@ np.ndarray inputs and does not depend on open3d. Point-to-plane residuals use
 the SCENE normals (target normals), matching Open3D's
 TransformationEstimationPointToPlane convention.
 """
+
 import logging
 
 import numpy as np
@@ -42,13 +43,13 @@ def _lift_se2_increment(xi, center_xy):
 
 
 def icp_point_to_plane_se2(
-    model_points,                 # (N, 3) model points (already sampled from the CAD)
-    scene_points,                 # (M, 3) scene points in the Z-up robot base frame
-    scene_normals,                # (M, 3) scene normals (oriented toward the sensor)
-    T_init,                       # (4, 4) SE(2)-embedded initial pose
+    model_points,  # (N, 3) model points (already sampled from the CAD)
+    scene_points,  # (M, 3) scene points in the Z-up robot base frame
+    scene_normals,  # (M, 3) scene normals (oriented toward the sensor)
+    T_init,  # (4, 4) SE(2)-embedded initial pose
     max_correspondence_distance,
     max_iterations=100,
-    tolerance=1e-8,               # stop when the increment norm falls below this
+    tolerance=1e-8,  # stop when the increment norm falls below this
 ):
     """
     SE(2)-constrained point-to-plane ICP.
@@ -96,11 +97,13 @@ def icp_point_to_plane_se2(
         c = p[:, :2].mean(axis=0)
 
         r = np.einsum("ij,ij->i", n, p - q)
-        J = np.column_stack([
-            n[:, 1] * (p[:, 0] - c[0]) - n[:, 0] * (p[:, 1] - c[1]),  # d r / d omega
-            n[:, 0],                                                   # d r / d vx
-            n[:, 1],                                                   # d r / d vy
-        ])
+        J = np.column_stack(
+            [
+                n[:, 1] * (p[:, 0] - c[0]) - n[:, 0] * (p[:, 1] - c[1]),  # d r / d omega
+                n[:, 0],  # d r / d vx
+                n[:, 1],  # d r / d vy
+            ]
+        )
 
         JTJ = J.T @ J + 1e-12 * np.eye(3)
         try:
@@ -159,15 +162,22 @@ def refine_pose_dual_hypothesis_se2(
 
     # Pass 1: ICP refinement on primary hypothesis using model_points
     result_1 = icp_point_to_plane_se2(
-        model_points, scene_points, scene_normals, T_init,
-        max_correspondence_distance, max_iterations,
+        model_points,
+        scene_points,
+        scene_normals,
+        T_init,
+        max_correspondence_distance,
+        max_iterations,
     )
 
     # 2. Fast Free-Space Early-Exit Check
     n_obs_1, viol_ratio_1 = None, None
     if frame is not None and extrinsic is not None:
         from methods.free_space import compute_free_space_violations
-        full_pts = np.asarray(model_points.points if hasattr(model_points, "points") else model_points)
+
+        full_pts = np.asarray(
+            model_points.points if hasattr(model_points, "points") else model_points
+        )
         _, n_obs_1, viol_ratio_1 = compute_free_space_violations(
             full_pts, result_1.transformation, extrinsic, frame, margin=free_space_margin
         )
@@ -176,31 +186,48 @@ def refine_pose_dual_hypothesis_se2(
                 f"SE(2) ICP orientation selected: Original [Early Exit - clean free space] "
                 f"(Violations: {viol_ratio_1:.2%} over {n_obs_1} obs, Fitness: {result_1.fitness:.4f}, RMSE: {result_1.inlier_rmse:.4f})"
             )
+            # Structured diagnostics for offline per-frame auditing (benchmark.py),
+            # attached rather than returned as a second value so every existing
+            # caller that only reads .transformation/.fitness/.inlier_rmse is
+            # unaffected.
+            result_1.diagnostics = {
+                "selected": "original",
+                "decision": "early_exit_clean_free_space",
+                "fitness_1": result_1.fitness,
+                "fitness_2": None,
+                "viol_ratio_1": viol_ratio_1,
+                "viol_ratio_2": None,
+            }
             return result_1
 
     # 3. Fallback Path: Pass 2 on 180°-flipped hypothesis
 
     T_init_array = np.asarray(T_init)
-    world_pts = model_points @ T_init_array[:3, :3].T + T_init_array[:3, 3] 
-    cx = 0.5 * (world_pts[:,0].min() + world_pts[:,0].max())
-    cy = 0.5 * (world_pts[:,1].min() + world_pts[:,1].max())
+    world_pts = model_points @ T_init_array[:3, :3].T + T_init_array[:3, 3]
+    cx = 0.5 * (world_pts[:, 0].min() + world_pts[:, 0].max())
+    cy = 0.5 * (world_pts[:, 1].min() + world_pts[:, 1].max())
 
     T_flip = np.eye(4)
-    T_flip[:2,:2] = np.array([[-1, 0],
-                                     [0, -1]])
-    T_flip[0, 3] = 2.0*cx
-    T_flip[1, 3] = 2.0*cy
-    
+    T_flip[:2, :2] = np.array([[-1, 0], [0, -1]])
+    T_flip[0, 3] = 2.0 * cx
+    T_flip[1, 3] = 2.0 * cy
 
     result_2 = icp_point_to_plane_se2(
-        model_points, scene_points, scene_normals, T_flip @ T_init_array,
-        max_correspondence_distance, max_iterations,
+        model_points,
+        scene_points,
+        scene_normals,
+        T_flip @ T_init_array,
+        max_correspondence_distance,
+        max_iterations,
     )
 
     n_obs_2, viol_ratio_2 = None, None
     if frame is not None and extrinsic is not None:
         from methods.free_space import compute_free_space_violations
-        full_pts = np.asarray(model_points.points if hasattr(model_points, "points") else model_points)
+
+        full_pts = np.asarray(
+            model_points.points if hasattr(model_points, "points") else model_points
+        )
         _, n_obs_2, viol_ratio_2 = compute_free_space_violations(
             full_pts, result_2.transformation, extrinsic, frame, margin=free_space_margin
         )
@@ -209,22 +236,36 @@ def refine_pose_dual_hypothesis_se2(
     # A. If free-space violation ratios differ significantly (>2%), pick lower violation ratio.
     # Only trusted when both hypotheses had enough observed points to make the ratio meaningful.
     free_space_reliable = (
-        viol_ratio_1 is not None and viol_ratio_2 is not None
-        and n_obs_1 >= free_space_min_observed and n_obs_2 >= free_space_min_observed
+        viol_ratio_1 is not None
+        and viol_ratio_2 is not None
+        and n_obs_1 >= free_space_min_observed
+        and n_obs_2 >= free_space_min_observed
     )
     if free_space_reliable and abs(viol_ratio_1 - viol_ratio_2) > 0.02:
         if viol_ratio_1 < viol_ratio_2:
-            best, label = result_1, f"Original (Free-space: {viol_ratio_1:.2%} vs {viol_ratio_2:.2%})"
+            best, label = (
+                result_1,
+                f"Original (Free-space: {viol_ratio_1:.2%} vs {viol_ratio_2:.2%})",
+            )
         else:
-            best, label = result_2, f"Flipped 180° (Free-space: {viol_ratio_2:.2%} vs {viol_ratio_1:.2%})"
+            best, label = (
+                result_2,
+                f"Flipped 180° (Free-space: {viol_ratio_2:.2%} vs {viol_ratio_1:.2%})",
+            )
     # B. Else if ICP fitness differs significantly (>2%), pick higher fitness. This margin
     # avoids letting a coin-flip-sized fitness gap decide the hard, near-tied cases that flip
     # disambiguation exists for.
     elif abs(result_1.fitness - result_2.fitness) > 0.02:
         if result_1.fitness > result_2.fitness:
-            best, label = result_1, f"Original (Fitness: {result_1.fitness:.4f} vs {result_2.fitness:.4f})"
+            best, label = (
+                result_1,
+                f"Original (Fitness: {result_1.fitness:.4f} vs {result_2.fitness:.4f})",
+            )
         else:
-            best, label = result_2, f"Flipped 180° (Fitness: {result_2.fitness:.4f} vs {result_1.fitness:.4f})"
+            best, label = (
+                result_2,
+                f"Flipped 180° (Fitness: {result_2.fitness:.4f} vs {result_1.fitness:.4f})",
+            )
     # C. Fallback: RMSE tiebreaker
     else:
         if result_1.inlier_rmse <= result_2.inlier_rmse:
@@ -236,5 +277,12 @@ def refine_pose_dual_hypothesis_se2(
         f"SE(2) ICP orientation selected: {label} "
         f"(Fitness: {best.fitness:.4f}, RMSE: {best.inlier_rmse:.4f})"
     )
+    best.diagnostics = {
+        "selected": "original" if best is result_1 else "flipped",
+        "decision": label,
+        "fitness_1": result_1.fitness,
+        "fitness_2": result_2.fitness,
+        "viol_ratio_1": viol_ratio_1,
+        "viol_ratio_2": viol_ratio_2,
+    }
     return best
-

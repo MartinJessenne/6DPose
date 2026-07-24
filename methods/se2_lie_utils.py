@@ -12,10 +12,10 @@ Provides:
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # 1. RANSAC minimal solver: 2 correspondences -> (theta, t)
 # ---------------------------------------------------------------------------
+
 
 def minimal_solver_se2(p1, p2, q1, q2):
     """
@@ -48,8 +48,7 @@ def minimal_solver_se2(p1, p2, q1, q2):
 def so2_exp(theta):
     """Exponential map so(2) -> SO(2): the 2x2 rotation matrix R(theta)."""
     c, s = np.cos(theta), np.sin(theta)
-    return np.array([[c, -s],
-                     [s,  c]])
+    return np.array([[c, -s], [s, c]])
 
 
 # ---------------------------------------------------------------------------
@@ -57,14 +56,17 @@ def so2_exp(theta):
 #    xi = (omega, vx, vy)  <->  xi_hat = 3x3 generator matrix
 # ---------------------------------------------------------------------------
 
+
 def se2_hat(xi):
     """xi = (omega, vx, vy) -> 3x3 generator matrix (element of se(2))."""
     omega, vx, vy = xi
-    return np.array([
-        [0.0,   -omega, vx],
-        [omega,  0.0,   vy],
-        [0.0,    0.0,   0.0],
-    ])
+    return np.array(
+        [
+            [0.0, -omega, vx],
+            [omega, 0.0, vy],
+            [0.0, 0.0, 0.0],
+        ]
+    )
 
 
 def se2_vee(xi_hat):

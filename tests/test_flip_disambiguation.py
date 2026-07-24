@@ -1,12 +1,13 @@
 import unittest
-import numpy as np
-import torch
-import open3d as o3d
 
-from pipeline import Camera, MaskedImageFrame
+import numpy as np
+import open3d as o3d
+import torch
+
 from methods.free_space import compute_free_space_violations
+from methods.ransac3dof import Ransac3DoFParams
 from methods.se2_icp import refine_pose_dual_hypothesis_se2
-from methods.ransac3dof import Ransac3DoFEstimator, Ransac3DoFParams
+from pipeline import Camera, MaskedImageFrame
 
 
 class TestFlipDisambiguation(unittest.TestCase):
@@ -23,9 +24,7 @@ class TestFlipDisambiguation(unittest.TestCase):
         depth = torch.full((100, 100), 2.0, dtype=torch.float32)
         rgb = torch.zeros((100, 100, 3), dtype=torch.uint8)
 
-        frame = MaskedImageFrame(
-            rgb=rgb, depth=depth, camera=self.camera, xmin=270, ymin=190
-        )
+        frame = MaskedImageFrame(rgb=rgb, depth=depth, camera=self.camera, xmin=270, ymin=190)
 
         T_pose = np.eye(4)
         n_viol, n_obs, ratio = compute_free_space_violations(
@@ -45,9 +44,7 @@ class TestFlipDisambiguation(unittest.TestCase):
         depth = torch.full((100, 100), 2.0, dtype=torch.float32)
         rgb = torch.zeros((100, 100, 3), dtype=torch.uint8)
 
-        frame = MaskedImageFrame(
-            rgb=rgb, depth=depth, camera=self.camera, xmin=270, ymin=190
-        )
+        frame = MaskedImageFrame(rgb=rgb, depth=depth, camera=self.camera, xmin=270, ymin=190)
 
         T_pose = np.eye(4)
         n_viol, n_obs, ratio = compute_free_space_violations(
@@ -60,7 +57,9 @@ class TestFlipDisambiguation(unittest.TestCase):
 
     def test_early_exit_gate_triggers_on_clean_pose(self):
         # Create synthetic scene and model point clouds
-        model_pc = o3d.geometry.TriangleMesh.create_box(width=1.0, height=0.5, depth=0.5).sample_points_uniformly(200)
+        model_pc = o3d.geometry.TriangleMesh.create_box(
+            width=1.0, height=0.5, depth=0.5
+        ).sample_points_uniformly(200)
         scene_points = np.asarray(model_pc.points)
         scene_normals = np.zeros_like(scene_points)
         scene_normals[:, 2] = 1.0
@@ -97,7 +96,9 @@ class TestFlipDisambiguation(unittest.TestCase):
     def test_early_exit_gate_requires_minimum_observed_points(self):
         # Regression test: a 0/0 free-space ratio (no valid depth pixels observed)
         # must not be read as "clean" and short-circuit disambiguation.
-        model_pc = o3d.geometry.TriangleMesh.create_box(width=1.0, height=0.5, depth=0.5).sample_points_uniformly(200)
+        model_pc = o3d.geometry.TriangleMesh.create_box(
+            width=1.0, height=0.5, depth=0.5
+        ).sample_points_uniformly(200)
         model_points = np.asarray(model_pc.points)
 
         cx = 0.5 * (model_points[:, 0].min() + model_points[:, 0].max())

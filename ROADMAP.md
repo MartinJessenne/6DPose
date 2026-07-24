@@ -141,7 +141,7 @@ def free_space_violations(model_points, T, T_robot_camera, frame, margin=0.03):
     P_cam = (T_cam_base[:3, :3] @ P_base.T).T + T_cam_base[:3, 3]
 
     z = P_cam[:, 2]
-    valid = z > 0.05                      # in front of the camera
+    valid = z > 0.05  # in front of the camera
     # 2. project with crop-shifted pinhole intrinsics (same math as get_o3d_intrinsics)
     u = np.round(P_cam[:, 0] / z * frame.camera.fx + (frame.camera.cx - frame.xmin)).astype(int)
     v = np.round(P_cam[:, 1] / z * frame.camera.fy + (frame.camera.cy - frame.ymin)).astype(int)
@@ -150,7 +150,7 @@ def free_space_violations(model_points, T, T_robot_camera, frame, margin=0.03):
     depth = frame.depth.numpy()
     d_measured = depth[v[inside], u[inside]]
     d_predicted = z[inside]
-    observed = d_measured > 0             # 0 = masked-out / hole: no evidence, skip
+    observed = d_measured > 0  # 0 = masked-out / hole: no evidence, skip
     # 3. violation: pose claims solid cart >margin *in front of* a measured surface
     violations = observed & (d_predicted < d_measured - margin)
     return int(violations.sum()), int(observed.sum())
@@ -271,18 +271,18 @@ active, since it is pure wasted latency).
 **1. Scene grid (per frame).**
 
 ```python
-res = 0.01                                  # 1 cm cells
-pts = np.asarray(pcd_down.points)           # base_link, Z-up
-pts = pts[pts[:, 2] > 0.02]                 # drop floor points if any survive masking
+res = 0.01  # 1 cm cells
+pts = np.asarray(pcd_down.points)  # base_link, Z-up
+pts = pts[pts[:, 2] > 0.02]  # drop floor points if any survive masking
 # grid extents from the YOLO-derived cloud bbox + search margin
 origin = pts[:, :2].min(axis=0) - margin
 ij = ((pts[:, :2] - origin) / res).astype(int)
 H = np.zeros(grid_shape, np.float32)
-np.maximum.at(H, (ij[:, 0], ij[:, 1]), pts[:, 2])   # height map: max z per cell
+np.maximum.at(H, (ij[:, 0], ij[:, 1]), pts[:, 2])  # height map: max z per cell
 occ = H > 0
 # likelihood field: smooth score falloff with distance to nearest occupied cell
 D = scipy.ndimage.distance_transform_edt(~occ) * res
-L = np.exp(-(D / sigma) ** 2)               # sigma ≈ 0.02–0.03 m (D455 noise)
+L = np.exp(-((D / sigma) ** 2))  # sigma ≈ 0.02–0.03 m (D455 noise)
 ```
 
 Prefer the **height map** variant for scoring when possible: score a template cell against

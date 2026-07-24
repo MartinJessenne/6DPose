@@ -22,11 +22,11 @@ from scipy.spatial import cKDTree
 
 from methods.se2_lie_utils import minimal_solver_se2
 
-
 # ---------------------------------------------------------------------------
 # Result container, API-compatible with the open3d registration result
 # (T_init = result.transformation ; result.fitness)
 # ---------------------------------------------------------------------------
+
 
 class RansacResult:
     """
@@ -53,7 +53,10 @@ class RansacResult:
 # Mutual FPFH matching -- numpy equivalent of mutual_filter=True
 # ---------------------------------------------------------------------------
 
-def match_correspondences_fpfh(feat_model: np.ndarray, feat_scene: np.ndarray) -> np.ndarray:
+
+def match_correspondences_fpfh(
+    feat_model: np.ndarray, feat_scene: np.ndarray, scored: bool = False
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """
     Computes mutual nearest-neighbor matches between model and scene descriptors.
 
@@ -73,15 +76,20 @@ def match_correspondences_fpfh(feat_model: np.ndarray, feat_scene: np.ndarray) -
     """
     # Guard against empty descriptor arrays resulting from aggressive downsampling/masking
     if len(feat_model) == 0 or len(feat_scene) == 0:
-        return np.empty((0, 2), dtype=int)
+        empty = np.empty((0, 2), dtype=int)
+        return (empty, np.empty((0,), dtype=int)) if scored else empty
 
     # 1. For each model point descriptor, find its nearest neighbor in scene descriptor space
     tree_scene = cKDTree(feat_scene)
-    _, nn_in_scene = tree_scene.query(feat_model, k=1)  # Shape (N,); nn_in_scene[i] = scene index for model i
+    dist, nn_in_scene = tree_scene.query(
+        feat_model, k=1
+    )  # Shape (N,); nn_in_scene[i] = scene index for model i
 
     # 2. For each scene point descriptor, find its nearest neighbor in model descriptor space
     tree_model = cKDTree(feat_model)
-    _, nn_in_model = tree_model.query(feat_scene, k=1)  # Shape (M,); nn_in_model[j] = model index for scene j
+    _, nn_in_model = tree_model.query(
+        feat_scene, k=1
+    )  # Shape (M,); nn_in_model[j] = model index for scene j
 
     # 3. Check mutual consistency:
     # `model_idx` is [0, 1, ..., N-1].
@@ -90,12 +98,17 @@ def match_correspondences_fpfh(feat_model: np.ndarray, feat_scene: np.ndarray) -
     # If `i_prime == i`, then `i` and `j` are mutual nearest neighbors.
     model_idx = np.arange(len(feat_model))
     mutual = nn_in_model[nn_in_scene] == model_idx
-    return np.column_stack([model_idx[mutual], nn_in_scene[mutual]])
+    corr = np.column_stack([model_idx[mutual], nn_in_scene[mutual]])
+    if scored:
+        return corr, dist[mutual]
+    else:
+        return corr
 
 
 # ---------------------------------------------------------------------------
 # Lift (theta, t_xy) into a 4x4 homogeneous transform with fixed z
 # ---------------------------------------------------------------------------
+
 
 def se2_to_se3(theta: float, t_xy: np.ndarray, z: float = 0.0) -> np.ndarray:
     """
@@ -107,11 +120,13 @@ def se2_to_se3(theta: float, t_xy: np.ndarray, z: float = 0.0) -> np.ndarray:
     into the standard 4x4 matrix format expected by downstream components.
     """
     T = np.eye(4)
-    T[:3, :3] = np.array([
-        [np.cos(theta), -np.sin(theta), 0.0],
-        [np.sin(theta),  np.cos(theta), 0.0],
-        [0.0,            0.0,           1.0],
-    ])
+    T[:3, :3] = np.array(
+        [
+            [np.cos(theta), -np.sin(theta), 0.0],
+            [np.sin(theta), np.cos(theta), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
     T[0, 3], T[1, 3], T[2, 3] = t_xy[0], t_xy[1], z
     return T
 
@@ -135,6 +150,7 @@ def project_to_se2(T: np.ndarray, z_offset: float = 0.0) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Helper functions for RANSAC loop factoring
 # ---------------------------------------------------------------------------
+
 
 def _sample_and_validate_pair(
     correspondences: np.ndarray,
@@ -181,16 +197,17 @@ def _sample_and_validate_pair(
 # The constrained RANSAC loop
 # ---------------------------------------------------------------------------
 
+
 def constrained_ransac_se2(
-    model_points: np.ndarray,        # (N, 3) downsampled model points
-    scene_points: np.ndarray,        # (M, 3) downsampled scene points
-    model_fpfh: np.ndarray,          # (N, 33) FPFH descriptors of model
-    scene_fpfh: np.ndarray,          # (M, 33) FPFH descriptors of scene
+    model_points: np.ndarray,  # (N, 3) downsampled model points
+    scene_points: np.ndarray,  # (M, 3) downsampled scene points
+    model_fpfh: np.ndarray,  # (N, 33) FPFH descriptors of model
+    scene_fpfh: np.ndarray,  # (M, 33) FPFH descriptors of scene
     distance_threshold: float,
     max_iterations: int = 100000,
     min_iterations: int = 1000,
     confidence: float = 0.999,
-    z_offset: float = 0.0,           # height of model origin above ground plane
+    z_offset: float = 0.0,  # height of model origin above ground plane
     z_gate_threshold: float | None = None,
     edge_length_threshold: float = 0.9,
     min_sample_distance: float = 0.0,
@@ -265,7 +282,7 @@ def constrained_ransac_se2(
     # Full model point cloud evaluation is only triggered when subsample fitness beats current best.
     n_sub = min(scoring_subsample_size, n_model)
     sub_points = model_points[rng.choice(n_model, size=n_sub, replace=False)]
-    subsample_is_full = (n_sub == n_model)
+    subsample_is_full = n_sub == n_model
 
     best_fitness = 0.0
     best_rmse = np.inf
@@ -279,7 +296,12 @@ def constrained_ransac_se2(
 
         # 1. Sample 2 correspondences and validate geometric constraints
         pair = _sample_and_validate_pair(
-            correspondences, model_points, scene_points, min_sample_distance, edge_length_threshold, rng
+            correspondences,
+            model_points,
+            scene_points,
+            min_sample_distance,
+            edge_length_threshold,
+            rng,
         )
         if pair is None:
             continue
@@ -321,9 +343,7 @@ def constrained_ransac_se2(
 
             # 6. Update required RANSAC iterations based on correspondence inlier ratio w:
             # Chance of picking 2 inliers in a row is w^2, so required iterations = log(1-conf)/log(1-w^2).
-            residuals = np.linalg.norm(
-                corr_p @ T[:3, :3].T + T[:3, 3] - corr_q, axis=1
-            )
+            residuals = np.linalg.norm(corr_p @ T[:3, :3].T + T[:3, 3] - corr_q, axis=1)
             w = (residuals < distance_threshold).mean()
             if w >= 1.0:
                 required_iterations = min_iterations

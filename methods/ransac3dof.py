@@ -15,10 +15,9 @@ if TYPE_CHECKING:
     import optuna
 
 
-def crop_front_face(cad_mesh: "o3d.geometry.TriangleMesh",
-                    depth: float,
-                    min_height: float = 0.16
-                    ) -> "o3d.geometry.TriangleMesh":
+def crop_front_face(
+    cad_mesh: "o3d.geometry.TriangleMesh", depth: float, min_height: float = 0.16
+) -> "o3d.geometry.TriangleMesh":
     """
     Keeps only the slab within `depth` meters of the mesh's +x extreme, and at
     least `min_height` meters above the floor.
@@ -54,8 +53,12 @@ def crop_front_face(cad_mesh: "o3d.geometry.TriangleMesh",
     # flat polygon: a real depth camera never sees an artificial cut face, so
     # capping would inject a fake planar surface into the FPFH/ICP point cloud.
     tm = trimesh.Trimesh(vertices=vertices, faces=np.asarray(cad_mesh.triangles))
-    tm = trimesh.intersections.slice_mesh_plane(tm, plane_normal=[1, 0, 0], plane_origin=[x_max - depth, 0, 0])
-    tm = trimesh.intersections.slice_mesh_plane(tm, plane_normal=[0, 0, 1], plane_origin=[0, 0, z_floor + min_height])
+    tm = trimesh.intersections.slice_mesh_plane(
+        tm, plane_normal=[1, 0, 0], plane_origin=[x_max - depth, 0, 0]
+    )
+    tm = trimesh.intersections.slice_mesh_plane(
+        tm, plane_normal=[0, 0, 1], plane_origin=[0, 0, z_floor + min_height]
+    )
 
     if len(tm.vertices) == 0:
         raise ValueError(
@@ -125,6 +128,7 @@ class Ransac3DoFParams(RansacParams):
             front from back by visibility alone, and the decision falls
             through to front-slab fitness / ICP tiebreaker instead.
     """
+
     z_offset: float | None = None
     z_gate_threshold: float = 0.09
     edge_length_threshold: float = 0.9
@@ -175,6 +179,11 @@ class Ransac3DoFEstimator(RansacEstimator):
         self._active_z_offset = 0.0
         self._active_frame = None
         self._active_cart_type = None
+        # Populated by _refine_pose with the flip-disambiguation diagnostics
+        # (fitness/violation-ratio for both hypotheses, which one was picked
+        # and why) -- read by benchmark.py's evaluate_pipeline right after
+        # estimate_pose() returns, for per-frame auditing.
+        self._last_diagnostics: dict | None = None
 
     def _get_prep_params_key(self) -> tuple:
         # front_crop_depth changes the prepared model representation, so it
@@ -188,7 +197,8 @@ class Ransac3DoFEstimator(RansacEstimator):
             return
 
         stale_keys = [
-            k for k in self._PREPARATION_CACHE
+            k
+            for k in self._PREPARATION_CACHE
             if k[0] == self.__class__.__name__ and k[1] == cart_type and k[2] != prep_params
         ]
         for k in stale_keys:
@@ -215,11 +225,12 @@ class Ransac3DoFEstimator(RansacEstimator):
 
         voxel_size = self.params.voxel_size
         model_down = model_pc.voxel_down_sample(voxel_size)
-        model_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
+        model_down.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
+        )
 
         model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-            model_down,
-            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
+            model_down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
         )
 
         self._PREPARATION_CACHE[cache_key] = {
@@ -255,7 +266,7 @@ class Ransac3DoFEstimator(RansacEstimator):
         return constrained_ransac_se2(
             model_points=np.asarray(model_down.points),
             scene_points=np.asarray(pcd_down.points),
-            model_fpfh=np.asarray(model_fpfh.data).T,   # (33, N) -> (N, 33)
+            model_fpfh=np.asarray(model_fpfh.data).T,  # (33, N) -> (N, 33)
             scene_fpfh=np.asarray(pcd_fpfh.data).T,
             distance_threshold=distance_threshold,
             max_iterations=self.params.ransac_max_iterations,
@@ -298,6 +309,7 @@ class Ransac3DoFEstimator(RansacEstimator):
             free_space_margin=self.params.free_space_margin,
             free_space_min_observed=self.params.free_space_min_observed,
         )
+        self._last_diagnostics = getattr(result, "diagnostics", None)
         return result.transformation
 
     def _project_pose(self, T: np.ndarray) -> np.ndarray:

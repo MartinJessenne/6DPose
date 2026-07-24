@@ -1,12 +1,14 @@
-from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
-import numpy as np
 import copy
 import logging
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
 import open3d as o3d
 
 if TYPE_CHECKING:
     import optuna
+
 
 class BasePoseEstimator(ABC):
     """Abstract base class representing a 6D Pose Estimation method."""
@@ -19,7 +21,7 @@ class BasePoseEstimator(ABC):
         pcd: o3d.geometry.PointCloud,
         cad_mesh: o3d.geometry.TriangleMesh,
         cart_type: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> np.ndarray | None:
         """
         Estimates the 6D pose of the CAD model relative to the point cloud.
@@ -35,7 +37,7 @@ class BasePoseEstimator(ABC):
         """
         pass
 
-    def prepare(self, cad_mesh: o3d.geometry.TriangleMesh, cart_type: str) -> None:
+    def prepare(self, cad_mesh: o3d.geometry.TriangleMesh, cart_type: str) -> None:  # noqa: B027
         """
         Prepares and caches model-specific properties (e.g., FPFH features, PPF match database)
         for a given CAD model to speed up online evaluation.
@@ -44,6 +46,7 @@ class BasePoseEstimator(ABC):
             cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model.
             cart_type (str): Name of the cart type.
         """
+        # Default implementation for estimators that do not require pre-computation.
         pass
 
     @classmethod
@@ -69,12 +72,12 @@ def prepare_scene_point_cloud(
     pcd: o3d.geometry.PointCloud,
     T_robot_camera: np.ndarray,
     normal_radius: float = 0.05,
-    normal_max_nn: int = 30
+    normal_max_nn: int = 30,
 ) -> o3d.geometry.PointCloud:
     """
     Prepares the scene point cloud by estimating surface normals, orienting them
     towards the camera origin, and transforming the points to the robot's base frame.
-    
+
     Note:
         This function does not mutate the input point cloud in-place. It operates on a
         deep copy to prevent coordinate transform contamination.
@@ -96,18 +99,20 @@ def prepare_scene_point_cloud(
     # This computes a local plane fit for each point's neighbors. If points lack normals,
     # ICP refinement (Point-to-Plane) and PPF matching will fail.
     pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius, max_nn=normal_max_nn)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(
+            radius=normal_radius, max_nn=normal_max_nn
+        )
     )
-    
+
     # 2. Orient normals towards the camera center [0, 0, 0] in camera frame.
     # This guarantees consistent normal directions (pointing outward toward the sensor),
     # which is crucial for point-to-plane ICP to converge correctly.
     pcd.orient_normals_towards_camera_location(camera_location=np.zeros(3))
-    
+
     # 3. Transform point cloud from camera frame to robot base link frame.
     # This aligns the coordinate system with the robot reference frame where CAD poses are evaluated.
     pcd.transform(T_robot_camera)
-    
+
     return pcd
 
 
@@ -116,7 +121,7 @@ def refine_pose_dual_hypothesis(
     scene_pcd: o3d.geometry.PointCloud,
     T_init: np.ndarray,
     icp_max_correspondence_distance: float,
-    icp_max_iterations: int
+    icp_max_iterations: int,
 ) -> np.ndarray:
     """
     Refines an initial pose estimate using point-to-plane ICP with a dual-hypothesis search.
@@ -139,10 +144,8 @@ def refine_pose_dual_hypothesis(
     Returns:
         np.ndarray: Refined 4x4 homogeneous transformation matrix.
     """
-    criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
-        max_iteration=icp_max_iterations
-    )
-    
+    criteria = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=icp_max_iterations)
+
     # Hypothesis 1: Run ICP on the original registration guess
     icp_result_1 = o3d.pipelines.registration.registration_icp(
         model_pc,
@@ -150,41 +153,46 @@ def refine_pose_dual_hypothesis(
         icp_max_correspondence_distance,
         T_init,
         o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-        criteria
+        criteria,
     )
-    
+
     # Hypothesis 2: Run ICP on the alignment rotated 180 degrees around the local Z-axis
-    T_flip = np.array([
-        [-1.0,  0.0,  0.0,  0.0],
-        [ 0.0, -1.0,  0.0,  0.0],
-        [ 0.0,  0.0,  1.0,  0.0],
-        [ 0.0,  0.0,  0.0,  1.0]
-    ])
+    T_flip = np.array(
+        [[-1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    )
     T_init_flipped = T_init @ T_flip
-    
+
     icp_result_2 = o3d.pipelines.registration.registration_icp(
         model_pc,
         scene_pcd,
         icp_max_correspondence_distance,
         T_init_flipped,
         o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-        criteria
+        criteria,
     )
-    
+
     # Select the hypothesis that maximizes point cloud overlap (fitness score)
     if icp_result_1.fitness > icp_result_2.fitness:
         best_result = icp_result_1
-        logging.info(f"Orientation selected: Original (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})")
+        logging.info(
+            f"Orientation selected: Original (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})"
+        )
     elif icp_result_2.fitness > icp_result_1.fitness:
         best_result = icp_result_2
-        logging.info(f"Orientation selected: Flipped 180° (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})")
+        logging.info(
+            f"Orientation selected: Flipped 180° (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})"
+        )
     else:
         # Tie breaker: pick the one with lower RMSE
         if icp_result_1.inlier_rmse <= icp_result_2.inlier_rmse:
             best_result = icp_result_1
-            logging.info(f"Orientation selected: Original [Tie breaker] (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})")
+            logging.info(
+                f"Orientation selected: Original [Tie breaker] (Fitness: {icp_result_1.fitness:.4f}, RMSE: {icp_result_1.inlier_rmse:.4f})"
+            )
         else:
             best_result = icp_result_2
-            logging.info(f"Orientation selected: Flipped 180° [Tie breaker] (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})")
-            
+            logging.info(
+                f"Orientation selected: Flipped 180° [Tie breaker] (Fitness: {icp_result_2.fitness:.4f}, RMSE: {icp_result_2.inlier_rmse:.4f})"
+            )
+
     return best_result.transformation

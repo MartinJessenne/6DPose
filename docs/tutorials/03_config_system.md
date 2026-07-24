@@ -96,16 +96,18 @@ entry to the relevant `*ProfileSelect` union in `cli_config.py` — no new file 
 
 ```python
 # In cli_config.py, inside Ransac3DoFProfileSelect's Union[...]
-Annotated[
-    Ransac3DoFProfile,
-    tyro.conf.subcommand(
-        name="my_custom_profile",
-        default=Ransac3DoFProfile(
-            params=Ransac3DoFParams(voxel_size=0.08, ransac_max_iterations=200000),
-            depth_trunc=3.0,
+(
+    Annotated[
+        Ransac3DoFProfile,
+        tyro.conf.subcommand(
+            name="my_custom_profile",
+            default=Ransac3DoFProfile(
+                params=Ransac3DoFParams(voxel_size=0.08, ransac_max_iterations=200000),
+                depth_trunc=3.0,
+            ),
         ),
-    ),
-],
+    ],
+)
 ```
 
 Then select it the same way as any other profile:

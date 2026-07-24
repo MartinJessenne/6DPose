@@ -44,30 +44,34 @@ CLI Configuration Overrides:
   --model.profile.depth-trunc <value>      Override the chosen profile's depth truncation.
 """
 
+import csv
 import dataclasses
 import glob
+import logging
 import os
 import time
 
 import numpy as np
-
 import open3d as o3d
 import optuna
 import plotly.graph_objects as go
 import tyro
-import wandb
 from datasets import Dataset
-
-import logging
 from pydantic import BaseModel, Field
 
+import wandb
 from cli_config import BenchmarkArgs
-from pipeline import (
-    Camera, load_hf_model, load_parquet_dataset,
-    process_and_reconstruct, compute_ground_truth_pose,
-    instance_detected, load_cad_meshes
-)
 from methods.base import BasePoseEstimator
+from pipeline import (
+    Camera,
+    compute_ground_truth_pose,
+    instance_detected,
+    load_cad_meshes,
+    load_hf_model,
+    load_parquet_dataset,
+    process_and_reconstruct,
+)
+
 
 # =====================================================================
 # 0. POSE ERROR METRICS & DECOMPOSITION MATH
@@ -80,96 +84,172 @@ class PoseErrorMetrics(BaseModel):
     roll: float = Field(ge=-180.0, le=180.0)
     geodesic_rot: float = Field(ge=0.0, le=180.0)
 
+
 def extract_pose_errors(T_est: np.ndarray, T_gt: np.ndarray) -> PoseErrorMetrics:
     t_est = T_est[:3, 3]
     t_gt = T_gt[:3, 3]
-    
+
     trans_xy = float(np.linalg.norm(t_est[:2] - t_gt[:2]))
     trans_z = float(t_est[2] - t_gt[2])
-    
+
     R_est = T_est[:3, :3]
     R_gt = T_gt[:3, :3]
-    
+
     # Error rotation matrix from ground truth to estimate
     R_err = R_gt.T @ R_est
-    
-    r11, r12, r13 = R_err[0, 0], R_err[0, 1], R_err[0, 2]
-    r21, r22, r23 = R_err[1, 0], R_err[1, 1], R_err[1, 2]
+
+    r11, _r12, _r13 = R_err[0, 0], R_err[0, 1], R_err[0, 2]
+    r21, _r22, _r23 = R_err[1, 0], R_err[1, 1], R_err[1, 2]
+
     r31, r32, r33 = R_err[2, 0], R_err[2, 1], R_err[2, 2]
-    
+
     # Extract pitch (asin(-r31)), roll (atan2(r32, r33)), yaw (atan2(r21, r11))
     pitch_rad = np.arcsin(np.clip(-r31, -1.0, 1.0))
     roll_rad = np.arctan2(r32, r33)
     yaw_rad = np.arctan2(r21, r11)
-    
+
     pitch = float(np.degrees(pitch_rad))
     roll = float(np.degrees(roll_rad))
     yaw = float(np.degrees(yaw_rad))
-    
+
     # Standard geodesic rotation error
     trace_val = np.trace(R_err)
     cos_theta = np.clip((trace_val - 1.0) / 2.0, -1.0, 1.0)
     geodesic_rot = float(np.degrees(np.arccos(cos_theta)))
-    
+
     return PoseErrorMetrics(
         trans_xy=trans_xy,
         trans_z=trans_z,
         yaw=yaw,
         pitch=pitch,
         roll=roll,
-        geodesic_rot=geodesic_rot
+        geodesic_rot=geodesic_rot,
     )
+
 
 def compute_average_recall(errors: list[PoseErrorMetrics], total_samples: int) -> float:
     """
     Computes a BOP-style Average Recall (AR) metric over a grid of error thresholds.
-    
+
     Why a BOP-style loss?
     --------------------
     1. Prevents Selection Bias:
-       Evaluating only the mean error of successful matches introduces selection bias, where 
-       an estimator that fails on all but one easy sample can achieve a misleadingly low mean error. 
+       Evaluating only the mean error of successful matches introduces selection bias, where
+       an estimator that fails on all but one easy sample can achieve a misleadingly low mean error.
        This metric penalizes failures implicitly by treating them as misses (0 recall contribution).
     2. Avoids Arbitrary Magic Multipliers:
-       Traditional objectives like `mean_trans + alpha * mean_rot + beta * failures` mix units (meters, 
-       degrees, counts) and rely on arbitrary scaling weights (e.g., 5.0 for failure). Average Recall 
+       Traditional objectives like `mean_trans + alpha * mean_rot + beta * failures` mix units (meters,
+       degrees, counts) and rely on arbitrary scaling weights (e.g., 5.0 for failure). Average Recall
        normalizes all parameters to a bounded [0, 1] range, ensuring equal scaling.
     3. Smooth Optimization Landscape for Optuna TPE:
-       Using a single threshold (e.g., <1cm and <2°) results in a step-like discontinuous objective function 
-       (e.g., 21 discrete values for 20 samples). This is highly hostile to Bayesian optimization. 
-       Averaging recall over a grid of 42 threshold combinations (7 translation x 6 rotation) creates 
+       Using a single threshold (e.g., <1cm and <2°) results in a step-like discontinuous objective function
+       (e.g., 21 discrete values for 20 samples). This is highly hostile to Bayesian optimization.
+       Averaging recall over a grid of 42 threshold combinations (7 translation x 6 rotation) creates
        a much smoother landscape, assisting the Tree-structured Parzen Estimator (TPE) search.
     4. Focus on Ground-Plane Constraints (XY + Yaw):
-       Since the towing cart is physically floor-bound, the pitch, roll, and Z-axis translation are 
-       highly constrained by gravity and the ground surface. Therefore, we focus the success criteria 
+       Since the towing cart is physically floor-bound, the pitch, roll, and Z-axis translation are
+       highly constrained by gravity and the ground surface. Therefore, we focus the success criteria
        strictly on `trans_xy` (ground-plane drift) and `yaw` (heading orientation).
-       
+
     Args:
         errors (list[PoseErrorMetrics]): Computed pose errors for successfully registered samples.
         total_samples (int): Total number of samples evaluated (including failures).
-        
+
     Returns:
         float: The average recall score in the range [0.0, 1.0].
     """
     if total_samples <= 0:
         return 0.0
-        
+
     translation_thresholds = [0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.10]
     rotation_thresholds = [0.5, 1.0, 2.0, 5.0, 10.0, 15.0]
-    
+
     recalls = []
     for t_thresh in translation_thresholds:
         for r_thresh in rotation_thresholds:
-            successes = sum(
-                1 for e in errors
-                if e.trans_xy < t_thresh and abs(e.yaw) < r_thresh
-            )
+            successes = sum(1 for e in errors if e.trans_xy < t_thresh and abs(e.yaw) < r_thresh)
             recalls.append(successes / total_samples)
-            
+
     return float(np.mean(recalls))
+
 
 # Set logging level for Optuna
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+def draw_eval_indices(total_samples: int, size: int, seed: int) -> list[int]:
+    """
+    Draws a deterministic evaluation subset from the dataset.
+
+    Uses the modern Generator API exclusively (np.random.default_rng) so a
+    given seed selects the same frames regardless of call site. Sweep and
+    single-run evaluation used to draw from two different PRNG streams
+    (default_rng's PCG64 vs. the legacy np.random.seed/np.random.choice
+    global MT19937 state) -- same seed value, silently different frames,
+    which made cross-run comparisons (e.g. an A/B between two estimators)
+    untrustworthy unless both happened to use the same code path.
+    """
+    rng = np.random.default_rng(seed)
+    return rng.choice(total_samples, min(size, total_samples), replace=False).tolist()
+
+
+def derive_internal_seeds(base_seed: int, n: int, salt: int = 0) -> list[int]:
+    """
+    Derives n distinct, reproducible estimator-internal RANSAC seeds from
+    base_seed (+ an optional salt, e.g. an Optuna trial number, so different
+    trials/calls don't accidentally share the same repeat seeds).
+
+    Deliberately NOT exposed as an Optuna trial.suggest_int(...) search
+    dimension: a pure-noise dimension has no smooth relationship to the
+    objective and would mislead TPE/NSGA-II's surrogate model. Instead, the
+    caller evaluates across these seeds and pools the results, making the
+    search (or a final report) robust to seed luck instead of resting on a
+    single, possibly-lucky draw.
+    """
+    rng = np.random.default_rng([base_seed, salt])
+    return [int(s) for s in rng.integers(0, 2**31 - 1, size=n)]
+
+
+@dataclasses.dataclass
+class FrameRecord:
+    """
+    One evaluated frame's outcome, for offline per-frame auditing -- e.g.
+    "is flip_rate driven by the same handful of frames every time?" (the
+    question that motivated this: a sweep's minimum flip rate recurring
+    identically across trials with no way to tell whether it was the same
+    frames or not).
+
+    fitness_1/2, viol_ratio_1/2, selected, and decision come from whatever
+    flip-disambiguation diagnostics the estimator exposes via a
+    `_last_diagnostics` attribute (see Ransac3DoFEstimator._refine_pose,
+    methods/ransac3dof.py) -- estimators that don't set one (PPF, the SE(3)
+    RansacEstimator) just leave those fields None.
+    """
+
+    sample_idx: int
+    cart_type: str | None
+    flipped: bool
+    trans_xy: float
+    yaw_err: float
+    selected: str | None = None
+    decision: str | None = None
+    fitness_1: float | None = None
+    fitness_2: float | None = None
+    viol_ratio_1: float | None = None
+    viol_ratio_2: float | None = None
+
+
+def write_frame_records_csv(path: str, records: list[FrameRecord]) -> None:
+    """Dumps per-frame records to CSV for offline analysis (pandas/notebook)."""
+    if not records:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fieldnames = [f.name for f in dataclasses.fields(FrameRecord)]
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in records:
+            writer.writerow(dataclasses.asdict(r))
 
 
 # =====================================================================
@@ -182,37 +262,40 @@ def evaluate_pipeline(
     estimator: BasePoseEstimator,
     sample_indices: list[int],
     meshes: dict[str, o3d.geometry.TriangleMesh],
-    depth_trunc: float = 3.0
-) -> tuple[list[PoseErrorMetrics], list[float], int, int]:
+    depth_trunc: float = 3.0,
+) -> tuple[list[PoseErrorMetrics], list[float], int, int, list[FrameRecord]]:
     """
     Evaluates the pose estimation pipeline on a set of sample indices.
-    
+
     Returns:
         tuple containing:
             - error_metrics (list[PoseErrorMetrics]): Decomposed errors for successfully matched samples.
             - times (list[float]): Pose estimation duration in seconds for each successful sample.
             - detection_failures (int): Count of samples where YOLO failed to detect a cart.
             - pose_failures (int): Count of samples where pose estimation failed.
+            - frame_records (list[FrameRecord]): Per-frame outcome + flip-disambiguation
+              diagnostics for successfully matched samples, for offline auditing.
     """
     error_metrics = []
     times = []
+    frame_records = []
     detection_failures = 0
     pose_failures = 0
-    
+
     for sample_idx in sample_indices:
         row = dataset[int(sample_idx)]
         img = row["rgb"]
         depth_bytes = row["depth"]
-        
+
         # 1. Run YOLO detection
-        # We execute the 2D instance segmentation model. If no target cart instance 
-        # is detected, we cannot proceed with point cloud reconstruction or pose 
+        # We execute the 2D instance segmentation model. If no target cart instance
+        # is detected, we cannot proceed with point cloud reconstruction or pose
         # registration, so we log it as a detection failure and continue to the next sample.
         result = model(img, retina_masks=True, verbose=False)
         if not instance_detected(result):
             detection_failures += 1
             continue
-            
+
         # 2. Segment and Reconstruct Point Cloud
         try:
             cart_type, pcd, frame = process_and_reconstruct(
@@ -222,14 +305,14 @@ def evaluate_pipeline(
             logging.exception(f"PointCloud processing failed for index {sample_idx}")
             pose_failures += 1
             continue
-            
+
         # Retrieve preloaded mesh
         cad_mesh = meshes.get(cart_type)
         if cad_mesh is None:
             logging.error(f"CAD mesh not found for cart type '{cart_type}' (sample {sample_idx})")
             pose_failures += 1
             continue
-        
+
         # 3. Perform 6D Pose Estimation with timing
         start_time = time.time()
         try:
@@ -243,25 +326,46 @@ def evaluate_pipeline(
             pose_failures += 1
             continue
         elapsed_time = time.time() - start_time
-            
+
         # 4. Calculate Ground Truth pose and compare
         extrinsic = getattr(estimator, "extrinsic", None)
         if extrinsic is None:
-            raise ValueError("Estimator must have an extrinsic camera-to-robot transform configured.")
-        
+            raise ValueError(
+                "Estimator must have an extrinsic camera-to-robot transform configured."
+            )
+
         try:
             T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
             T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
-            T_ground_truth = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera=extrinsic)
+            T_ground_truth = compute_ground_truth_pose(
+                T_world_camera, T_world_cart, T_robot_camera=extrinsic
+            )
             metrics = extract_pose_errors(T_final, T_ground_truth)
             error_metrics.append(metrics)
             times.append(elapsed_time)
+
+            diagnostics = getattr(estimator, "_last_diagnostics", None) or {}
+            frame_records.append(
+                FrameRecord(
+                    sample_idx=int(sample_idx),
+                    cart_type=cart_type,
+                    flipped=abs(metrics.yaw) > 90.0,
+                    trans_xy=metrics.trans_xy,
+                    yaw_err=metrics.yaw,
+                    selected=diagnostics.get("selected"),
+                    decision=diagnostics.get("decision"),
+                    fitness_1=diagnostics.get("fitness_1"),
+                    fitness_2=diagnostics.get("fitness_2"),
+                    viol_ratio_1=diagnostics.get("viol_ratio_1"),
+                    viol_ratio_2=diagnostics.get("viol_ratio_2"),
+                )
+            )
         except Exception:
             logging.exception(f"Error metric extraction failed for index {sample_idx}")
             pose_failures += 1
             continue
-        
-    return error_metrics, times, detection_failures, pose_failures
+
+    return error_metrics, times, detection_failures, pose_failures, frame_records
 
 
 # =====================================================================
@@ -275,18 +379,22 @@ def log_input_artifacts(run, yolo_cfg, dataset_cfg):
     modification mints one. That version bump is the "was this input touched?"
     signal for the cross-commit report.
     """
-    model_art = wandb.Artifact("yolo-detector", type="model",
-                               metadata={"hf_repo": yolo_cfg.repo, "hf_file": yolo_cfg.file})
+    model_art = wandb.Artifact(
+        "yolo-detector", type="model", metadata={"hf_repo": yolo_cfg.repo, "hf_file": yolo_cfg.file}
+    )
     model_art.add_reference(f"file://{os.path.abspath(yolo_cfg.local_path)}", checksum=True)
     run.log_artifact(model_art)
 
-    dataset_art = wandb.Artifact("dataset", type="dataset",
-                                 metadata={
-                                     "path": dataset_cfg.path,
-                                     "train_glob": dataset_cfg.train_glob,
-                                     "val_glob": dataset_cfg.val_glob,
-                                     "test_glob": dataset_cfg.test_glob,
-                                 })
+    dataset_art = wandb.Artifact(
+        "dataset",
+        type="dataset",
+        metadata={
+            "path": dataset_cfg.path,
+            "train_glob": dataset_cfg.train_glob,
+            "val_glob": dataset_cfg.val_glob,
+            "test_glob": dataset_cfg.test_glob,
+        },
+    )
     for glob_pattern in (dataset_cfg.train_glob, dataset_cfg.val_glob, dataset_cfg.test_glob):
         for shard in sorted(glob.glob(glob_pattern)):
             dataset_art.add_reference(f"file://{os.path.abspath(shard)}", checksum=True)
@@ -330,57 +438,111 @@ def build_pareto_figure(pareto, dominated, param_names, study_name):
     fig = go.Figure()
 
     # Dominated trials -- recessive gray field, drawn first (underneath).
-    fig.add_trace(go.Scatter(
-        x=[t.values[1] for t in dominated], y=[t.values[0] for t in dominated],
-        mode="markers", name="Dominated trials",
-        marker=dict(color=GRAY, size=8, opacity=0.55),
-        customdata=customdata(dominated), hovertemplate=hovertemplate,
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=[t.values[1] for t in dominated],
+            y=[t.values[0] for t in dominated],
+            mode="markers",
+            name="Dominated trials",
+            marker=dict(color=GRAY, size=8, opacity=0.55),
+            customdata=customdata(dominated),
+            hovertemplate=hovertemplate,
+        )
+    )
 
     # Pareto frontier -- straight line through the optimal trials sorted by latency.
     pareto_sorted = sorted(pareto, key=lambda t: t.values[1])
-    fig.add_trace(go.Scatter(
-        x=[t.values[1] for t in pareto_sorted], y=[t.values[0] for t in pareto_sorted],
-        mode="lines", name="Pareto frontier",
-        line=dict(color=BLUE, width=2), hoverinfo="skip",
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=[t.values[1] for t in pareto_sorted],
+            y=[t.values[0] for t in pareto_sorted],
+            mode="lines",
+            name="Pareto frontier",
+            line=dict(color=BLUE, width=2),
+            hoverinfo="skip",
+        )
+    )
 
     # Pareto-optimal trials -- highlighted, drawn on top.
-    fig.add_trace(go.Scatter(
-        x=[t.values[1] for t in pareto], y=[t.values[0] for t in pareto],
-        mode="markers", name="Pareto-optimal",
-        marker=dict(color=BLUE, size=12, line=dict(color=SURFACE, width=1.5)),
-        customdata=customdata(pareto), hovertemplate=hovertemplate,
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=[t.values[1] for t in pareto],
+            y=[t.values[0] for t in pareto],
+            mode="markers",
+            name="Pareto-optimal",
+            marker=dict(color=BLUE, size=12, line=dict(color=SURFACE, width=1.5)),
+            customdata=customdata(pareto),
+            hovertemplate=hovertemplate,
+        )
+    )
 
     fig.update_layout(
         title=dict(text=f"Pareto Front — {study_name}", font=dict(size=18, color=INK)),
         template="plotly_white",
-        paper_bgcolor=SURFACE, plot_bgcolor=SURFACE,
+        paper_bgcolor=SURFACE,
+        plot_bgcolor=SURFACE,
         font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif", color=INK2, size=13),
-        xaxis=dict(title="p95 latency (s)  →  slower", gridcolor=GRID, zeroline=False,
-                   linecolor=AXIS, ticks="outside", tickcolor=AXIS),
-        yaxis=dict(title="accuracy loss (1 − AR)  →  worse", gridcolor=GRID, zeroline=False,
-                   linecolor=AXIS, ticks="outside", tickcolor=AXIS),
+        xaxis=dict(
+            title="p95 latency (s)  →  slower",
+            gridcolor=GRID,
+            zeroline=False,
+            linecolor=AXIS,
+            ticks="outside",
+            tickcolor=AXIS,
+        ),
+        yaxis=dict(
+            title="accuracy loss (1 − AR)  →  worse",
+            gridcolor=GRID,
+            zeroline=False,
+            linecolor=AXIS,
+            ticks="outside",
+            tickcolor=AXIS,
+        ),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         hoverlabel=dict(bgcolor="white", font_size=12, bordercolor=GRID),
         margin=dict(l=70, r=30, t=70, b=90),
-        annotations=[dict(text="← better (fast & accurate)", x=0.01, y=0.02,
-                          xref="paper", yref="paper", showarrow=False,
-                          font=dict(color=GRAY, size=12))],
+        annotations=[
+            dict(
+                text="← better (fast & accurate)",
+                x=0.01,
+                y=0.02,
+                xref="paper",
+                yref="paper",
+                showarrow=False,
+                font=dict(color=GRAY, size=12),
+            )
+        ],
     )
     return fig
 
 
 def run_parameter_sweep(
-    dataset, model, camera, study_name, estimator_cls: type[BasePoseEstimator],
-    sweep_size: int, n_trials: int, meshes: dict[str, o3d.geometry.TriangleMesh],
-    yolo_cfg, dataset_cfg,
-    extrinsic: np.ndarray = None, seed: int = None
+    dataset,
+    model,
+    camera,
+    study_name,
+    estimator_cls: type[BasePoseEstimator],
+    sweep_size: int,
+    n_trials: int,
+    meshes: dict[str, o3d.geometry.TriangleMesh],
+    yolo_cfg,
+    dataset_cfg,
+    extrinsic: np.ndarray = None,
+    seed: int = None,
+    n_seeds: int = 1,
+    supports_seed: bool = True,
+    dump_frames: bool = True,
 ):
     """
     Launches a Multi-Objective Bayesian Optimization sweep using Optuna
     to find the Pareto Front of optimal accuracy vs. speed trade-offs.
+
+    n_seeds: number of estimator-internal RANSAC seeds each trial is pooled
+    over (see derive_internal_seeds). supports_seed: whether the chosen
+    estimator's params dataclass actually has a `seed` field to vary --
+    when False, n_seeds is ignored (nothing to vary) rather than silently
+    re-running identical repeats. dump_frames: write each trial's per-frame
+    CSV (see FrameRecord) under sweeps/<study_name>_frames/.
     """
     # Stable, run-independent storage location: restarting the same command
     # after a crash (or on a new instance with the file restored) resumes the
@@ -390,21 +552,21 @@ def run_parameter_sweep(
     os.makedirs(sweep_dir, exist_ok=True)
     db_name = os.path.join(sweep_dir, f"optuna_{study_name}.db")
     db_url = f"sqlite:///{db_name}"
-    
+
     study = optuna.create_study(
         study_name=study_name,
         storage=db_url,
         directions=["minimize", "minimize"],  # Minimize error rate AND execution time
-        load_if_exists=True
+        load_if_exists=True,
     )
-    
+
     # Retrieve run attributes from the Optuna study's metadata to check if we are resuming
     existing_seed = study.user_attrs.get("seed")
     existing_eval_size = study.user_attrs.get("eval_size")
     existing_indices = study.user_attrs.get("sweep_indices")
-    
+
     total_samples = len(dataset)
-    
+
     # CASE 1: Resuming an existing study that has proper validation metadata.
     if existing_seed is not None:
         # Integrity Guard: Ensure the requested sweep size matches what was already evaluated.
@@ -422,30 +584,36 @@ def run_parameter_sweep(
         seed = existing_seed
         sweep_indices = existing_indices
         print(f"Resuming existing study. Loaded seed={seed}, eval_size={sweep_size}")
-    
+
     # CASE 2: Fresh study initialization.
     else:
         # Generate a seed if not explicitly provided.
-        # We retrieve a high-entropy random integer from the OS (via SeedSequence().entropy) 
-        # and cast it to fit within a standard 31-bit integer range (modulo 2**31 - 1) 
+        # We retrieve a high-entropy random integer from the OS (via SeedSequence().entropy)
+        # and cast it to fit within a standard 31-bit integer range (modulo 2**31 - 1)
         # to make sure it is a valid seed for all downstream library generators.
         if seed is None:
             seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
         # Draw indices deterministically using a generator seeded with our selected seed
-        rng = np.random.default_rng(seed)
-        sweep_indices = rng.choice(total_samples, min(sweep_size, total_samples), replace=False).tolist()
-        
+        sweep_indices = draw_eval_indices(total_samples, sweep_size, seed)
+
         # Persist attributes in the study so future runs can resume with the same setup
         study.set_user_attr("seed", seed)
         study.set_user_attr("eval_size", sweep_size)
         study.set_user_attr("sweep_indices", sweep_indices)
         print(f"Created new study. Seed={seed}, eval_size={sweep_size}")
-        
+
     print(f"Sweep validation indices: {sweep_indices}\n")
 
     # Seed global random number generators
     np.random.seed(seed)
     o3d.utility.random.seed(seed)
+
+    if n_seeds > 1 and not supports_seed:
+        print(
+            f"Note: {estimator_cls.__name__}'s params have no 'seed' field; "
+            "--n-seeds > 1 has no effect for this estimator, running each trial once."
+        )
+    effective_n_seeds = n_seeds if supports_seed else 1
 
     # ONE W&B run for this whole sweep (1 CLI execution <-> 1 run), not one per
     # trial -- a 200-trial sweep would otherwise flood the workspace with 200
@@ -460,7 +628,6 @@ def run_parameter_sweep(
         tags=[study_name],
         config={"eval_size": sweep_size, "n_trials": n_trials, "seed": seed},
     ) as run:
-
         log_input_artifacts(run, yolo_cfg, dataset_cfg)
 
         def objective(trial: optuna.Trial) -> tuple[float, float]:
@@ -470,31 +637,75 @@ def run_parameter_sweep(
             # 2. Dynamically suggest model-specific parameters
             suggested_params = estimator_cls.suggest_params(trial)
 
-            # 3. Instantiate model with trial parameters
-            trial_estimator = estimator_cls(params=suggested_params, extrinsic=extrinsic)
-
-            # Offline CAD mesh preparation (voxelization, normals, and FPFH/PPF database generation).
-            # We prepare the model CAD representations outside the timed evaluation loop so that
-            # offline preparation costs are not charged to the online pose estimation latency metric.
-            for cart_type, mesh in meshes.items():
-                trial_estimator.prepare(mesh, cart_type)
-
-            error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
-                dataset, model, camera, trial_estimator, sweep_indices, meshes, depth_trunc=depth_trunc
+            # 3. Evaluate across effective_n_seeds estimator-internal RANSAC
+            # seeds and pool the resulting frames together (rather than
+            # sampling `seed` as its own Optuna dimension -- see
+            # derive_internal_seeds), so the search is robust to seed luck
+            # instead of resting on a single, possibly-lucky draw.
+            trial_seeds = (
+                derive_internal_seeds(seed, effective_n_seeds, salt=trial.number)
+                if supports_seed
+                else [None]
             )
+
+            error_metrics: list[PoseErrorMetrics] = []
+            times: list[float] = []
+            frame_records: list[FrameRecord] = []
+            det_failed = 0
+            pose_failed = 0
+            flip_rate_per_seed = []
+
+            for seed_i in trial_seeds:
+                params_i = (
+                    {**suggested_params, "seed": seed_i} if seed_i is not None else suggested_params
+                )
+                trial_estimator = estimator_cls(params=params_i, extrinsic=extrinsic)
+
+                # Offline CAD mesh preparation (voxelization, normals, and FPFH/PPF
+                # database generation). Cached per (class, cart_type, voxel_size,
+                # front_crop_depth) -- seed isn't part of that key, so repeats hit
+                # the cache instead of recomputing, and offline prep costs stay off
+                # the timed online pose estimation latency metric either way.
+                for cart_type, mesh in meshes.items():
+                    trial_estimator.prepare(mesh, cart_type)
+
+                em, t, df, pf, fr = evaluate_pipeline(
+                    dataset,
+                    model,
+                    camera,
+                    trial_estimator,
+                    sweep_indices,
+                    meshes,
+                    depth_trunc=depth_trunc,
+                )
+                error_metrics.extend(em)
+                times.extend(t)
+                det_failed += df
+                pose_failed += pf
+                frame_records.extend(fr)
+                flip_rate_per_seed.append(
+                    sum(1 for e in em if abs(e.yaw) > 90.0) / len(em) if em else 0.0
+                )
+
+            if dump_frames:
+                write_frame_records_csv(
+                    os.path.join(sweep_dir, f"{study_name}_frames", f"trial_{trial.number}.csv"),
+                    frame_records,
+                )
 
             total_failed = det_failed + pose_failed
             total_matched = len(error_metrics)
             total_evaluated = total_matched + total_failed
 
-            # Calculate Average Recall
+            # Calculate Average Recall over the pooled (all-seeds) samples.
             ar = compute_average_recall(error_metrics, total_evaluated)
             accuracy_score = 1.0 - ar
 
-            # Calculate p95 execution time over actual successful runs only.
-            # Failures are already counted as misses in Obj 1 (AR); penalizing them
-            # again with fabricated latencies would corrupt the latency objective.
-            p95_time = float(np.percentile(times, 95)) if times else float('inf')
+            # Calculate p95 execution time over actual successful runs only,
+            # pooled across seeds. Failures are already counted as misses in
+            # Obj 1 (AR); penalizing them again with fabricated latencies would
+            # corrupt the latency objective.
+            p95_time = float(np.percentile(times, 95)) if times else float("inf")
 
             # Save trial diagnostics (Optuna's own record, independent of W&B)
             trial.set_user_attr("average_recall", ar)
@@ -507,20 +718,31 @@ def run_parameter_sweep(
             else:
                 flip_rate = 0.0
             trial.set_user_attr("flip_rate", flip_rate)
+            # Per-seed breakdown (not just the pooled mean) so a later analysis
+            # can check how seed-sensitive a config is -- see analyze_sweep.py.
+            trial.set_user_attr("n_seeds", len(trial_seeds))
+            trial.set_user_attr("trial_seeds", trial_seeds)
+            trial.set_user_attr("flip_rate_per_seed", flip_rate_per_seed)
 
             # Log params + metrics together, indexed by trial number -- this is
             # what makes each key's W&B history a real per-trial trend line
             # instead of a single point.
-            run.log({
-                **suggested_params,
-                "depth_trunc": depth_trunc,
-                "accuracy_score": accuracy_score,
-                "p95_time": p95_time,
-                "average_recall": ar,
-                "detection_failures": det_failed,
-                "pose_failures": pose_failed,
-                "flip_rate": flip_rate,
-            }, step=trial.number)
+            run.log(
+                {
+                    **suggested_params,
+                    "depth_trunc": depth_trunc,
+                    "accuracy_score": accuracy_score,
+                    "p95_time": p95_time,
+                    "average_recall": ar,
+                    "detection_failures": det_failed,
+                    "pose_failures": pose_failed,
+                    "flip_rate": flip_rate,
+                    "flip_rate_std": float(np.std(flip_rate_per_seed))
+                    if len(trial_seeds) > 1
+                    else 0.0,
+                },
+                step=trial.number,
+            )
 
             return accuracy_score, p95_time
 
@@ -550,7 +772,14 @@ def run_parameter_sweep(
                 # Sortable/filterable raw table -- keeps the per-trial data
                 # queryable in W&B alongside the chart (and is the searchable
                 # companion to the frontier plot's per-point hover).
-                columns = ["trial_number", *param_names, "accuracy_score", "p95_time", "average_recall", "flip_rate"]
+                columns = [
+                    "trial_number",
+                    *param_names,
+                    "accuracy_score",
+                    "p95_time",
+                    "average_recall",
+                    "flip_rate",
+                ]
                 rows = [
                     [
                         t.number,
@@ -569,16 +798,20 @@ def run_parameter_sweep(
                 pareto = [t for t in completed if t.number in best_numbers]
                 dominated = [t for t in completed if t.number not in best_numbers]
 
-                run.log({
-                    "pareto_front": build_pareto_figure(pareto, dominated, param_names, study_name),
-                    "pareto_table": wandb.Table(columns=columns, data=rows),
-                })
+                run.log(
+                    {
+                        "pareto_front": build_pareto_figure(
+                            pareto, dominated, param_names, study_name
+                        ),
+                        "pareto_table": wandb.Table(columns=columns, data=rows),
+                    }
+                )
 
     print("\n" + "=" * 50)
     print("SWEEP COMPLETE (PARETO FRONT FINDINGS)")
     print("=" * 50)
     print(f"Found {len(study.best_trials)} optimal trade-off trials on the Pareto Front:")
-    for t_idx, trial in enumerate(study.best_trials):
+    for _, trial in enumerate(study.best_trials):
         print(f"\n[Trial {trial.number}]")
         print(f"  - Accuracy Loss (1-AR):  {trial.values[0]:.4f}")
         print(f"  - p95 Execution Time:    {trial.values[1]:.4f}s")
@@ -603,20 +836,16 @@ def main():
     # Load model, camera, and dataset
     print("Loading pipeline assets...")
     model = load_hf_model(
-        local_model_path=args.yolo.local_path,
-        repo_id=args.yolo.repo,
-        filename=args.yolo.file
+        local_model_path=args.yolo.local_path, repo_id=args.yolo.repo, filename=args.yolo.file
     )
-    camera = Camera(
-        fx=args.camera.fx, fy=args.camera.fy,
-        cx=args.camera.cx, cy=args.camera.cy
-    )
-    dataset = load_parquet_dataset(
-        dataset_path=args.dataset.path,
-        test_glob=args.dataset.test_glob
-    )
+    camera = Camera(fx=args.camera.fx, fy=args.camera.fy, cx=args.camera.cx, cy=args.camera.cy)
+    dataset = load_parquet_dataset(dataset_path=args.dataset.path, test_glob=args.dataset.test_glob)
 
     estimator_cls = args.model.ESTIMATOR_CLS
+    # Whether this estimator's params dataclass has a 'seed' field to vary at
+    # all (only Ransac3DoFParams and its subclasses do today) -- --n-seeds is
+    # a no-op, not a crash, for estimators with no such field.
+    supports_seed = "seed" in {f.name for f in dataclasses.fields(args.model.profile.params)}
 
     # Hoist CAD mesh loading
     meshes = load_cad_meshes()
@@ -638,7 +867,10 @@ def main():
             yolo_cfg=args.yolo,
             dataset_cfg=args.dataset,
             extrinsic=extrinsic,
-            seed=args.seed
+            seed=args.seed,
+            n_seeds=args.n_seeds,
+            supports_seed=supports_seed,
+            dump_frames=args.dump_frames,
         )
 
     else:
@@ -651,19 +883,22 @@ def main():
         o3d.utility.random.seed(seed)
 
         total_samples = len(dataset)
-        eval_indices = np.random.choice(total_samples, min(args.eval_size, total_samples), replace=False).tolist()
+        eval_indices = draw_eval_indices(total_samples, args.eval_size, seed)
 
-        # Directly construct the chosen preset's estimator -- no _target_
-        # string resolution needed, args.model.ESTIMATOR_CLS is already the
-        # concrete class.
-        estimator = estimator_cls(params=args.model.profile.params, extrinsic=extrinsic)
+        if args.n_seeds > 1 and not supports_seed:
+            print(
+                f"Note: {type(args.model.profile.params).__name__} has no 'seed' field; "
+                "--n-seeds > 1 has no effect for this estimator, running once."
+            )
+        effective_n_seeds = args.n_seeds if supports_seed else 1
+        internal_seeds = derive_internal_seeds(seed, effective_n_seeds) if supports_seed else [None]
 
-        # Pre-prepare all meshes on estimator
-        for cart_type, mesh in meshes.items():
-            estimator.prepare(mesh, cart_type)
-
-        print(f"Evaluating '{estimator_cls.__name__}' parameters on {len(eval_indices)} test samples...")
+        print(
+            f"Evaluating '{estimator_cls.__name__}' parameters on {len(eval_indices)} test samples..."
+        )
         print(f"Seed: {seed}")
+        if effective_n_seeds > 1:
+            print(f"Pooled over {effective_n_seeds} internal RANSAC seeds: {internal_seeds}")
         print(f"Indices: {eval_indices}\n")
 
         wandb_config = {
@@ -671,6 +906,7 @@ def main():
             "depth_trunc": args.model.profile.depth_trunc,
             "eval_size": args.eval_size,
             "seed": seed,
+            "n_seeds": effective_n_seeds,
         }
         with wandb.init(
             project="6dpose",
@@ -681,9 +917,49 @@ def main():
         ) as run:
             log_input_artifacts(run, args.yolo, args.dataset)
 
-            error_metrics, times, det_failed, pose_failed = evaluate_pipeline(
-                dataset, model, camera, estimator, eval_indices, meshes, depth_trunc=args.model.profile.depth_trunc
-            )
+            # Pool results across internal seeds (a no-op loop of length 1 when
+            # effective_n_seeds == 1) instead of trusting a single draw -- every
+            # downstream statistic below then runs once over the pooled data.
+            error_metrics: list[PoseErrorMetrics] = []
+            times: list[float] = []
+            frame_records: list[FrameRecord] = []
+            det_failed = 0
+            pose_failed = 0
+            for seed_i in internal_seeds:
+                params_i = (
+                    dataclasses.replace(args.model.profile.params, seed=seed_i)
+                    if seed_i is not None
+                    else args.model.profile.params
+                )
+                # Directly construct the chosen preset's estimator -- no
+                # _target_ string resolution needed, args.model.ESTIMATOR_CLS
+                # is already the concrete class.
+                estimator = estimator_cls(params=params_i, extrinsic=extrinsic)
+                for cart_type, mesh in meshes.items():
+                    estimator.prepare(mesh, cart_type)
+
+                em, t, df, pf, fr = evaluate_pipeline(
+                    dataset,
+                    model,
+                    camera,
+                    estimator,
+                    eval_indices,
+                    meshes,
+                    depth_trunc=args.model.profile.depth_trunc,
+                )
+                error_metrics.extend(em)
+                times.extend(t)
+                det_failed += df
+                pose_failed += pf
+                frame_records.extend(fr)
+
+            if args.dump_frames:
+                frames_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "benchmark_runs"
+                )
+                write_frame_records_csv(
+                    os.path.join(frames_dir, f"{args.name}_frames.csv"), frame_records
+                )
 
             successful = len(error_metrics)
             total_failed = det_failed + pose_failed
@@ -692,20 +968,24 @@ def main():
             print("\n" + "=" * 50)
             print("BENCHMARK REPORT (Default Parameters)")
             print("=" * 50)
-            print(f"Detections & Matches: {successful} / {total} (Success rate: {successful/total*100:.1f}%)")
+            print(
+                f"Detections & Matches: {successful} / {total} (Success rate: {successful / total * 100:.1f}%)"
+            )
             print(f"  - YOLO detection failures: {det_failed}")
             print(f"  - Pose estimation failures: {pose_failed}")
-            run.log({
-                "success_rate": successful / total * 100 if total else 0.0,
-                "detection_failures": det_failed,
-                "pose_failures": pose_failed,
-            })
+            run.log(
+                {
+                    "success_rate": successful / total * 100 if total else 0.0,
+                    "detection_failures": det_failed,
+                    "pose_failures": pose_failed,
+                }
+            )
 
             if successful > 0:
                 ar = compute_average_recall(error_metrics, total)
                 print(f"Average Recall (BOP-style AR): {ar:.4f}")
 
-                p95_latency = float(np.percentile(times, 95)) if times else float('inf')
+                p95_latency = float(np.percentile(times, 95)) if times else float("inf")
                 print(f"p95 Latency: {p95_latency:.4f}s")
 
                 # Decompose errors
@@ -716,67 +996,74 @@ def main():
                 roll_errs = [e.roll for e in error_metrics]
                 geodesic_errs = [e.geodesic_rot for e in error_metrics]
 
-                print(f"Translation Error (XY in meters):")
+                print("Translation Error (XY in meters):")
                 print(f"  - Mean:   {np.mean(trans_xy_errs):.4f}")
                 print(f"  - Median: {np.median(trans_xy_errs):.4f}")
-                print(f"Translation Error (Z in meters):")
+                print("Translation Error (Z in meters):")
                 print(f"  - Bias (signed mean): {np.mean(trans_z_errs):+.4f}")
                 print(f"  - MAE:                {np.mean(np.abs(trans_z_errs)):.4f}")
                 print(f"  - Median (abs):       {np.median(np.abs(trans_z_errs)):.4f}")
 
-                print(f"Yaw Rotation Error (degrees):")
+                print("Yaw Rotation Error (degrees):")
                 print(f"  - Mean:   {np.mean(np.abs(yaw_errs)):.2f}°")
                 print(f"  - Median: {np.median(np.abs(yaw_errs)):.2f}°")
-                print(f"Pitch Rotation Error (degrees):")
+                print("Pitch Rotation Error (degrees):")
                 print(f"  - Mean:   {np.mean(np.abs(pitch_errs)):.2f}°")
                 print(f"  - Median: {np.median(np.abs(pitch_errs)):.2f}°")
-                print(f"Roll Rotation Error (degrees):")
+                print("Roll Rotation Error (degrees):")
                 print(f"  - Mean:   {np.mean(np.abs(roll_errs)):.2f}°")
                 print(f"  - Median: {np.median(np.abs(roll_errs)):.2f}°")
-                print(f"Geodesic Rotation Error (degrees):")
+                print("Geodesic Rotation Error (degrees):")
                 print(f"  - Mean:   {np.mean(geodesic_errs):.2f}°")
                 print(f"  - Median: {np.median(geodesic_errs):.2f}°")
 
                 # Flip rate
                 flips = sum(1 for e in error_metrics if abs(e.yaw) > 90.0)
-                print(f"Flip Rate (among successful matches): {flips/successful*100:.1f}% ({flips}/{successful})")
+                print(
+                    f"Flip Rate (among successful matches): {flips / successful * 100:.1f}% ({flips}/{successful})"
+                )
 
-                run.log({
-                    "average_recall": ar,
-                    "p95_latency": p95_latency,
-                    "trans_xy_mean": float(np.mean(trans_xy_errs)),
-                    "trans_xy_median": float(np.median(trans_xy_errs)),
-                    "trans_z_bias": float(np.mean(trans_z_errs)),
-                    "trans_z_mae": float(np.mean(np.abs(trans_z_errs))),
-                    "trans_z_median_abs": float(np.median(np.abs(trans_z_errs))),
-                    "yaw_mean": float(np.mean(np.abs(yaw_errs))),
-                    "yaw_median": float(np.median(np.abs(yaw_errs))),
-                    "pitch_mean": float(np.mean(np.abs(pitch_errs))),
-                    "pitch_median": float(np.median(np.abs(pitch_errs))),
-                    "roll_mean": float(np.mean(np.abs(roll_errs))),
-                    "roll_median": float(np.median(np.abs(roll_errs))),
-                    "geodesic_mean": float(np.mean(geodesic_errs)),
-                    "geodesic_median": float(np.median(geodesic_errs)),
-                    "flip_rate": flips / successful * 100,
-                })
+                run.log(
+                    {
+                        "average_recall": ar,
+                        "p95_latency": p95_latency,
+                        "trans_xy_mean": float(np.mean(trans_xy_errs)),
+                        "trans_xy_median": float(np.median(trans_xy_errs)),
+                        "trans_z_bias": float(np.mean(trans_z_errs)),
+                        "trans_z_mae": float(np.mean(np.abs(trans_z_errs))),
+                        "trans_z_median_abs": float(np.median(np.abs(trans_z_errs))),
+                        "yaw_mean": float(np.mean(np.abs(yaw_errs))),
+                        "yaw_median": float(np.median(np.abs(yaw_errs))),
+                        "pitch_mean": float(np.mean(np.abs(pitch_errs))),
+                        "pitch_median": float(np.median(np.abs(pitch_errs))),
+                        "roll_mean": float(np.mean(np.abs(roll_errs))),
+                        "roll_median": float(np.median(np.abs(roll_errs))),
+                        "geodesic_mean": float(np.mean(geodesic_errs)),
+                        "geodesic_median": float(np.median(geodesic_errs)),
+                        "flip_rate": flips / successful * 100,
+                    }
+                )
 
                 # Median error on non-flipped samples
                 non_flipped_metrics = [e for e in error_metrics if abs(e.yaw) <= 90.0]
                 if non_flipped_metrics:
                     non_flipped_xy = [e.trans_xy for e in non_flipped_metrics]
                     non_flipped_yaw = [e.yaw for e in non_flipped_metrics]
-                    print(f"Median errors on non-flipped samples:")
+                    print("Median errors on non-flipped samples:")
                     print(f"  - Translation XY: {np.median(non_flipped_xy):.4f}m")
                     print(f"  - Yaw Rotation:   {np.median(np.abs(non_flipped_yaw)):.2f}°")
-                    run.log({
-                        "non_flipped_trans_xy_median": float(np.median(non_flipped_xy)),
-                        "non_flipped_yaw_median": float(np.median(np.abs(non_flipped_yaw))),
-                    })
+                    run.log(
+                        {
+                            "non_flipped_trans_xy_median": float(np.median(non_flipped_xy)),
+                            "non_flipped_yaw_median": float(np.median(np.abs(non_flipped_yaw))),
+                        }
+                    )
                 else:
                     print("All successful matches were flipped.")
             else:
                 print("No samples were successfully matched.")
             print("=" * 50)
+
 
 if __name__ == "__main__":
     main()

@@ -14,11 +14,14 @@ import numpy as np
 import open3d as o3d
 from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
 
+
 @dataclass(frozen=True)
 class MyNewModelParams:
     """Hyperparameters specific to your new method."""
+
     my_threshold: float = 0.05
     icp_max_iterations: int = 50
+
 
 class MyNewModelEstimator(BasePoseEstimator):
     """Implementation of your new 6D Pose Estimation method."""
@@ -29,7 +32,7 @@ class MyNewModelEstimator(BasePoseEstimator):
             self.params = MyNewModelParams(**params)
         else:
             self.params = params if params is not None else MyNewModelParams()
-            
+
         # Parse extrinsic camera parameter
         if extrinsic is not None:
             self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
@@ -37,10 +40,7 @@ class MyNewModelEstimator(BasePoseEstimator):
             self.extrinsic = np.eye(4)
 
     def estimate_pose(
-        self,
-        pcd: o3d.geometry.PointCloud,
-        cad_mesh: o3d.geometry.TriangleMesh,
-        **kwargs
+        self, pcd: o3d.geometry.PointCloud, cad_mesh: o3d.geometry.TriangleMesh, **kwargs
     ) -> np.ndarray | None:
         # 1. Preprocess the point cloud (estimating normals and aligning frames)
         pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
@@ -56,9 +56,9 @@ class MyNewModelEstimator(BasePoseEstimator):
             scene_pcd=pcd,
             T_init=T_init,
             icp_max_correspondence_distance=self.params.my_threshold * 2.0,
-            icp_max_iterations=self.params.icp_max_iterations
+            icp_max_iterations=self.params.icp_max_iterations,
         )
-        
+
         return T_refined
 ```
 
@@ -74,19 +74,21 @@ Add a `*Profile` dataclass, a `*ProfileSelect` union (even with just one "defaul
 ```python
 # In cli_config.py
 
+
 @dataclass(frozen=True)
 class MyNewModelProfile:
     params: MyNewModelParams = field(default_factory=MyNewModelParams)
     depth_trunc: float = 3.0
 
-MyNewModelProfileSelect = Union[
-    Annotated[MyNewModelProfile, tyro.conf.subcommand(name="default")],
-]
+
+MyNewModelProfileSelect = Union[Annotated[MyNewModelProfile, tyro.conf.subcommand(name="default")],]
+
 
 @dataclass(frozen=True)
 class MyNewModelPreset:
     ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = MyNewModelEstimator
     profile: MyNewModelProfileSelect
+
 
 ModelPreset = Union[
     Annotated[PPFPreset, tyro.conf.subcommand(name="ppf")],

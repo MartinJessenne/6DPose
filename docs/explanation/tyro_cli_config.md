@@ -22,7 +22,8 @@ class CameraConfig:
     fx: float = 639.99768
     ...
 
-args = tyro.cli(BenchmarkArgs)   # args.camera.fx is already a float, validated
+
+args = tyro.cli(BenchmarkArgs)  # args.camera.fx is already a float, validated
 ```
 
 This is why `hydra.utils.get_class(cfg.model._target_)` (a runtime string → class lookup) has no
@@ -74,10 +75,12 @@ Ransac3DoFProfileSelect = Union[
     Annotated[Ransac3DoFProfile, tyro.conf.subcommand(name="rt_opt", default=...)],
 ]
 
+
 @dataclass(frozen=True)
 class Ransac3DoFPreset:
     ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = Ransac3DoFEstimator
     profile: Ransac3DoFProfileSelect
+
 
 ModelPreset = Union[
     Annotated[PPFPreset, tyro.conf.subcommand(name="ppf")],
@@ -114,16 +117,19 @@ class P:
     x: int = 1
     y: int = 2
 
+
 Sel = Union[
     Annotated[P, tyro.conf.subcommand(name="default")],
     Annotated[P, tyro.conf.subcommand(name="tuned", default=P(x=99, y=100))],
 ]
 
+
 @dataclass(frozen=True)
 class Outer:
-    profile: Sel = field(default_factory=P)   # <-- this default wins, always
+    profile: Sel = field(default_factory=P)  # <-- this default wins, always
 
-tyro.cli(Outer, args=["profile:tuned"])   # returns P(x=1, y=2), NOT P(x=99, y=100)!
+
+tyro.cli(Outer, args=["profile:tuned"])  # returns P(x=1, y=2), NOT P(x=99, y=100)!
 ```
 
 Removing the outer default fixes it -- but the trade-off (confirmed by testing every

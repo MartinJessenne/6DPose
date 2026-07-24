@@ -2,8 +2,10 @@ import copy
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
 import numpy as np
 import open3d as o3d
+
 from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
 
 if TYPE_CHECKING:
@@ -23,6 +25,7 @@ class RansacParams:
         icp_max_correspondence_distance: Max correspondence distance threshold for ICP.
         icp_max_iterations: Max iteration count for the final ICP refinement.
     """
+
     voxel_size: float = 0.06
     ransac_max_iterations: int = 100000
     icp_max_correspondence_distance: float = 0.15
@@ -38,7 +41,7 @@ class RansacEstimator(BasePoseEstimator):
     def __init__(self, params: RansacParams | dict = None, extrinsic: list | np.ndarray = None):
         """
         Initializes the RANSAC + ICP Estimator with matching parameters.
-        
+
         Args:
             params (RansacParams, optional): Dedicated parameters. If None, uses defaults.
         """
@@ -49,7 +52,7 @@ class RansacEstimator(BasePoseEstimator):
                 self.params = params
         else:
             self.params = RansacParams()
-            
+
         if extrinsic is not None:
             self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
         else:
@@ -60,8 +63,10 @@ class RansacEstimator(BasePoseEstimator):
         """Suggests parameters for RANSAC + ICP registration."""
         return {
             "voxel_size": trial.suggest_float("voxel_size", 0.02, 0.10, step=0.01),
-            "icp_max_correspondence_distance": trial.suggest_float("icp_max_correspondence_distance", 0.05, 0.25),
-            "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10)
+            "icp_max_correspondence_distance": trial.suggest_float(
+                "icp_max_correspondence_distance", 0.05, 0.25
+            ),
+            "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10),
         }
 
     def _get_prep_params_key(self) -> tuple:
@@ -78,7 +83,8 @@ class RansacEstimator(BasePoseEstimator):
 
         # Evict old cached entries for the same cart type with different parameters to bound memory growth
         stale_keys = [
-            k for k in self._PREPARATION_CACHE
+            k
+            for k in self._PREPARATION_CACHE
             if k[0] == self.__class__.__name__ and k[1] == cart_type and k[2] != prep_params
         ]
         for k in stale_keys:
@@ -88,20 +94,21 @@ class RansacEstimator(BasePoseEstimator):
         mesh_copy = copy.deepcopy(cad_mesh)
         mesh_copy.compute_vertex_normals()
         model_pc = mesh_copy.sample_points_uniformly(number_of_points=2000)
-        
+
         voxel_size = self.params.voxel_size
         model_down = model_pc.voxel_down_sample(voxel_size)
-        model_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
-        
-        model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-            model_down,
-            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
+        model_down.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
         )
-        
+
+        model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+            model_down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
+        )
+
         self._PREPARATION_CACHE[cache_key] = {
             "model_pc": model_pc,
             "model_down": model_down,
-            "model_fpfh": model_fpfh
+            "model_fpfh": model_fpfh,
         }
 
     def estimate_pose(
@@ -109,18 +116,18 @@ class RansacEstimator(BasePoseEstimator):
         pcd: o3d.geometry.PointCloud,
         cad_mesh: o3d.geometry.TriangleMesh,
         cart_type: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> np.ndarray | None:
         """
         Estimates the 6D pose of the CAD model relative to the point cloud using FPFH + RANSAC.
-        
+
         Args:
             pcd (o3d.geometry.PointCloud): Segmented scene point cloud in camera frame.
             cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model.
             cart_type (str, optional): Name of the cart type.
-            
+
         Returns:
-            np.ndarray: 4x4 homogeneous transformation matrix in robot frame, 
+            np.ndarray: 4x4 homogeneous transformation matrix in robot frame,
                         or None if registration fails.
         """
         # Prepare scene point cloud using factored-out utility function
@@ -137,17 +144,21 @@ class RansacEstimator(BasePoseEstimator):
             mesh_copy.compute_vertex_normals()
             model_pc = mesh_copy.sample_points_uniformly(number_of_points=2000)
             model_down = model_pc.voxel_down_sample(voxel_size)
-            model_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
+            model_down.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
+            )
             model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
                 model_down,
-                o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
+                o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100),
             )
         else:
             cache_key = (self.__class__.__name__, cart_type, self._get_prep_params_key())
             if cache_key not in self._PREPARATION_CACHE:
-                logging.warning(f"Cache miss inside estimate_pose: preparing on-the-fly for key {cache_key}")
+                logging.warning(
+                    f"Cache miss inside estimate_pose: preparing on-the-fly for key {cache_key}"
+                )
                 self.prepare(cad_mesh, cart_type)
-            
+
             # Retrieve prepared representations from the cache.
             # Rationale for deepcopy: Open3D C++ objects are mutable and passed by reference.
             # Downstream algorithms (such as ICP refinement) transform these point clouds in-place.
@@ -158,31 +169,32 @@ class RansacEstimator(BasePoseEstimator):
             model_pc = copy.deepcopy(prep_data["model_pc"])
             model_down = copy.deepcopy(prep_data["model_down"])
             model_fpfh = copy.deepcopy(prep_data["model_fpfh"])
-        
+
         # 1. Downsample point clouds for fast descriptor calculation
         pcd_down = pcd.voxel_down_sample(voxel_size)
-        
+
         # Normals are preserved during downsampling, but let's ensure they are updated
-        pcd_down.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30))
-        
+        pcd_down.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
+        )
+
         # 2. Compute FPFH (Fast Point Feature Histograms) descriptors
         logging.info("Computing FPFH descriptors...")
         pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
-            pcd_down,
-            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
+            pcd_down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
         )
-        
+
         # 3. Perform RANSAC Global Registration based on feature matching
         logging.info("Running RANSAC global registration...")
         result_ransac = self._global_registration(model_down, pcd_down, model_fpfh, pcd_fpfh)
 
         T_init = result_ransac.transformation
-        
+
         # If RANSAC global registration has 0 fitness (no matches found), it failed
         if result_ransac.fitness == 0.0:
             logging.error("RANSAC global registration failed: zero correspondences found.")
             return None
-            
+
         # 4. Refine pose using dual-hypothesis point-to-plane ICP
         T_refined = self._refine_pose(model_pc, pcd, T_init)
 
@@ -198,7 +210,7 @@ class RansacEstimator(BasePoseEstimator):
             scene_pcd=scene_pcd,
             T_init=T_init,
             icp_max_correspondence_distance=self.params.icp_max_correspondence_distance,
-            icp_max_iterations=self.params.icp_max_iterations
+            icp_max_iterations=self.params.icp_max_iterations,
         )
 
     def _global_registration(
@@ -217,15 +229,17 @@ class RansacEstimator(BasePoseEstimator):
             pcd_fpfh,
             mutual_filter=True,
             max_correspondence_distance=distance_threshold,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(
+                False
+            ),
             ransac_n=3,
             checkers=[
                 o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(distance_threshold)
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(distance_threshold),
             ],
             criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(
                 self.params.ransac_max_iterations, 0.999
-            )
+            ),
         )
 
     def _project_pose(self, T: np.ndarray) -> np.ndarray:

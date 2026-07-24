@@ -10,9 +10,10 @@ This module projects 3D CAD model points into the sensor's cropped depth image
 and counts free-space violations to disambiguate 180-degree flipped poses.
 """
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
-from typing import TYPE_CHECKING, Tuple
 
 if TYPE_CHECKING:
     from pipeline import MaskedImageFrame
@@ -24,7 +25,7 @@ def compute_free_space_violations(
     T_robot_camera: np.ndarray,
     frame: "MaskedImageFrame",
     margin: float = 0.03,
-) -> Tuple[int, int, float]:
+) -> tuple[int, int, float]:
     """
     Computes free-space consistency violations for a candidate pose hypothesis T.
 

@@ -43,27 +43,31 @@ CLI Configuration Overrides:
   --output-dir PATH              Directory path to save GLB outputs.
 """
 
-
+import copy
 import os
 import shutil
 from datetime import datetime
-import numpy as np
+
 import cv2
-import copy
+import numpy as np
+import open3d as o3d
 import trimesh
 import tyro
-
-import open3d as o3d
 from datasets import Dataset
 
 from cli_config import InspectArgs
+from methods.base import BasePoseEstimator
+
 # Import utility classes and functions from pipeline.py
 from pipeline import (
-    Camera, load_hf_model, load_parquet_dataset,
-    process_and_reconstruct, compute_ground_truth_pose,
-    instance_detected, load_cad_meshes
+    Camera,
+    compute_ground_truth_pose,
+    instance_detected,
+    load_cad_meshes,
+    load_hf_model,
+    load_parquet_dataset,
+    process_and_reconstruct,
 )
-from methods.base import BasePoseEstimator
 
 
 # =====================================================================
@@ -74,41 +78,41 @@ def export_debug_scene(
     cad_mesh: o3d.geometry.TriangleMesh,
     T_final: np.ndarray,
     T_ground_truth: np.ndarray,
-    output_path: str
+    output_path: str,
 ) -> None:
     """
-    Constructs a debugging 3D scene containing the reconstructed point cloud, the 
-    predicted pose mesh (green), the ground truth pose mesh (blue), and the origin 
+    Constructs a debugging 3D scene containing the reconstructed point cloud, the
+    predicted pose mesh (green), the ground truth pose mesh (blue), and the origin
     coordinate frame. Exports the combined geometries as a GLB file.
 
     Coordinate Frames & Reference System:
     --------------------------------------
-    The debugging view is plotted in the Robot Base Frame ('base_link'). The origin [0, 0, 0] 
-    corresponds to the physical center of the robot base. The X-axis (Red) points forward 
+    The debugging view is plotted in the Robot Base Frame ('base_link'). The origin [0, 0, 0]
+    corresponds to the physical center of the robot base. The X-axis (Red) points forward
     from the robot, the Y-axis (Green) points left, and the Z-axis (Blue) points straight up.
-    
-    Setting the robot's base frame as the reference frame makes it intuitive to verify if 
+
+    Setting the robot's base frame as the reference frame makes it intuitive to verify if
     the cart rests correctly on the floor (Z ~= 0) and is in front of the robot.
     """
     # 1. Create origin coordinate axes (Red=X, Green=Y, Blue=Z)
     world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
-    
+
     # 2. Paint the point cloud a neutral gray. We use deepcopy here to avoid modifying
     # the original point cloud object in memory, preserving its original colors for
     # any callers or subsequent tasks in the pipeline.
     pcd_vis = copy.deepcopy(pcd)
     pcd_vis.paint_uniform_color([0.6, 0.6, 0.6])
-    
+
     # 3. Transform CAD mesh for predicted pose (GREEN)
     predicted_mesh = copy.deepcopy(cad_mesh)
     predicted_mesh.transform(T_final)
-    predicted_mesh.paint_uniform_color([0.0, 1.0, 0.0]) # GREEN
-    
+    predicted_mesh.paint_uniform_color([0.0, 1.0, 0.0])  # GREEN
+
     # 4. Transform CAD mesh for ground truth pose (BLUE)
     gt_mesh = copy.deepcopy(cad_mesh)
     gt_mesh.transform(T_ground_truth)
-    gt_mesh.paint_uniform_color([0.0, 0.0, 1.0]) # BLUE
-    
+    gt_mesh.paint_uniform_color([0.0, 0.0, 1.0])  # BLUE
+
     # 5. Build trimesh scene and export
     # Trimesh expects vertex colors as uint8 [0..255], whereas Open3D specifies them as
     # float32 [0..1]. We convert between the two by multiplying by 255. We iterate over
@@ -119,14 +123,15 @@ def export_debug_scene(
             vertices=np.asarray(m.vertices),
             faces=np.asarray(m.triangles),
             vertex_colors=(np.asarray(m.vertex_colors) * 255).astype(np.uint8)
-                          if m.has_vertex_colors() else None
+            if m.has_vertex_colors()
+            else None,
         )
         scene.add_geometry(tm, geom_name=name)
-        
+
     pts = np.asarray(pcd_vis.points)
     cols = (np.asarray(pcd_vis.colors) * 255).astype(np.uint8) if pcd_vis.has_colors() else None
     scene.add_geometry(trimesh.PointCloud(vertices=pts, colors=cols), geom_name="scene")
-    
+
     scene.export(output_path)
     print(f"Saved GLB scene to {output_path}")
 
@@ -142,7 +147,7 @@ def run_random_inspection(
     estimator: BasePoseEstimator,
     meshes: dict[str, o3d.geometry.TriangleMesh],
     output_dir: str,
-    depth_trunc: float
+    depth_trunc: float,
 ) -> None:
     """
     Runs the 6D Pose estimation pipeline on random test split samples,
@@ -152,43 +157,43 @@ def run_random_inspection(
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Get total samples from map-style dataset (O(1) lookup)
     total_samples = len(dataset)
     num_samples = min(num_samples, total_samples)
-    
+
     # Select unique random indices without replacement so we don't inspect the same sample twice
     random_indices = np.random.choice(total_samples, num_samples, replace=False)
-    
+
     print(f"Starting random inspection on {num_samples} test samples: {random_indices}")
-    
+
     for loop_idx, sample_idx in enumerate(random_indices):
         print(f"\n--- Processing Sample {loop_idx + 1}/{num_samples} (Index {sample_idx}) ---")
-        
+
         # Load raw PIL images and binary depth buffers
         row = dataset[int(sample_idx)]
         img = row["rgb"]
         depth_bytes = row["depth"]
-        
+
         # 1. Run YOLO detection (with retina_masks=True to get high-resolution masks)
         result = model(img, retina_masks=True, verbose=False)
         if not instance_detected(result):
             print(f"Skipping Index {sample_idx}: No cart instance detected.")
             continue
-            
+
         # 2. Segment and Reconstruct 3D Point Cloud
         # This isolates the cart points and projects them to camera-frame 3D coordinates.
         cart_type, pcd, frame = process_and_reconstruct(
             img, depth_bytes, result, camera, depth_trunc=depth_trunc, return_frame=True
         )
         print(f"Recognized class: {cart_type}")
-        
+
         # Retrieve preloaded mesh
         cad_mesh = meshes.get(cart_type)
         if cad_mesh is None:
             print(f"Skipping Index {sample_idx}: CAD file for class {cart_type} not found.")
             continue
-        
+
         # 3. Perform 6D Pose Estimation
         # This executes the selected estimation method (e.g. PPF+ICP or RANSAC+ICP)
         T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type, frame=frame)
@@ -196,19 +201,21 @@ def run_random_inspection(
             print(f"Skipping Index {sample_idx}: Pose estimation failed.")
             continue
         print("Final 6D Pose Matrix (Refined via ICP):\n", T_final)
-        
+
         # 4. Compute Ground Truth Pose
         T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
         T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
-        T_ground_truth = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera=estimator.extrinsic)
+        T_ground_truth = compute_ground_truth_pose(
+            T_world_camera, T_world_cart, T_robot_camera=estimator.extrinsic
+        )
         print("Ground Truth 6D Pose Matrix:\n", T_ground_truth)
-        
+
         # 5. Export Combined Scene to GLB (Robot Frame)
         pcd_robot = copy.deepcopy(pcd)
         pcd_robot.transform(estimator.extrinsic)
         output_file = os.path.join(output_dir, f"combined_scene_sample_{sample_idx}.glb")
         export_debug_scene(pcd_robot, cad_mesh, T_final, T_ground_truth, output_file)
-        
+
     print(f"\nAll operations completed. GLB scenes saved to: '{output_dir}/'")
 
 
@@ -223,7 +230,7 @@ def run_targeted_inspection(
     estimator: BasePoseEstimator,
     meshes: dict[str, o3d.geometry.TriangleMesh],
     output_dir: str,
-    depth_trunc: float
+    depth_trunc: float,
 ) -> None:
     """
     Performs targeted debugging on specific sample indices, exporting
@@ -235,13 +242,13 @@ def run_targeted_inspection(
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Running targeted inspection on specific indices: {indices}")
-    
+
     for idx in indices:
         print(f"\n--- Targeted Inspection on Index {idx} ---")
         if idx >= len(dataset):
             print(f"Skipping Index {idx}: Index is out of range for the loaded dataset split.")
             continue
-            
+
         row = dataset[int(idx)]
         img = row["rgb"]
         depth_bytes = row["depth"]
@@ -249,39 +256,41 @@ def run_targeted_inspection(
         # 1. Run YOLO and save 2D overlays
         result = model(img, retina_masks=True, verbose=False)
         plotted_img = result[0].plot()
-        
+
         yolo_path = os.path.join(output_dir, f"yolo_prediction_{idx}.png")
         cv2.imwrite(yolo_path, plotted_img)
         print(f"Saved 2D YOLO prediction plot to: {yolo_path}")
-        
+
         if not instance_detected(result):
             print(f"No instance detected on Index {idx}. Skipping 3D inspection steps.")
             continue
-            
+
         # 2. Segment and Reconstruct Point Cloud
         cart_type, pcd, frame = process_and_reconstruct(
             img, depth_bytes, result, camera, depth_trunc=depth_trunc, return_frame=True
         )
         print(f"Recognized class: {cart_type}")
-        
+
         # Transform the point cloud to the robot frame using the estimator's extrinsic
         pcd_robot = copy.deepcopy(pcd)
         pcd_robot.transform(estimator.extrinsic)
-        
+
         pcd_path = os.path.join(output_dir, f"reconstructed_pcd_{idx}.ply")
         o3d.io.write_point_cloud(pcd_path, pcd_robot)
         print(f"Saved reconstructed 3D point cloud (Robot Frame) to: {pcd_path}")
-        
+
         # 3. Load reference CAD mesh and run Pose Estimation
         cad_mesh = meshes.get(cart_type)
         if cad_mesh is not None:
             T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type, frame=frame)
-            
+
             if T_final is not None:
                 # Retrieve ground truth pose matrix in base_link coordinates
                 T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
                 T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
-                T_ground_truth = compute_ground_truth_pose(T_world_camera, T_world_cart, T_robot_camera=estimator.extrinsic)
+                T_ground_truth = compute_ground_truth_pose(
+                    T_world_camera, T_world_cart, T_robot_camera=estimator.extrinsic
+                )
                 output_glb = os.path.join(output_dir, f"combined_scene_idx_{idx}.glb")
                 export_debug_scene(pcd_robot, cad_mesh, T_final, T_ground_truth, output_glb)
                 print(f"Saved combined 6D Pose scene to: {output_glb}")
@@ -289,7 +298,7 @@ def run_targeted_inspection(
                 print("Pose estimation failed. Cannot generate combined GLB scene.")
         else:
             print(f"CAD mesh for {cart_type} not found. Skipping GLB scene export.")
-            
+
     print(f"\nAll debug outputs for targeted indices successfully saved to: '{output_dir}/'")
 
 
@@ -309,18 +318,10 @@ def main():
     # Load pipeline assets
     print("Loading pipeline assets...")
     model = load_hf_model(
-        local_model_path=args.yolo.local_path,
-        repo_id=args.yolo.repo,
-        filename=args.yolo.file
+        local_model_path=args.yolo.local_path, repo_id=args.yolo.repo, filename=args.yolo.file
     )
-    camera = Camera(
-        fx=args.camera.fx, fy=args.camera.fy,
-        cx=args.camera.cx, cy=args.camera.cy
-    )
-    dataset = load_parquet_dataset(
-        dataset_path=args.dataset.path,
-        test_glob=args.dataset.test_glob
-    )
+    camera = Camera(fx=args.camera.fx, fy=args.camera.fy, cx=args.camera.cx, cy=args.camera.cy)
+    dataset = load_parquet_dataset(dataset_path=args.dataset.path, test_glob=args.dataset.test_glob)
 
     # Hoist CAD mesh loading
     meshes = load_cad_meshes()
@@ -345,7 +346,7 @@ def main():
             estimator=estimator,
             meshes=meshes,
             output_dir=os.path.join(debug_root, args.output_dir),
-            depth_trunc=args.model.profile.depth_trunc
+            depth_trunc=args.model.profile.depth_trunc,
         )
     else:
         run_targeted_inspection(
@@ -356,8 +357,9 @@ def main():
             estimator=estimator,
             meshes=meshes,
             output_dir=os.path.join(debug_root, "debug_failures"),
-            depth_trunc=args.model.profile.depth_trunc
+            depth_trunc=args.model.profile.depth_trunc,
         )
+
 
 if __name__ == "__main__":
     main()

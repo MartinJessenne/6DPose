@@ -2,15 +2,15 @@ import copy
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-import numpy as np
+
 import cv2
+import numpy as np
 import open3d as o3d
+
 from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
 
 if TYPE_CHECKING:
     import optuna
-
-
 
 
 # =====================================================================
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class PPFParams:
     """Hyperparameters specific to the PPF matching method."""
+
     ppf_sampling_step: float = 0.1
     ppf_distance_step: float = 0.02
     ppf_match_threshold: float = 0.06
@@ -44,7 +45,7 @@ def o3d_to_ppf_format(pcd: o3d.geometry.PointCloud) -> np.ndarray:
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30)
         )
-    
+
     pts = np.asarray(pcd.points, dtype=np.float32)
     normals = np.asarray(pcd.normals, dtype=np.float32)
     return np.hstack((pts, normals))
@@ -59,7 +60,7 @@ class PPFEstimator(BasePoseEstimator):
     def __init__(self, params: PPFParams | dict = None, extrinsic: list | np.ndarray = None):
         """
         Initializes the PPF Estimator with matching parameters.
-        
+
         Args:
             params (PPFParams, optional): Dedicated parameters. If None, uses defaults.
         """
@@ -70,7 +71,7 @@ class PPFEstimator(BasePoseEstimator):
                 self.params = params
         else:
             self.params = PPFParams()
-            
+
         if extrinsic is not None:
             self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
         else:
@@ -82,10 +83,16 @@ class PPFEstimator(BasePoseEstimator):
         return {
             "ppf_sampling_step": trial.suggest_float("ppf_sampling_step", 0.02, 0.10, step=0.01),
             "ppf_distance_step": trial.suggest_float("ppf_distance_step", 0.02, 0.10, step=0.01),
-            "ppf_match_threshold": trial.suggest_float("ppf_match_threshold", 0.02, 0.10, step=0.01),
-            "ppf_match_tolerance": trial.suggest_float("ppf_match_tolerance", 0.01, 0.08, step=0.01),
-            "icp_max_correspondence_distance": trial.suggest_float("icp_max_correspondence_distance", 0.02, 0.20),
-            "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10)
+            "ppf_match_threshold": trial.suggest_float(
+                "ppf_match_threshold", 0.02, 0.10, step=0.01
+            ),
+            "ppf_match_tolerance": trial.suggest_float(
+                "ppf_match_tolerance", 0.01, 0.08, step=0.01
+            ),
+            "icp_max_correspondence_distance": trial.suggest_float(
+                "icp_max_correspondence_distance", 0.02, 0.20
+            ),
+            "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10),
         }
 
     def _get_prep_params_key(self) -> tuple:
@@ -101,7 +108,8 @@ class PPFEstimator(BasePoseEstimator):
 
         # Evict old cached entries for the same cart type with different parameters to bound memory growth
         stale_keys = [
-            k for k in self._PREPARATION_CACHE
+            k
+            for k in self._PREPARATION_CACHE
             if k[0] == self.__class__.__name__ and k[1] == cart_type and k[2] != prep_params
         ]
         for k in stale_keys:
@@ -111,39 +119,36 @@ class PPFEstimator(BasePoseEstimator):
         mesh_copy = copy.deepcopy(cad_mesh)
         mesh_copy.compute_vertex_normals()
         model_pc = mesh_copy.sample_points_uniformly(number_of_points=1000)
-        
+
         # Convert geometries to PPF stacked formats [N, 6]
         ppf_model = o3d_to_ppf_format(model_pc)
-        
+
         # Initialize PPF 3D Detector
         detector = cv2.ppf_match_3d_PPF3DDetector(
             relativeSamplingStep=self.params.ppf_sampling_step,
-            relativeDistanceStep=self.params.ppf_distance_step
+            relativeDistanceStep=self.params.ppf_distance_step,
         )
         detector.trainModel(ppf_model)
-        
-        self._PREPARATION_CACHE[cache_key] = {
-            "model_pc": model_pc,
-            "detector": detector
-        }
+
+        self._PREPARATION_CACHE[cache_key] = {"model_pc": model_pc, "detector": detector}
 
     def estimate_pose(
         self,
         pcd: o3d.geometry.PointCloud,
         cad_mesh: o3d.geometry.TriangleMesh,
         cart_type: str | None = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> np.ndarray | None:
         """
         Estimates the 6D pose of the CAD model relative to the point cloud.
-        
+
         Args:
             pcd (o3d.geometry.PointCloud): Segmented scene point cloud in camera frame.
             cad_mesh (o3d.geometry.TriangleMesh): Reference CAD model.
             cart_type (str, optional): Name of the cart type.
-            
+
         Returns:
-            np.ndarray: 4x4 homogeneous transformation matrix in robot frame, 
+            np.ndarray: 4x4 homogeneous transformation matrix in robot frame,
                         or None if registration fails.
         """
         # Prepare scene point cloud using factored-out utility function
@@ -160,52 +165,52 @@ class PPFEstimator(BasePoseEstimator):
             ppf_model = o3d_to_ppf_format(model_pc)
             detector = cv2.ppf_match_3d_PPF3DDetector(
                 relativeSamplingStep=self.params.ppf_sampling_step,
-                relativeDistanceStep=self.params.ppf_distance_step
+                relativeDistanceStep=self.params.ppf_distance_step,
             )
             detector.trainModel(ppf_model)
         else:
             cache_key = (self.__class__.__name__, cart_type, self._get_prep_params_key())
             if cache_key not in self._PREPARATION_CACHE:
-                logging.warning(f"Cache miss inside estimate_pose: preparing on-the-fly for key {cache_key}")
+                logging.warning(
+                    f"Cache miss inside estimate_pose: preparing on-the-fly for key {cache_key}"
+                )
                 self.prepare(cad_mesh, cart_type)
-            
+
             # Retrieve prepared representations from the cache.
-            # Rationale for deepcopy: Open3D C++ point clouds are mutable and modified in-place 
+            # Rationale for deepcopy: Open3D C++ point clouds are mutable and modified in-place
             # by downstream ICP refinement, so they must be copied to prevent cache corruption.
-            # Rationale for sharing: The OpenCV PPF3DDetector is read-only during matching, so it 
+            # Rationale for sharing: The OpenCV PPF3DDetector is read-only during matching, so it
             # is safe to share the single trained instance without deepcopying.
-            # Performance: Deepcopying a 1000-point cloud takes <0.1ms, whereas recomputing normals 
+            # Performance: Deepcopying a 1000-point cloud takes <0.1ms, whereas recomputing normals
             # and re-training the PPF matching database from scratch takes ~1-5 seconds.
             prep_data = self._PREPARATION_CACHE[cache_key]
             model_pc = copy.deepcopy(prep_data["model_pc"])
             detector = prep_data["detector"]
-        
+
         ppf_scene = o3d_to_ppf_format(pcd)
-        
+
         logging.info("Running PPF Match on scene...")
         match_results = detector.match(
-            ppf_scene,
-            self.params.ppf_match_threshold,
-            self.params.ppf_match_tolerance
+            ppf_scene, self.params.ppf_match_threshold, self.params.ppf_match_tolerance
         )
-        
+
         # Guard check if matching returned empty results
         if not match_results:
             logging.warning("PPF matching failed to return any candidate matches.")
             return None
-            
+
         # Retrieve the best match result
         best_match = match_results[0]
         T_init = np.asarray(best_match.pose, dtype=np.float64).reshape(4, 4)
         logging.info(f"PPF Alignment Complete. Best match votes: {best_match.numVotes}")
-        
+
         # Refine pose using factored-out dual-hypothesis point-to-plane ICP
         T_refined = refine_pose_dual_hypothesis(
             model_pc=model_pc,
             scene_pcd=pcd,
             T_init=T_init,
             icp_max_correspondence_distance=self.params.icp_max_correspondence_distance,
-            icp_max_iterations=self.params.icp_max_iterations
+            icp_max_iterations=self.params.icp_max_iterations,
         )
-        
+
         return T_refined

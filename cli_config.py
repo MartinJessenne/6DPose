@@ -22,6 +22,7 @@ from methods.ransac3dof import (
     Ransac3DoFFullMeshEstimator,
     Ransac3DoFParams,
 )
+from methods.vsac_se2 import VSACSe2Estimator, VSACSe2Params
 
 
 # =====================================================================
@@ -31,6 +32,7 @@ from methods.ransac3dof import (
 @dataclass(frozen=True)
 class YoloConfig:
     """Where to find the YOLO segmentation weights (repo, file, local cache path)."""
+
     repo: str = "UItraviolet/yolo_multicart"
     file: str = "runs/segment/train-2/weights/best.pt"
     local_path: str = "best.pt"
@@ -39,6 +41,7 @@ class YoloConfig:
 @dataclass(frozen=True)
 class CameraConfig:
     """Intrinsics + camera-to-robot-base extrinsic for the depth sensor."""
+
     fx: float = 639.99768
     fy: float = 639.99768
     cx: float = 640.0
@@ -54,6 +57,7 @@ class CameraConfig:
 @dataclass(frozen=True)
 class DatasetConfig:
     """Parquet dataset location and glob patterns."""
+
     path: str = "parquet"
     # train_glob/val_glob are not currently read by benchmark.py or inspect_pose.py
     # (only `path` and `test_glob` are) — kept for 1:1 parity with the old YAML.
@@ -81,6 +85,7 @@ class DatasetConfig:
 @dataclass(frozen=True)
 class PPFProfile:
     """One tuned (params, depth_trunc) bundle for PPFEstimator."""
+
     params: PPFParams = field(default_factory=PPFParams)
     depth_trunc: float = 3.0
 
@@ -130,6 +135,7 @@ PPFProfileSelect = Union[
 @dataclass(frozen=True)
 class RansacProfile:
     """One tuned (params, depth_trunc) bundle for RansacEstimator."""
+
     params: RansacParams = field(default_factory=RansacParams)
     depth_trunc: float = 3.0
 
@@ -205,6 +211,7 @@ RansacProfileSelect = Union[
 @dataclass(frozen=True)
 class Ransac3DoFProfile:
     """One tuned (params, depth_trunc) bundle for Ransac3DoFEstimator."""
+
     params: Ransac3DoFParams = field(default_factory=Ransac3DoFParams)
     depth_trunc: float = 3.0
 
@@ -267,6 +274,45 @@ Ransac3DoFProfileSelect = Union[
                 ),
                 depth_trunc=2.6,
             ),
+        ),
+    ],
+]
+
+
+@dataclass(frozen=True)
+class VSACSe2Profile:
+    """One tuned (params, depth_trunc) bundle for VSACSe2Estimator."""
+
+    params: VSACSe2Params = field(default_factory=VSACSe2Params)
+    depth_trunc: float = 3.0
+
+
+VSACSe2ProfileSelect = Union[
+    Annotated[
+        VSACSe2Profile,
+        tyro.conf.subcommand(
+            name="default",
+            # Mirrors Ransac3DoFProfileSelect's "default" arm (same measured
+            # z_offset/front_crop_depth) plus VSACSe2Params.rho at its own
+            # class default -- not yet re-tuned by a dedicated sweep.
+            default=VSACSe2Profile(
+                params=VSACSe2Params(z_offset=0.01, front_crop_depth=0.35),
+                depth_trunc=3.0,
+            ),
+        ),
+    ],
+    Annotated[
+        VSACSe2Profile,
+        tyro.conf.subcommand(
+            name="bare",
+            # Raw VSACSe2Params() class defaults (auto-derived z_offset, full
+            # mesh, no front-slab crop) -- an ablation counterpart to
+            # "default", and NOT redundant filler: a Union needs >= 2 members
+            # or Python's typing collapses Union[X] to bare X, which silently
+            # breaks tyro's subcommand dispatch (confirmed by testing; see
+            # docs/explanation/tyro_cli_config.md's "real tyro gotcha" section
+            # for the sibling issue this rhymes with).
+            default=VSACSe2Profile(),
         ),
     ],
 ]
@@ -355,8 +401,18 @@ class Ransac3DoFPreset:
 @dataclass(frozen=True)
 class Ransac3DoFFullMeshPreset:
     """No-crop ablation baseline -- see Ransac3DoFFullMeshEstimator."""
+
     ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = Ransac3DoFFullMeshEstimator
     profile: Ransac3DoFFullMeshProfileSelect
+
+
+@dataclass(frozen=True)
+class VSACSe2Preset:
+    """PROSAC/MSAC + independent-inlier-tiebreak variant of Ransac3DoFPreset --
+    see VSACSe2Estimator, VSAC_Implementation_Plan.md."""
+
+    ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = VSACSe2Estimator
+    profile: VSACSe2ProfileSelect
 
 
 ModelPreset = Union[
@@ -391,6 +447,13 @@ ModelPreset = Union[
             description="profiles: model.profile:default, model.profile:acc-opt, model.profile:rt-opt",
         ),
     ],
+    Annotated[
+        VSACSe2Preset,
+        tyro.conf.subcommand(
+            name="vsac3dof",
+            description="profiles: model.profile:default",
+        ),
+    ],
 ]
 
 
@@ -418,6 +481,7 @@ class BenchmarkArgs:
     Available algorithms: model:ppf, model:ransac, model:ransac3dof.
     To see an algorithm's profile choices before running: model:<algo> --help
     """
+
     model: ModelPreset
     yolo: YoloConfig = field(default_factory=YoloConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
@@ -427,6 +491,19 @@ class BenchmarkArgs:
     trials: int = 30
     name: str = "Sweep"
     seed: int | None = None
+    # Sweep-only: each trial's estimator-internal RANSAC seed is otherwise
+    # pinned at the estimator params' class default (e.g. Ransac3DoFParams.seed
+    # = 0) for every trial, so a "best" trial could just be a lucky seed draw
+    # rather than a genuinely better hyperparameter setting. n_seeds > 1
+    # evaluates each trial across that many internal seeds and optimizes the
+    # mean, at roughly an n_seeds-fold increase in per-trial cost -- dial down
+    # to 1 for quick iteration, use 3+ for a trustworthy search.
+    n_seeds: int = 1
+    # Per-frame CSV (sample_idx, flip flag, flip-disambiguation diagnostics
+    # where available) written next to the run, for offline auditing (e.g.
+    # "is a persistent set of frames driving flip_rate?"). Cheap relative to
+    # the pose-estimation compute itself; --no-dump-frames opts out.
+    dump_frames: bool = True
 
 
 @dataclass(frozen=True)
@@ -442,8 +519,11 @@ class InspectArgs:
     Available algorithms: model:ppf, model:ransac, model:ransac3dof.
     To see an algorithm's profile choices before running: model:<algo> --help
     """
+
     model: ModelPreset
-    mode: Literal["random", "indices"]  # tyro validates this choice up front -- no null/"" sentinel needed.
+    mode: Literal[
+        "random", "indices"
+    ]  # tyro validates this choice up front -- no null/"" sentinel needed.
     yolo: YoloConfig = field(default_factory=YoloConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)

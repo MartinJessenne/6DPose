@@ -12,7 +12,13 @@ We load a sample image from the dataset, YOLO segmentation, and setup both estim
 import time
 import numpy as np
 import open3d as o3d
-from pipeline import Camera, load_hf_model, load_parquet_dataset, process_and_reconstruct, compute_ground_truth_pose
+from pipeline import (
+    Camera,
+    load_hf_model,
+    load_parquet_dataset,
+    process_and_reconstruct,
+    compute_ground_truth_pose,
+)
 from methods.ransac import RansacEstimator
 from methods.ppf import PPFEstimator
 from benchmark import compute_translation_error, compute_rotation_error
@@ -21,12 +27,14 @@ from benchmark import compute_translation_error, compute_rotation_error
 model = load_hf_model()
 dataset = load_parquet_dataset()
 camera = Camera(fx=639.99768, fy=639.99768, cx=640.0, cy=400.0)
-T_robot_camera = np.array([
-    [0.5, 0.0,  0.866, 0.439],
-    [0.0, 1.0, -0.0,   0.0  ],
-    [-0.866, 0.0, 0.5, 0.304],
-    [0.0, 0.0,  0.0,   1.0  ]
-])
+T_robot_camera = np.array(
+    [
+        [0.5, 0.0, 0.866, 0.439],
+        [0.0, 1.0, -0.0, 0.0],
+        [-0.866, 0.0, 0.5, 0.304],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+)
 
 # 2. Select a target sample (e.g. sample 1248)
 sample_idx = 1248
