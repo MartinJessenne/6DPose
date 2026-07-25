@@ -72,6 +72,9 @@ ABSTENTION_REASONS = (
     # VSAC only, and deliberately separate from "no_inliers": the pose WAS
     # scored, the Poisson null gate then vetoed it. Disappears if that gate is
     # ablated -- which is exactly why it needs its own bucket while it exists.
+    # Emitted only by the ablated Poisson null gate. Kept in the list because
+    # sweeps run before the ablation (e.g. study VSAC_NullOn_M2) have frame CSVs
+    # full of it, and a reader of those files needs the name to mean something.
     "null_rejected",
     "empty_scene_cloud",  # segmentation/reprojection produced no scene points
     "registration",  # abstained without naming a cause (estimator not yet instrumented)

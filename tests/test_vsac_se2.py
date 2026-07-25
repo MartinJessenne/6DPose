@@ -6,7 +6,6 @@ from methods.constrained_ransac import se2_to_se3
 from methods.vsac_se2 import (
     MatchedNpPointClouds,
     VsacParams,
-    calibrate_null,
     count_independent_inliers,
     prosac_pairs,
     vsac_se2,
@@ -236,14 +235,13 @@ class TestVsacSe2(unittest.TestCase):
         np.testing.assert_array_equal(result.transformation, np.eye(4))
 
 
-class TestNullCalibration(unittest.TestCase):
-    def test_calibrate_null_derives_threshold(self):
-        bg_counts = [1, 2, 1, 3, 2, 1, 2, 3, 2, 1]
-        I_delta = calibrate_null(bg_counts, n_model_points=200)
-        self.assertGreater(I_delta, 1.0)
-        self.assertLess(I_delta, 20.0)
+class TestRandomModelRejection(unittest.TestCase):
+    """The Poisson null gate that used to live here was ablated -- see the
+    comment at vsac_se2's final rejection. What must survive the ablation is
+    that a pure-noise scene still yields no pose, via the plain no-inliers
+    check rather than a statistical test."""
 
-    def test_pure_noise_scene_triggers_random_model_rejection(self):
+    def test_pure_noise_scene_yields_no_pose(self):
         rng = np.random.default_rng(999)
         # Random model points
         model_points = rng.uniform(-1, 1, size=(200, 3))
@@ -266,6 +264,7 @@ class TestNullCalibration(unittest.TestCase):
         )
         result = vsac_se2(pt_clouds, params, rng=rng)
         self.assertEqual(result.fitness, 0.0)
+        self.assertEqual(result.reason, "no_inliers")
         np.testing.assert_array_equal(result.transformation, np.eye(4))
 
 

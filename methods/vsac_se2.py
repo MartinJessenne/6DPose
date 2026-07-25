@@ -153,39 +153,6 @@ def count_independent_inliers(
     return n_independent
 
 
-def calibrate_null(
-    bg_independent_counts: list[int],
-    n_model_points: int,
-) -> float:
-    """
-    Calibrates background Poisson intensity hat_lambda and derives minimum
-    acceptance threshold I_delta.
-
-    Args:
-        bg_independent_counts: List of independent inlier counts from background (non-aligned) models.
-        n_model_points: Total number of points in CAD model.
-
-    Returns:
-        I_delta: Minimum independent inliers required to accept a pose.
-    """
-    if len(bg_independent_counts) == 0:
-        return 1.0
-
-    counts = np.array(bg_independent_counts, dtype=float)
-    lam_med = float(np.median(counts))
-
-    # Trim extreme outliers above 95th percentile
-    p95 = float(np.percentile(counts, 95))
-    valid_counts = counts[counts <= max(p95, lam_med)]
-
-    lam_hat = float(np.mean(valid_counts)) if len(valid_counts) > 0 else max(1.0, lam_med)
-    delta_0 = min(0.5, lam_hat / max(1, n_model_points))
-
-    # 6-sigma threshold formula for multiple hypothesis trials (extreme value bound)
-    I_delta = lam_hat + 6.0 * np.sqrt(lam_hat * (1.0 - delta_0))
-    return float(I_delta)
-
-
 def vsac_se2(
     point_clouds=MatchedNpPointClouds,
     params=VsacParams,
@@ -265,9 +232,6 @@ def vsac_se2(
     best_rmse = np.inf
     best_inlier_mask: np.ndarray | None = None
 
-    bg_indep_counts: list[int] = []
-    I_delta = 2.0  # Minimal SE(2) solver requires at least 2 points
-
     # Adaptive early termination (ported from constrained_ransac_se2): without
     # this, the loop always drains the full max_iterations budget regardless
     # of how good the best hypothesis already is, making p95 latency
@@ -337,12 +301,6 @@ def vsac_se2(
             inlier_mask=inlier_mask, model_points_2d=model_points[:, :Z_AXIS], rho=params.rho
         )
 
-        # Collect background noise counts from low-fitness (<30%) candidate hypotheses
-        if fitness < 0.3 and len(bg_indep_counts) < 50:
-            bg_indep_counts.append(n_independent)
-            if len(bg_indep_counts) == 50:
-                I_delta = calibrate_null(bg_indep_counts, n_model_points=n_model)
-
         # 1. Clear quality win (>2% MSAC improvement)
         is_quality_better = quality > best_quality * 1.02
 
@@ -380,19 +338,25 @@ def vsac_se2(
             else:
                 required_iterations = params.max_iterations
 
-    # Final Null Calibration if not completed during warmup
-    if len(bg_indep_counts) > 0 and I_delta == 2.0:
-        I_delta = calibrate_null(bg_indep_counts, n_model_points=n_model)
-
-    # Random Model Rejection Check: reject if no inliers found or fails statistical null test.
-    # The two causes are reported separately: "no inliers at all" is a genuine
-    # no-support abstention, while "the Poisson null gate rejected an otherwise
-    # scored pose" is a policy choice we are actively evaluating -- counting
-    # them together is what let the gate trade flips for abstentions unnoticed.
+    # Reject only the genuine no-support case: no candidate pose landed a single
+    # inlier, so there is nothing to return.
+    #
+    # ABLATED (commit following 6256d59): a Poisson null-hypothesis gate used to
+    # also reject any pose whose independent-inlier count fell below
+    # I_delta = lam_hat + 6*sqrt(lam_hat*(1-delta_0)), with lam_hat calibrated from
+    # low-fitness candidates seen during the search. At 6 sigma it was rejecting
+    # poses wholesale rather than filtering random ones: VSAC's median pose
+    # failures went 36 -> 116 out of 210 when it landed (W&B ffx1i5tn -> fgugxxrn)
+    # while best AR fell 0.180 -> 0.122, and in the SmokeM2 run every single
+    # abstention was attributed to this gate. It was converting flips into
+    # abstentions, which the old success-denominator flip_rate scored as an
+    # improvement. See git history for the implementation if it needs reviving.
+    #
+    # NOTE the independent-inlier machinery itself is NOT ablated:
+    # count_independent_inliers still drives the is_tiebreak_win spatial-support
+    # tiebreak above, which is the actual flip-disambiguation mechanism.
     if best_fitness == 0.0:
         return RansacResult(np.eye(4), 0.0, np.inf, reason="no_inliers")
-    if best_n_independent < I_delta:
-        return RansacResult(np.eye(4), 0.0, np.inf, reason="null_rejected")
 
     return RansacResult(best_transformation, best_fitness, best_rmse)
 

@@ -1189,7 +1189,9 @@ def main():
             if failures:
                 by_reason: dict[str, int] = {}
                 for r in failures:
-                    key = f"{r.outcome}/{r.failure_reason}"
+                    # gross_yaw frames produced a pose, so they carry no
+                    # abstention cause -- don't render a "/None" suffix for them.
+                    key = f"{r.outcome}/{r.failure_reason}" if r.failure_reason else r.outcome
                     by_reason[key] = by_reason.get(key, 0) + 1
                 print("")
                 print("FAILURE BREAKDOWN:")
