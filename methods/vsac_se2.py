@@ -82,26 +82,26 @@ def prosac_pairs(
 
 def score_msac(
     transformed_model_points: np.ndarray,
-    scene_kdtree_2d: cKDTree,
+    scene_kdtree_3d: cKDTree,
     tau: float,
 ) -> tuple[float, float, np.ndarray, np.ndarray]:
     """
-    Computes MSAC quality score, inlier ratio (fitness), inlier mask, and distance array.
+    Computes MSAC quality score, inlier ratio (fitness), inlier mask, and distance array
+    in 3D Euclidean space (x, y, z).
 
     Args:
-        transformed_model_points: (N, 3) transformed model point cloud.
-        scene_kdtree_2d: 2D cKDTree of scene (x, y) points.
-        tau: Distance threshold meters.
-        z_axis: Index of vertical axis (default 2 for Z).
+        transformed_model_points: (N, 3) 3D transformed model point cloud.
+        scene_kdtree_3d: 3D cKDTree of scene (x, y, z) points.
+        tau: Distance threshold in meters.
 
     Returns:
         quality: float MSAC quality score sum(tau^2 - r^2)
         fitness: float inlier ratio in [0.0, 1.0]
-        inlier_mask: (N,) boolean mask where distance < tau
-        dists: (N,) distance array from cKDTree
+        inlier_mask: (N,) boolean mask where 3D distance < tau
+        dists: (N,) 3D Euclidean distance array from cKDTree
     """
-    # Compute the distances from the transformed model points to the nearest scene points in 2D (x, y)
-    distances, _ = scene_kdtree_2d.query(transformed_model_points, k=1, distance_upper_bound=tau)
+    # Compute the 3D distances from the transformed model points to the nearest scene points in (x, y, z)
+    distances, _ = scene_kdtree_3d.query(transformed_model_points, k=1, distance_upper_bound=tau)
 
     inlier_mask = distances < np.inf
     fitness = float(np.mean(inlier_mask))
@@ -181,8 +181,8 @@ def calibrate_null(
     lam_hat = float(np.mean(valid_counts)) if len(valid_counts) > 0 else max(1.0, lam_med)
     delta_0 = min(0.5, lam_hat / max(1, n_model_points))
 
-    # 5-sigma threshold formula for multiple hypothesis trials (extreme value bound)
-    I_delta = lam_hat + 5.0 * np.sqrt(lam_hat * (1.0 - delta_0))
+    # 6-sigma threshold formula for multiple hypothesis trials (extreme value bound)
+    I_delta = lam_hat + 6.0 * np.sqrt(lam_hat * (1.0 - delta_0))
     return float(I_delta)
 
 
@@ -241,27 +241,32 @@ def vsac_se2(
     )
 
     # Correspondence coordinates for the adaptive-termination inlier ratio w
-    # (below), precomputed once -- mirrors constrained_ransac_se2's corr_p/corr_q,
-    # kept in 2D (x, y) for consistency with this file's own MSAC scoring, which
-    # is 2D-only throughout (score_msac, scene_kdtree_2d below).
-    corr_p_2d = model_points[sorted_gated_correspondences[:, 0], :Z_AXIS]
-    corr_q_2d = scene_points[sorted_gated_correspondences[:, 1], :Z_AXIS]
+    # (below), precomputed once -- mirrors constrained_ransac_se2's corr_p/corr_q
+    # in 3D (x, y, z) for 3D MSAC scoring consistency.
+    corr_p_3d = model_points[sorted_gated_correspondences[:, 0]]
+    corr_q_3d = scene_points[sorted_gated_correspondences[:, 1]]
 
     # Prepare a random subset of the model points for sub quality MSAC scoring to unbias the process.
     n_model = len(model_points)
     subsample_size = min(params.scoring_subsample_size, n_model)
     subsample_indices = rng.choice(n_model, size=subsample_size, replace=False)
 
-    # KD-Tree for fast nearest neighbor search
-    scene_kdtree_2d = cKDTree(scene_points[:, :Z_AXIS])  # Only use x, y for SE(2)
+    # 3D KD-Tree for fast nearest neighbor search in Euclidean (x, y, z) space.
+    # Evaluated in 3D to prevent vertical height ambiguities.
+    # Example: If a scene point q sits at (1.0, 0.5, 2.5m) (e.g. on a wall or ceiling)
+    # and a transformed model point p lands at (1.0, 0.5, 0.1m) (on the cart chassis),
+    # their 2D distance is sqrt(dx^2 + dy^2) = 0.0m < tau, which would falsely mark
+    # ceiling clutter as a cart inlier. 3D querying enforces r_3D = 2.4m > tau.
+    scene_kdtree_3d = cKDTree(scene_points)  # Full 3D (x, y, z) point cloud
     best_quality = 0.0
     best_fitness = 0.0
     best_n_independent = 0
     best_transformation = np.eye(4)
     best_rmse = np.inf
+    best_inlier_mask: np.ndarray | None = None
 
     bg_indep_counts: list[int] = []
-    I_delta = 1.0
+    I_delta = 2.0  # Minimal SE(2) solver requires at least 2 points
 
     # Adaptive early termination (ported from constrained_ransac_se2): without
     # this, the loop always drains the full max_iterations budget regardless
@@ -300,17 +305,17 @@ def vsac_se2(
             continue
 
         theta, t_xy = sol
-        T_candidate = se2_to_se3(theta, t_xy, z=params.z_offset)  # For backward compatibility
+        T_candidate = se2_to_se3(theta, t_xy, z=params.z_offset)  # 4x4 SE(3) matrix
 
-        # Apply the candidate transformation to the model points and compute the fitness score
+        # Apply the candidate 4x4 transformation to the 3D model points
         transformed_model_points = (
-            model_points[:, :Z_AXIS] @ T_candidate[:Z_AXIS, :Z_AXIS].T + T_candidate[:Z_AXIS, 3]
+            model_points @ T_candidate[:3, :3].T + T_candidate[:3, 3]
         )
 
-        # Prescoring on subsampled points to speed up the process
+        # Prescoring on subsampled 3D points to speed up the process
         sub_quality, _, _, _ = score_msac(
             transformed_model_points=transformed_model_points[subsample_indices],
-            scene_kdtree_2d=scene_kdtree_2d,
+            scene_kdtree_3d=scene_kdtree_3d,
             tau=params.distance_threshold,
         )
 
@@ -321,10 +326,10 @@ def vsac_se2(
         if max_possible_quality < best_quality:
             continue  # Early exit if the maximum possible quality is worse than the best found so far
 
-        # Full model scoring to compute the actual quality and fitness
+        # Full 3D model scoring to compute the actual quality and fitness
         quality, fitness, inlier_mask, dists = score_msac(
             transformed_model_points=transformed_model_points,
-            scene_kdtree_2d=scene_kdtree_2d,
+            scene_kdtree_3d=scene_kdtree_3d,
             tau=params.distance_threshold,
         )
 
@@ -345,13 +350,14 @@ def vsac_se2(
         is_tiebreak_win = (quality >= best_quality * 0.98) and (n_independent > best_n_independent)
 
         if (
-            is_quality_better or is_tiebreak_win or best_quality == 0.0
+            is_quality_better or is_tiebreak_win or best_inlier_mask is None
         ):  # Accept the first valid solution
             best_quality = quality
             best_fitness = fitness
             best_n_independent = n_independent
             best_transformation = T_candidate
-            best_rmse = np.sqrt(np.mean(dists[inlier_mask] ** 2))
+            best_inlier_mask = inlier_mask
+            best_rmse = np.sqrt(np.mean(dists[inlier_mask] ** 2)) if np.any(inlier_mask) else np.inf
 
             if best_fitness >= 1.0:
                 break  # Perfect fit found
@@ -360,7 +366,7 @@ def vsac_se2(
             # ratio w: chance of picking 2 inliers in a row is w^2, so required
             # iterations = log(1-confidence)/log(1-w^2).
             residuals = np.linalg.norm(
-                corr_p_2d @ T_candidate[:Z_AXIS, :Z_AXIS].T + T_candidate[:Z_AXIS, 3] - corr_q_2d,
+                corr_p_3d @ T_candidate[:3, :3].T + T_candidate[:3, 3] - corr_q_3d,
                 axis=1,
             )
             w = (residuals < params.distance_threshold).mean()
@@ -375,11 +381,11 @@ def vsac_se2(
                 required_iterations = params.max_iterations
 
     # Final Null Calibration if not completed during warmup
-    if len(bg_indep_counts) > 0 and I_delta == 1.0:
+    if len(bg_indep_counts) > 0 and I_delta == 2.0:
         I_delta = calibrate_null(bg_indep_counts, n_model_points=n_model)
 
-    # Random Model Rejection Check
-    if best_n_independent < I_delta:
+    # Random Model Rejection Check: reject if no inliers found or fails statistical null test
+    if best_fitness == 0.0 or best_n_independent < I_delta:
         return RansacResult(np.eye(4), 0.0, np.inf)
 
     return RansacResult(best_transformation, best_fitness, best_rmse)
