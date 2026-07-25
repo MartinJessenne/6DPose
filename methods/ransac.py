@@ -130,10 +130,16 @@ class RansacEstimator(BasePoseEstimator):
             np.ndarray: 4x4 homogeneous transformation matrix in robot frame,
                         or None if registration fails.
         """
+        # Why the pose was abandoned, for the caller's per-frame audit trail.
+        # Reset per call: a stale reason from the previous frame would be worse
+        # than none at all. None once a pose is successfully returned.
+        self._last_failure_reason: str | None = None
+
         # Prepare scene point cloud using factored-out utility function
         pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
         if pcd.is_empty():
             logging.warning("Prepared scene point cloud is empty. Registration aborted.")
+            self._last_failure_reason = "empty_scene_cloud"
             return None
 
         voxel_size = self.params.voxel_size
@@ -190,9 +196,13 @@ class RansacEstimator(BasePoseEstimator):
 
         T_init = result_ransac.transformation
 
-        # If RANSAC global registration has 0 fitness (no matches found), it failed
+        # If RANSAC global registration has 0 fitness, it abstained. Carry out
+        # WHICH check rejected the frame (see RansacResult.reason) rather than a
+        # bare None -- "not enough FPFH correspondences" and "the null gate
+        # vetoed the best pose" are different bugs with different fixes.
         if result_ransac.fitness == 0.0:
-            logging.error("RANSAC global registration failed: zero correspondences found.")
+            self._last_failure_reason = getattr(result_ransac, "reason", None) or "registration"
+            logging.error(f"RANSAC global registration abstained: {self._last_failure_reason}.")
             return None
 
         # 4. Refine pose using dual-hypothesis point-to-plane ICP

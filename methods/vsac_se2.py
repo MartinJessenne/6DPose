@@ -205,7 +205,7 @@ def vsac_se2(
     )
 
     if len(correspondences) < DOF:  # Not enough correspondence found to compute a transform
-        return RansacResult(np.eye(4), 0.0, np.inf)
+        return RansacResult(np.eye(4), 0.0, np.inf, reason="fpfh_insufficient")
 
     MODEL_COL = 0
     SCENE_COL = 1
@@ -229,7 +229,7 @@ def vsac_se2(
     gated_distances = distances[dz < z_gate]
 
     if len(gated_correspondences) < DOF:
-        return RansacResult(np.eye(4), 0.0, np.inf)
+        return RansacResult(np.eye(4), 0.0, np.inf, reason="z_gate_insufficient")
 
     # Sort the correspondences by distances
     sort_order = np.argsort(gated_distances)
@@ -384,9 +384,15 @@ def vsac_se2(
     if len(bg_indep_counts) > 0 and I_delta == 2.0:
         I_delta = calibrate_null(bg_indep_counts, n_model_points=n_model)
 
-    # Random Model Rejection Check: reject if no inliers found or fails statistical null test
-    if best_fitness == 0.0 or best_n_independent < I_delta:
-        return RansacResult(np.eye(4), 0.0, np.inf)
+    # Random Model Rejection Check: reject if no inliers found or fails statistical null test.
+    # The two causes are reported separately: "no inliers at all" is a genuine
+    # no-support abstention, while "the Poisson null gate rejected an otherwise
+    # scored pose" is a policy choice we are actively evaluating -- counting
+    # them together is what let the gate trade flips for abstentions unnoticed.
+    if best_fitness == 0.0:
+        return RansacResult(np.eye(4), 0.0, np.inf, reason="no_inliers")
+    if best_n_independent < I_delta:
+        return RansacResult(np.eye(4), 0.0, np.inf, reason="null_rejected")
 
     return RansacResult(best_transformation, best_fitness, best_rmse)
 

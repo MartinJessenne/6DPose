@@ -1,22 +1,28 @@
 """
-Post-sweep diagnostic: does flip_rate already correlate with accuracy_loss?
+Post-sweep diagnostic: does gross_yaw_rate already correlate with accuracy loss?
 
-Checks the hypothesis behind keeping flip_rate a passive (logged, not
-optimized) metric in benchmark.py's sweep objective: flipped poses almost
-certainly fail every BOP-style AR threshold, so minimizing accuracy_loss
-(1 - AR, benchmark.py's `accuracy_score`) may already be near-equivalent to
-minimizing flip_rate wherever the 2-objective sweep actually searches -- which
-would make a dedicated 3rd Optuna objective (or constraint) for flip_rate
-unnecessary. This script answers that empirically per study instead of
-assuming it either way.
+Checks the hypothesis behind keeping gross_yaw_rate a passive (logged, not
+optimized) metric in benchmark.py's sweep objective: a grossly mis-oriented
+pose fails every BOP-style AR threshold by construction, so maximizing pose_ar
+should already be near-equivalent to minimizing gross_yaw_rate wherever the
+2-objective sweep actually searches -- which would make a dedicated 3rd Optuna
+objective (or constraint) unnecessary. This script answers that empirically per
+study instead of assuming it either way.
 
-If accuracy_loss and flip_rate are strongly positively correlated on the
+If accuracy loss and gross_yaw_rate are strongly positively correlated on the
 Pareto front (both bad together, both good together) -- no further sweep
-changes are needed. If not -- some region of the search trades flip_rate
-against accuracy in a way the 2-objective search can't see, and it's worth
-adding an Optuna constraints_func (NSGA-II) capping flip_rate on a follow-up
-sweep, rather than a full 3rd objective (which would dilute search budget
-across a 3-way Pareto front instead of the current 2D one).
+changes are needed. If not -- some region of the search trades orientation
+quality against accuracy in a way the 2-objective search can't see, and it's
+worth adding an Optuna constraints_func (NSGA-II) capping gross_yaw_rate on a
+follow-up sweep, rather than a full 3rd objective (which would dilute search
+budget across a 3-way Pareto front instead of the current 2D one).
+
+A DECOUPLED result is itself diagnostic. Under the pre-2026-07-25 metrics the
+correlation was +0.84 for Ransac3DoF but only +0.11 (n.s.) for VSAC -- because
+the old flip_rate divided by the SUCCESS count, so an estimator could suppress
+it just by abstaining. abstention_rate is reported alongside for exactly that
+reason: if the correlation is weak, check whether abstention is what is
+absorbing the difference.
 
 Usage:
     uv run analyze_sweep.py <study_name> [--plot report.html]
@@ -43,26 +49,30 @@ def load_trial_data(study_name: str) -> tuple[optuna.Study, list[optuna.trial.Fr
     return study, completed
 
 
-def correlate_flip_rate_vs_accuracy(
+def correlate_gross_yaw_vs_accuracy(
     trials: list[optuna.trial.FrozenTrial],
 ) -> tuple[float, float]:
     """
-    Spearman rank correlation between accuracy_loss (values[0], minimized by
-    the sweep) and flip_rate (a user_attr, never optimized directly).
+    Spearman rank correlation between accuracy loss and gross_yaw_rate (a
+    user_attr, never optimized directly).
+
+    values[0] is pose_ar, which the sweep MAXIMIZES, so accuracy loss is
+    1 - values[0]: both quantities then point the same way (bigger = worse) and
+    a positive rho means "they move together", as the docstring above assumes.
 
     Spearman rather than Pearson: the hypothesis under test ("both move
     together") is a monotonic-association claim, not a linear one.
     """
-    accuracy_loss = np.array([t.values[0] for t in trials])
-    flip_rate = np.array([t.user_attrs.get("flip_rate", np.nan) for t in trials])
-    valid = ~np.isnan(flip_rate)
-    rho, p_value = stats.spearmanr(accuracy_loss[valid], flip_rate[valid])
+    accuracy_loss = np.array([1.0 - t.values[0] for t in trials])
+    gross_yaw = np.array([t.user_attrs.get("gross_yaw_rate", np.nan) for t in trials])
+    valid = ~np.isnan(gross_yaw)
+    rho, p_value = stats.spearmanr(accuracy_loss[valid], gross_yaw[valid])
     return float(rho), float(p_value)
 
 
 def build_scatter_figure(study: optuna.Study, trials: list[optuna.trial.FrozenTrial], title: str):
     """
-    flip_rate vs accuracy_loss scatter, Pareto-optimal trials highlighted --
+    gross_yaw_rate vs accuracy_loss scatter, Pareto-optimal trials highlighted --
     mirrors the color convention benchmark.py's own build_pareto_figure
     already established (blue = Pareto-optimal, gray = dominated), so a
     reader sees the same visual language in both places.
@@ -80,23 +90,29 @@ def build_scatter_figure(study: optuna.Study, trials: list[optuna.trial.FrozenTr
             continue
         fig.add_trace(
             go.Scatter(
-                x=[t.values[0] for t in group],
-                y=[t.user_attrs.get("flip_rate") for t in group],
+                x=[1.0 - t.values[0] for t in group],
+                y=[t.user_attrs.get("gross_yaw_rate") for t in group],
                 mode="markers",
                 name=name,
                 marker=dict(size=8, color=color, line=dict(width=1, color=SURFACE)),
-                customdata=[t.number for t in group],
+                # Abstention rides along in the tooltip: a point sitting at low
+                # gross_yaw_rate AND high accuracy loss is almost always a trial
+                # that abstained its way out of trouble.
+                customdata=[
+                    [t.number, t.user_attrs.get("abstention_rate")] for t in group
+                ],
                 hovertemplate=(
-                    "<b>Trial %{customdata}</b><br>"
-                    "accuracy loss (1-AR): %{x:.4f}<br>"
-                    "flip_rate: %{y:.4f}<extra></extra>"
+                    "<b>Trial %{customdata[0]}</b><br>"
+                    "accuracy loss (1 - pose_ar): %{x:.4f}<br>"
+                    "gross_yaw_rate: %{y:.4f}<br>"
+                    "abstention_rate: %{customdata[1]:.4f}<extra></extra>"
                 ),
             )
         )
     fig.update_layout(
         title=title,
-        xaxis_title="accuracy loss (1 - AR)",
-        yaxis_title="flip_rate",
+        xaxis_title="accuracy loss (1 - pose_ar)",
+        yaxis_title="gross_yaw_rate",
         plot_bgcolor=SURFACE,
         paper_bgcolor=SURFACE,
         font=dict(color=INK),
@@ -121,12 +137,26 @@ def main():
     pareto_numbers = {t.number for t in study.best_trials}
     pareto_trials = [t for t in trials if t.number in pareto_numbers]
 
-    rho_all, p_all = correlate_flip_rate_vs_accuracy(trials)
+    rho_all, p_all = correlate_gross_yaw_vs_accuracy(trials)
     print(
         f"Study: {args.study_name}  "
         f"({len(trials)} completed trials, {len(pareto_trials)} Pareto-optimal)"
     )
-    print(f"Spearman(accuracy_loss, flip_rate) -- all trials:   rho={rho_all:+.3f}  p={p_all:.4f}")
+    print(
+        f"Spearman(accuracy_loss, gross_yaw_rate) -- all trials:   "
+        f"rho={rho_all:+.3f}  p={p_all:.4f}"
+    )
+
+    # Abstention context: without it, a weak correlation is uninterpretable.
+    abstentions = np.array(
+        [t.user_attrs.get("abstention_rate", np.nan) for t in trials], dtype=float
+    )
+    abstentions = abstentions[~np.isnan(abstentions)]
+    if abstentions.size:
+        print(
+            f"abstention_rate -- median={np.median(abstentions):.3f}  "
+            f"max={abstentions.max():.3f}"
+        )
 
     if len(pareto_trials) < 3:
         print(
@@ -134,26 +164,32 @@ def main():
             "separate correlation yet; run more trials."
         )
     else:
-        rho_pareto, p_pareto = correlate_flip_rate_vs_accuracy(pareto_trials)
-        print(f"Spearman(accuracy_loss, flip_rate) -- Pareto front: rho={rho_pareto:+.3f}  p={p_pareto:.4f}")
+        rho_pareto, p_pareto = correlate_gross_yaw_vs_accuracy(pareto_trials)
+        print(
+            f"Spearman(accuracy_loss, gross_yaw_rate) -- Pareto front: "
+            f"rho={rho_pareto:+.3f}  p={p_pareto:.4f}"
+        )
         print()
         if rho_pareto > 0.5 and p_pareto < 0.05:
             print(
-                "Strong positive correlation on the Pareto front: accuracy_loss and flip_rate "
-                "move together there, so minimizing accuracy_loss already pushes flip_rate down "
-                "too. No dedicated flip-rate objective/constraint needed yet."
+                "Strong positive correlation on the Pareto front: accuracy loss and "
+                "gross_yaw_rate move together there, so maximizing pose_ar already pushes "
+                "gross_yaw_rate down too. No dedicated objective/constraint needed yet."
             )
         else:
             print(
                 "Correlation on the Pareto front is weak or not significant: some configs trade "
-                "flip_rate against accuracy in ways the 2-objective search can't see. Consider "
-                "adding an Optuna constraints_func (NSGA-II sampler) capping flip_rate on a "
-                "follow-up sweep, rather than a full 3rd objective."
+                "orientation quality against accuracy in ways the 2-objective search can't see. "
+                "First check the abstention_rate line above -- a high median means the estimator "
+                "is declining to answer on the hard frames rather than getting them wrong, which "
+                "suppresses gross_yaw_rate without improving pose_ar. If abstention is low, "
+                "consider an Optuna constraints_func (NSGA-II sampler) capping gross_yaw_rate on "
+                "a follow-up sweep, rather than a full 3rd objective."
             )
 
     if args.plot:
         fig = build_scatter_figure(
-            study, trials, title=f"{args.study_name}: flip_rate vs accuracy_loss"
+            study, trials, title=f"{args.study_name}: gross_yaw_rate vs accuracy loss"
         )
         fig.write_html(args.plot)
         print(f"\nScatter saved to {args.plot}")

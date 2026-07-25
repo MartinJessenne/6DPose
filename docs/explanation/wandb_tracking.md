@@ -67,8 +67,8 @@ reasons:
 
 1. **It only captures what Optuna itself knows about a trial** -- the suggested params and the
    objective's return values. It has no idea about `trial.set_user_attr(...)` diagnostics
-   (`average_recall`, `detection_failures`, `pose_failures`, `flip_rate` in this codebase's
-   `objective()`), so those would need manual `wandb.log()` calls inside the objective regardless
+   (`gross_yaw_rate`, `abstention_rate`, `detection_failure_rate`, `n_attempted` in this
+   codebase's `objective()`), so those would need manual `wandb.log()` calls inside the objective regardless
    -- at which point the callback isn't saving much.
 2. **It's genuinely marked deprecated in the version installed here.** Both
    `WeightsAndBiasesCallback` and `MLflowCallback` carry an explicit
@@ -99,9 +99,9 @@ trial log into that same run at `step=trial.number` instead of creating its own 
 with wandb.init(project="6dpose", name=study_name, ...) as run:
     def objective(trial):
         ...
-        run.log({**suggested_params, "depth_trunc": depth_trunc, "accuracy_score": ..., ...},
+        run.log({**suggested_params, "depth_trunc": depth_trunc, "pose_ar": ..., ...},
                  step=trial.number)
-        return accuracy_score, p95_time
+        return m.pose_ar, m.p95_latency_s
 
     try:
         study.optimize(objective, n_trials=remaining)
@@ -131,12 +131,12 @@ Optuna Dashboard's Pareto-front view was the target to match. After `study.optim
 (or is interrupted -- the `finally` block runs either way), the sweep branch reads every
 `COMPLETE` trial directly from `study.trials` (Optuna's own persistent record, not just whatever
 ran in this process -- so a resumed sweep's chart always reflects the complete study, not just the
-newly-added trials), builds a `wandb.Table` with one row per trial (params + `accuracy_score` +
-`p95_time` + `average_recall` + `flip_rate`), and logs a scatter of it:
+newly-added trials), builds a `wandb.Table` with one row per trial (params + `pose_ar` +
+`p95_latency_s` + `gross_yaw_rate` + `abstention_rate`), and logs a scatter of it:
 
 ```python
 table = wandb.Table(columns=[...], data=rows)
-run.log({"pareto_front": wandb.plot.scatter(table, "p95_time", "accuracy_score", title=...)})
+run.log({"pareto_front": wandb.plot.scatter(table, "p95_latency_s", "pose_ar", title=...)})
 ```
 
 This renders as a native scatter panel on the run page -- speed on one axis, accuracy on the

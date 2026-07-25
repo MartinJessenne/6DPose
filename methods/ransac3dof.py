@@ -240,6 +240,11 @@ class Ransac3DoFEstimator(RansacEstimator):
         }
 
     def estimate_pose(self, pcd, cad_mesh, cart_type=None, **kwargs):
+        # Clear last frame's flip-disambiguation diagnostics: _refine_pose only
+        # runs on frames that get past global registration, so an abstaining
+        # frame would otherwise inherit the previous frame's decision record.
+        self._last_diagnostics = None
+
         # Resolve the z offset for THIS cart before the pipeline runs: the
         # hooks below (_global_registration, _project_pose) have no access to
         # the CAD mesh, so the resolved value is carried on the instance.

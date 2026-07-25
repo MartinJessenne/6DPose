@@ -499,10 +499,11 @@ class BenchmarkArgs:
     # mean, at roughly an n_seeds-fold increase in per-trial cost -- dial down
     # to 1 for quick iteration, use 3+ for a trustworthy search.
     n_seeds: int = 1
-    # Per-frame CSV (sample_idx, flip flag, flip-disambiguation diagnostics
-    # where available) written next to the run, for offline auditing (e.g.
-    # "is a persistent set of frames driving flip_rate?"). Cheap relative to
-    # the pose-estimation compute itself; --no-dump-frames opts out.
+    # Per-frame CSV (sample_idx, outcome, abstention cause, flip-disambiguation
+    # diagnostics where available) written next to the run, for offline auditing
+    # (e.g. "is a persistent set of frames driving gross_yaw_rate?", or "did
+    # this config starve at the FPFH stage or reject its own candidates?").
+    # Cheap relative to the pose-estimation compute itself; --no-dump-frames opts out.
     dump_frames: bool = True
 
 

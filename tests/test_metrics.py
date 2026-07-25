@@ -5,8 +5,24 @@ import numpy as np
 import open3d as o3d
 from pydantic import ValidationError
 
-from benchmark import PoseErrorMetrics, compute_average_recall, extract_pose_errors
+from benchmark import (
+    GROSS_YAW_DEG,
+    PoseErrorMetrics,
+    compute_average_recall,
+    compute_trial_metrics,
+    extract_pose_errors,
+    finite_or_none,
+)
 from methods.base import prepare_scene_point_cloud, refine_pose_dual_hypothesis
+
+
+def _err(trans_xy: float, yaw: float) -> PoseErrorMetrics:
+    """A PoseErrorMetrics with only the two fields the AR grid and the
+    gross-yaw rate actually look at; pitch/roll/z are structurally ~0 for the
+    SE(2) estimators under test."""
+    return PoseErrorMetrics(
+        trans_xy=trans_xy, trans_z=0.0, yaw=yaw, pitch=0.0, roll=0.0, geodesic_rot=abs(yaw)
+    )
 
 
 class TestBenchmarkMetrics(unittest.TestCase):
@@ -133,6 +149,78 @@ class TestBenchmarkMetrics(unittest.TestCase):
         ]
         ar = compute_average_recall(errs, 2)
         self.assertEqual(ar, 0.5)
+
+    def test_rates_partition_attempted(self):
+        """good + gross_yaw + abstention must cover every attempted frame.
+
+        This is the invariant whose absence let VSAC trade flips for
+        abstentions unnoticed: flip_rate used to divide by the SUCCESS count
+        while average_recall divided by the evaluated count.
+        """
+        errs = [
+            _err(trans_xy=0.01, yaw=1.0),  # good
+            _err(trans_xy=0.02, yaw=3.0),  # good
+            _err(trans_xy=0.50, yaw=180.0),  # gross yaw (a true flip)
+            _err(trans_xy=0.30, yaw=40.0),  # gross yaw (merely imprecise)
+        ]
+        m = compute_trial_metrics(errs, [0.1] * 4, detection_failures=2, pose_failures=4)
+
+        self.assertEqual(m.n_attempted, 8)  # 4 matched + 4 abstained, detections excluded
+        self.assertEqual(m.n_eval, 10)
+        self.assertAlmostEqual(m.good_rate + m.gross_yaw_rate + m.abstention_rate, 1.0)
+        self.assertAlmostEqual(m.good_rate, 0.25)
+        self.assertAlmostEqual(m.gross_yaw_rate, 0.25)
+        self.assertAlmostEqual(m.abstention_rate, 0.5)
+        # Detection failures stay out of the estimator denominator entirely.
+        self.assertAlmostEqual(m.detection_failure_rate, 0.2)
+
+    def test_pose_ar_never_exceeds_good_rate(self):
+        """Every AR grid cell requires |yaw| < 15, so AR is bounded by good_rate.
+
+        A violation means the two metrics' denominators have diverged -- exactly
+        the class of bug this suite exists to catch.
+        """
+        cases = [
+            [_err(0.001, 0.1)],  # perfect
+            [_err(0.001, 0.1), _err(0.5, 170.0)],  # mixed
+            [_err(0.02, 14.9)],  # good but only just
+            [_err(0.02, 15.1)],  # gross by a hair
+        ]
+        for errs in cases:
+            for pose_failures in (0, 3):
+                with self.subTest(errs=len(errs), pose_failures=pose_failures):
+                    m = compute_trial_metrics(
+                        errs, [0.1] * len(errs), detection_failures=0, pose_failures=pose_failures
+                    )
+                    self.assertLessEqual(m.pose_ar, m.good_rate + 1e-9)
+
+    def test_total_abstention_scores_worst_not_flip_free(self):
+        """A trial that returns no pose at all must be the WORST trial.
+
+        Regression guard for W&B run fgugxxrn step 11, which logged
+        pose_failures=207, average_recall=0 and flip_rate=0.0 -- i.e. a
+        completely failed trial presented as having a perfect flip rate.
+        """
+        m = compute_trial_metrics([], [], detection_failures=0, pose_failures=10)
+
+        self.assertEqual(m.abstention_rate, 1.0)
+        self.assertEqual(m.gross_yaw_rate, 0.0)
+        self.assertEqual(m.good_rate, 0.0)
+        # The objective, which is what the sweep actually optimizes, is floored.
+        self.assertEqual(m.pose_ar, 0.0)
+        # No successful estimation => no latency to report (logged as None, not
+        # float('inf'), which W&B stores as the string "Infinity").
+        self.assertFalse(np.isfinite(m.p95_latency_s))
+        self.assertIsNone(finite_or_none(m.p95_latency_s))
+        self.assertIsNone(m.trans_xy_p50)
+
+    def test_gross_yaw_threshold_matches_ar_grid(self):
+        """GROSS_YAW_DEG must equal the AR grid's largest rotation threshold.
+
+        If these drift apart, gross_yaw_rate and pose_ar stop answering the same
+        question and the bound in test_pose_ar_never_exceeds_good_rate breaks.
+        """
+        self.assertEqual(GROSS_YAW_DEG, 15.0)
 
     def test_dual_hypothesis_flip_correction(self):
         # Load colruyt model ply

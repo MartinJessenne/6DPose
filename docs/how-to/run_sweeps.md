@@ -59,10 +59,11 @@ for trial in study.best_trials:
 ## Step 3: The Same Sweep in Weights & Biases
 
 The whole sweep -- one CLI execution -- opens exactly one W&B run (project `6dpose`, named after
-the study), with every trial logging its suggested hyperparameters and diagnostics
-(`average_recall`, `detection_failures`, `pose_failures`, `flip_rate`) into that same run at
-`step=trial.number`. Once the sweep finishes (or is interrupted), that run gets a native scatter
-chart -- `p95_time` vs. `accuracy_score`, one point per completed trial -- built from every
+the study), with every trial logging its suggested hyperparameters and the five headline metrics
+(`pose_ar`, `p95_latency_s`, `gross_yaw_rate`, `abstention_rate`, `detection_failure_rate`, plus
+a `diag/`-prefixed tail) into that same run at `step=trial.number`. Once the sweep finishes (or is
+interrupted), that run gets a native scatter chart -- `p95_latency_s` vs. `pose_ar`, one point per
+completed trial -- built from every
 `COMPLETE` trial in the Optuna study, giving you the same Pareto-front view Optuna Dashboard shows,
 inside W&B. The Optuna SQLite study above remains the source of truth for resuming/inspecting a
 sweep programmatically; W&B is a parallel, browsable record built from it. See

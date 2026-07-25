@@ -41,12 +41,41 @@ class RansacResult:
             (in range [0.0, 1.0]).
         inlier_rmse (float): Root Mean Square Error (RMSE) of Euclidean distances
             for all inlier model points (points within `distance_threshold`).
+        reason (str | None): On abstention (fitness == 0.0), WHICH check rejected
+            the frame -- one of ABSTENTION_REASONS. Every abstention path used to
+            collapse into the same anonymous `fitness == 0.0`, which made
+            "the FPFH stage found no correspondences" indistinguishable from
+            "every candidate pose was rejected" in the sweep logs. None on
+            success.
     """
 
-    def __init__(self, transformation: np.ndarray, fitness: float, inlier_rmse: float):
+    def __init__(
+        self,
+        transformation: np.ndarray,
+        fitness: float,
+        inlier_rmse: float,
+        reason: str | None = None,
+    ):
         self.transformation = transformation
         self.fitness = fitness
         self.inlier_rmse = inlier_rmse
+        self.reason = reason
+
+
+# Abstention causes reported by the registration stage (RansacResult.reason).
+# Kept as a flat tuple of plain strings rather than an Enum so they survive the
+# trip into a CSV column / W&B table unchanged.
+ABSTENTION_REASONS = (
+    "fpfh_insufficient",  # fewer than DOF mutual FPFH correspondences
+    "z_gate_insufficient",  # z-gate left fewer than DOF correspondences
+    "no_inliers",  # no candidate pose scored a single inlier
+    # VSAC only, and deliberately separate from "no_inliers": the pose WAS
+    # scored, the Poisson null gate then vetoed it. Disappears if that gate is
+    # ablated -- which is exactly why it needs its own bucket while it exists.
+    "null_rejected",
+    "empty_scene_cloud",  # segmentation/reprojection produced no scene points
+    "registration",  # abstained without naming a cause (estimator not yet instrumented)
+)
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +276,7 @@ def constrained_ransac_se2(
     correspondences = match_correspondences_fpfh(model_fpfh, scene_fpfh)
     n_matched = len(correspondences)
     if n_matched < 2:
-        return RansacResult(np.eye(4), 0.0, np.inf)
+        return RansacResult(np.eye(4), 0.0, np.inf, reason="fpfh_insufficient")
 
     # Z-consistency gate: Rotation about +Z preserves Z coordinates.
     # Any valid correspondence pair (model_i, scene_j) must satisfy:
@@ -269,7 +298,7 @@ def constrained_ransac_se2(
             "SE(2) RANSAC: z-consistency gate removed (almost) all correspondences. "
             "Check that scene cloud is in Z-up frame and z_offset is correct."
         )
-        return RansacResult(np.eye(4), 0.0, np.inf)
+        return RansacResult(np.eye(4), 0.0, np.inf, reason="z_gate_insufficient")
 
     scene_tree = cKDTree(scene_points)
     n_model = len(model_points)
@@ -353,4 +382,12 @@ def constrained_ransac_se2(
             else:
                 required_iterations = max_iterations
 
-    return RansacResult(best_T, best_fitness, best_rmse)
+    # best_fitness stays 0.0 when no candidate pose landed a single inlier --
+    # same abstention the caller sees, but a different cause than the two
+    # correspondence-starvation exits above, so name it.
+    return RansacResult(
+        best_T,
+        best_fitness,
+        best_rmse,
+        reason="no_inliers" if best_fitness == 0.0 else None,
+    )

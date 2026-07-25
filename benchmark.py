@@ -153,7 +153,11 @@ def compute_average_recall(errors: list[PoseErrorMetrics], total_samples: int) -
 
     Args:
         errors (list[PoseErrorMetrics]): Computed pose errors for successfully registered samples.
-        total_samples (int): Total number of samples evaluated (including failures).
+        total_samples (int): Denominator -- MUST be n_attempted (samples that
+            actually reached the estimator), not len(errors). Passing the
+            success count instead is the selection bias this metric exists to
+            avoid: an estimator that abstains on every hard frame would score
+            perfectly. See compute_trial_metrics.
 
     Returns:
         float: The average recall score in the range [0.0, 1.0].
@@ -171,6 +175,131 @@ def compute_average_recall(errors: list[PoseErrorMetrics], total_samples: int) -
             recalls.append(successes / total_samples)
 
     return float(np.mean(recalls))
+
+
+# Yaw error above which a returned pose is counted as grossly mis-oriented.
+# Deliberately equal to the LARGEST rotation threshold in compute_average_recall's
+# grid: that makes gross_yaw_rate and pose_ar answer the same question, and it is
+# what makes the `pose_ar <= good_rate` invariant below hold. The old 90 degree
+# threshold answered a different question than the objective did, so the two
+# could drift apart without anyone noticing.
+GROSS_YAW_DEG = 15.0
+
+
+@dataclasses.dataclass(frozen=True)
+class TrialMetrics:
+    """The five headline metrics for one trial, plus a small diagnostics tail.
+
+    The three estimator rates share ONE denominator, n_attempted, so they
+    partition every frame the estimator was actually handed:
+
+        good_rate + gross_yaw_rate + abstention_rate == 1.0
+
+    That invariant is the entire point. The previous scheme divided flip_rate by
+    the SUCCESS count while dividing average_recall by the evaluated count, so
+    an estimator could drive its flip rate to zero purely by refusing to return
+    poses -- and did: VSAC run fgugxxrn logged flip_rate=0.0 on trials with 207
+    pose failures out of 210 frames.
+
+    YOLO detection failures are excluded from n_attempted and reported
+    separately: they happen upstream of the estimator and are invariant to the
+    swept parameters, so folding them in would just add a constant that dilutes
+    every estimator rate.
+    """
+
+    # --- the five ---
+    pose_ar: float  # objective 1, maximize
+    p95_latency_s: float  # objective 2, minimize (inf when nothing succeeded)
+    gross_yaw_rate: float
+    abstention_rate: float
+    detection_failure_rate: float
+
+    # --- diagnostics (never objectives) ---
+    n_eval: int
+    n_attempted: int
+    good_rate: float
+    # Conditional on GOOD samples only -- readable error magnitudes for humans,
+    # useless as objectives precisely because of that conditioning.
+    trans_xy_p50: float | None
+    yaw_p50: float | None
+
+
+def compute_trial_metrics(
+    errors: list[PoseErrorMetrics],
+    times: list[float],
+    detection_failures: int,
+    pose_failures: int,
+) -> TrialMetrics:
+    """
+    Reduces one trial's raw per-frame outcomes to the five headline metrics.
+
+    Args:
+        errors: Pose errors for frames that produced a pose AND a GT comparison.
+        times: Wall-clock estimation seconds, one per entry in `errors`.
+        detection_failures: Frames where YOLO found no cart (upstream).
+        pose_failures: Frames that reached the estimator but produced no pose.
+
+    Returns:
+        TrialMetrics: see that class for the invariants it guarantees.
+    """
+    n_matched = len(errors)
+    n_attempted = n_matched + pose_failures
+    n_eval = n_attempted + detection_failures
+
+    if n_attempted == 0:
+        # Nothing ever reached the estimator -- every estimator-scoped rate is
+        # undefined rather than zero. Report the worst possible objective so a
+        # degenerate trial can never win the sweep.
+        return TrialMetrics(
+            pose_ar=0.0,
+            p95_latency_s=float("inf"),
+            gross_yaw_rate=0.0,
+            abstention_rate=0.0,
+            detection_failure_rate=(detection_failures / n_eval) if n_eval else 0.0,
+            n_eval=n_eval,
+            n_attempted=0,
+            good_rate=0.0,
+            trans_xy_p50=None,
+            yaw_p50=None,
+        )
+
+    good = [e for e in errors if abs(e.yaw) <= GROSS_YAW_DEG]
+    n_gross = n_matched - len(good)
+
+    pose_ar = compute_average_recall(errors, n_attempted)
+    good_rate = len(good) / n_attempted
+    gross_yaw_rate = n_gross / n_attempted
+    abstention_rate = pose_failures / n_attempted
+
+    # The two invariants, asserted rather than documented-and-hoped-for.
+    assert abs((good_rate + gross_yaw_rate + abstention_rate) - 1.0) < 1e-9, (
+        "estimator rates must partition n_attempted: "
+        f"{good_rate} + {gross_yaw_rate} + {abstention_rate} != 1"
+    )
+    assert pose_ar <= good_rate + 1e-9, (
+        f"pose_ar ({pose_ar}) exceeded good_rate ({good_rate}); every AR grid cell "
+        f"requires |yaw| < {GROSS_YAW_DEG}, so this means the denominators diverged"
+    )
+
+    return TrialMetrics(
+        pose_ar=pose_ar,
+        p95_latency_s=float(np.percentile(times, 95)) if times else float("inf"),
+        gross_yaw_rate=gross_yaw_rate,
+        abstention_rate=abstention_rate,
+        detection_failure_rate=(detection_failures / n_eval) if n_eval else 0.0,
+        n_eval=n_eval,
+        n_attempted=n_attempted,
+        good_rate=good_rate,
+        trans_xy_p50=float(np.median([e.trans_xy for e in good])) if good else None,
+        yaw_p50=float(np.median([abs(e.yaw) for e in good])) if good else None,
+    )
+
+
+def finite_or_none(value: float) -> float | None:
+    """W&B stores float('inf') as the string "Infinity", which breaks any chart
+    the metric appears in. Log None instead -- an absent point, which is what a
+    trial that never completed an estimation actually has."""
+    return None if not np.isfinite(value) else float(value)
 
 
 # Set logging level for Optuna
@@ -214,7 +343,7 @@ def derive_internal_seeds(base_seed: int, n: int, salt: int = 0) -> list[int]:
 class FrameRecord:
     """
     One evaluated frame's outcome, for offline per-frame auditing -- e.g.
-    "is flip_rate driven by the same handful of frames every time?" (the
+    "is gross_yaw_rate driven by the same handful of frames every time?" (the
     question that motivated this: a sweep's minimum flip rate recurring
     identically across trials with no way to tell whether it was the same
     frames or not).
@@ -224,13 +353,25 @@ class FrameRecord:
     `_last_diagnostics` attribute (see Ransac3DoFEstimator._refine_pose,
     methods/ransac3dof.py) -- estimators that don't set one (PPF, the SE(3)
     RansacEstimator) just leave those fields None.
+
+    FAILED frames get a record too, with outcome != "good" and the pose fields
+    left None. They used to be dropped on the floor (evaluate_pipeline simply
+    `continue`d), which meant the CSV could not answer the one question worth
+    asking of an abstaining estimator: which check rejected these frames?
     """
 
     sample_idx: int
     cart_type: str | None
-    flipped: bool
-    trans_xy: float
-    yaw_err: float
+    # "good" | "gross_yaw" | "abstained" | "not_detected" -- mirrors the rate
+    # partition in TrialMetrics, so grouping the CSV by this column reproduces
+    # good_rate / gross_yaw_rate / abstention_rate exactly.
+    outcome: str
+    # Named cause, abstentions only (see methods/constrained_ransac.py's
+    # ABSTENTION_REASONS). None for frames that produced a pose.
+    failure_reason: str | None = None
+    flipped: bool | None = None
+    trans_xy: float | None = None
+    yaw_err: float | None = None
     selected: str | None = None
     decision: str | None = None
     fitness_1: float | None = None
@@ -273,14 +414,24 @@ def evaluate_pipeline(
             - times (list[float]): Pose estimation duration in seconds for each successful sample.
             - detection_failures (int): Count of samples where YOLO failed to detect a cart.
             - pose_failures (int): Count of samples where pose estimation failed.
-            - frame_records (list[FrameRecord]): Per-frame outcome + flip-disambiguation
-              diagnostics for successfully matched samples, for offline auditing.
+            - frame_records (list[FrameRecord]): Per-frame outcome + failure cause +
+              flip-disambiguation diagnostics for EVERY sample, for offline auditing.
     """
     error_metrics = []
     times = []
     frame_records = []
     detection_failures = 0
     pose_failures = 0
+
+    def record_failure(sample_idx: int, cart_type: str | None, outcome: str, reason: str) -> None:
+        frame_records.append(
+            FrameRecord(
+                sample_idx=int(sample_idx),
+                cart_type=cart_type,
+                outcome=outcome,
+                failure_reason=reason,
+            )
+        )
 
     for sample_idx in sample_indices:
         row = dataset[int(sample_idx)]
@@ -294,6 +445,7 @@ def evaluate_pipeline(
         result = model(img, retina_masks=True, verbose=False)
         if not instance_detected(result):
             detection_failures += 1
+            record_failure(sample_idx, None, "not_detected", "yolo_no_instance")
             continue
 
         # 2. Segment and Reconstruct Point Cloud
@@ -304,6 +456,7 @@ def evaluate_pipeline(
         except Exception:
             logging.exception(f"PointCloud processing failed for index {sample_idx}")
             pose_failures += 1
+            record_failure(sample_idx, None, "abstained", "pointcloud_error")
             continue
 
         # Retrieve preloaded mesh
@@ -311,6 +464,7 @@ def evaluate_pipeline(
         if cad_mesh is None:
             logging.error(f"CAD mesh not found for cart type '{cart_type}' (sample {sample_idx})")
             pose_failures += 1
+            record_failure(sample_idx, cart_type, "abstained", "mesh_missing")
             continue
 
         # 3. Perform 6D Pose Estimation with timing
@@ -318,12 +472,18 @@ def evaluate_pipeline(
         try:
             T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type, frame=frame)
             if T_final is None:
-                logging.error(f"Pose estimator returned None for index {sample_idx}")
+                # The estimator names WHICH check rejected the frame (see
+                # RansacResult.reason -> RansacEstimator._last_failure_reason).
+                # Estimators that aren't instrumented fall back to "estimator_none".
+                reason = getattr(estimator, "_last_failure_reason", None) or "estimator_none"
+                logging.error(f"Pose estimator abstained on index {sample_idx}: {reason}")
                 pose_failures += 1
+                record_failure(sample_idx, cart_type, "abstained", reason)
                 continue
         except Exception:
             logging.exception(f"Pose estimator raised an exception for index {sample_idx}")
             pose_failures += 1
+            record_failure(sample_idx, cart_type, "abstained", "estimator_exception")
             continue
         elapsed_time = time.time() - start_time
 
@@ -349,6 +509,12 @@ def evaluate_pipeline(
                 FrameRecord(
                     sample_idx=int(sample_idx),
                     cart_type=cart_type,
+                    outcome="good" if abs(metrics.yaw) <= GROSS_YAW_DEG else "gross_yaw",
+                    # Kept alongside `outcome` on purpose: `flipped` is the
+                    # near-180 degree failure mode specifically, while a
+                    # "gross_yaw" outcome also catches merely-imprecise poses
+                    # in the 15-90 degree band. Separating them is how we tell
+                    # "still flipping" from "converging badly".
                     flipped=abs(metrics.yaw) > 90.0,
                     trans_xy=metrics.trans_xy,
                     yaw_err=metrics.yaw,
@@ -363,6 +529,7 @@ def evaluate_pipeline(
         except Exception:
             logging.exception(f"Error metric extraction failed for index {sample_idx}")
             pose_failures += 1
+            record_failure(sample_idx, cart_type, "abstained", "metric_error")
             continue
 
     return error_metrics, times, detection_failures, pose_failures, frame_records
@@ -404,8 +571,8 @@ def log_input_artifacts(run, yolo_cfg, dataset_cfg):
 def build_pareto_figure(pareto, dominated, param_names, study_name):
     """Build the interactive Pareto-front scatter logged to W&B at sweep end.
 
-    x = p95 latency (objective 2), y = accuracy loss / 1-AR (objective 1); both are
-    minimized, so the bottom-left corner is best. Dominated trials form a recessive
+    x = p95 latency (objective 2, minimized), y = pose_ar (objective 1, MAXIMIZED),
+    so the bottom-right corner is best. Dominated trials form a recessive
     gray field, Pareto-optimal trials (study.best_trials) are highlighted in blue and
     connected by the frontier line. Every point's hover carries its trial number and
     full hyperparameter set, so any point on the frontier is traceable straight back
@@ -415,24 +582,27 @@ def build_pareto_figure(pareto, dominated, param_names, study_name):
     BLUE, GRAY, GRID, AXIS = "#2a78d6", "#898781", "#e1e0d9", "#c3c2b7"
     INK, INK2, SURFACE = "#0b0b0b", "#52514e", "#fcfcfb"
 
-    # customdata columns, in order: trial_number, *params, average_recall, flip_rate.
+    # customdata columns, in order:
+    # trial_number, *params, gross_yaw_rate, abstention_rate.
+    # Both failure rates ride along in the tooltip so a frontier point that looks
+    # accurate can be checked for how much it simply declined to answer.
     def customdata(trials):
         return [
             [t.number]
             + [t.params.get(name) for name in param_names]
-            + [t.user_attrs.get("average_recall"), t.user_attrs.get("flip_rate")]
+            + [t.user_attrs.get("gross_yaw_rate"), t.user_attrs.get("abstention_rate")]
             for t in trials
         ]
 
     hover_lines = [
         "<b>Trial %{customdata[0]}</b>",
-        "accuracy loss (1−AR): %{y:.4f}",
+        "pose_ar: %{y:.4f}",
         "p95 latency: %{x:.3f}s",
     ]
     for i, name in enumerate(param_names, start=1):
         hover_lines.append(f"{name}: %{{customdata[{i}]}}")
-    hover_lines.append(f"average_recall: %{{customdata[{len(param_names) + 1}]:.3f}}")
-    hover_lines.append(f"flip_rate: %{{customdata[{len(param_names) + 2}]:.3f}}")
+    hover_lines.append(f"gross_yaw_rate: %{{customdata[{len(param_names) + 1}]:.3f}}")
+    hover_lines.append(f"abstention_rate: %{{customdata[{len(param_names) + 2}]:.3f}}")
     hovertemplate = "<br>".join(hover_lines) + "<extra></extra>"
 
     fig = go.Figure()
@@ -491,7 +661,7 @@ def build_pareto_figure(pareto, dominated, param_names, study_name):
             tickcolor=AXIS,
         ),
         yaxis=dict(
-            title="accuracy loss (1 − AR)  →  worse",
+            title="pose_ar  →  better",
             gridcolor=GRID,
             zeroline=False,
             linecolor=AXIS,
@@ -505,7 +675,7 @@ def build_pareto_figure(pareto, dominated, param_names, study_name):
             dict(
                 text="← better (fast & accurate)",
                 x=0.01,
-                y=0.02,
+                y=0.98,
                 xref="paper",
                 yref="paper",
                 showarrow=False,
@@ -556,7 +726,12 @@ def run_parameter_sweep(
     study = optuna.create_study(
         study_name=study_name,
         storage=db_url,
-        directions=["minimize", "minimize"],  # Minimize error rate AND execution time
+        # Maximize pose_ar, minimize p95 latency. NOTE this flipped from
+        # ["minimize", "minimize"] when the objective stopped being the
+        # redundant `accuracy_score = 1 - AR` and became pose_ar itself.
+        # Optuna refuses to load a study whose directions changed, so studies
+        # created before that switch cannot be resumed -- use a fresh --name.
+        directions=["maximize", "minimize"],
         load_if_exists=True,
     )
 
@@ -653,7 +828,7 @@ def run_parameter_sweep(
             frame_records: list[FrameRecord] = []
             det_failed = 0
             pose_failed = 0
-            flip_rate_per_seed = []
+            gross_yaw_rate_per_seed = []
 
             for seed_i in trial_seeds:
                 params_i = (
@@ -683,8 +858,10 @@ def run_parameter_sweep(
                 det_failed += df
                 pose_failed += pf
                 frame_records.extend(fr)
-                flip_rate_per_seed.append(
-                    sum(1 for e in em if abs(e.yaw) > 90.0) / len(em) if em else 0.0
+                # Per-seed rate uses the same n_attempted denominator as the
+                # pooled metric, so the spread is comparable to the mean.
+                gross_yaw_rate_per_seed.append(
+                    compute_trial_metrics(em, t, df, pf).gross_yaw_rate
                 )
 
             if dump_frames:
@@ -693,36 +870,25 @@ def run_parameter_sweep(
                     frame_records,
                 )
 
-            total_failed = det_failed + pose_failed
-            total_matched = len(error_metrics)
-            total_evaluated = total_matched + total_failed
-
-            # Calculate Average Recall over the pooled (all-seeds) samples.
-            ar = compute_average_recall(error_metrics, total_evaluated)
-            accuracy_score = 1.0 - ar
-
-            # Calculate p95 execution time over actual successful runs only,
-            # pooled across seeds. Failures are already counted as misses in
-            # Obj 1 (AR); penalizing them again with fabricated latencies would
+            # The five headline metrics over the pooled (all-seeds) samples.
+            # p95 latency covers successful estimations only: abstentions are
+            # already counted against objective 1 via the n_attempted
+            # denominator, and charging them a fabricated latency too would
             # corrupt the latency objective.
-            p95_time = float(np.percentile(times, 95)) if times else float("inf")
+            m = compute_trial_metrics(error_metrics, times, det_failed, pose_failed)
 
-            # Save trial diagnostics (Optuna's own record, independent of W&B)
-            trial.set_user_attr("average_recall", ar)
-            trial.set_user_attr("p95_time", p95_time)
-            trial.set_user_attr("detection_failures", det_failed)
-            trial.set_user_attr("pose_failures", pose_failed)
-
-            if total_matched > 0:
-                flip_rate = sum(1 for e in error_metrics if abs(e.yaw) > 90.0) / total_matched
-            else:
-                flip_rate = 0.0
-            trial.set_user_attr("flip_rate", flip_rate)
+            # Optuna's own record, independent of W&B.
+            trial.set_user_attr("pose_ar", m.pose_ar)
+            trial.set_user_attr("p95_latency_s", m.p95_latency_s)
+            trial.set_user_attr("gross_yaw_rate", m.gross_yaw_rate)
+            trial.set_user_attr("abstention_rate", m.abstention_rate)
+            trial.set_user_attr("detection_failure_rate", m.detection_failure_rate)
+            trial.set_user_attr("n_attempted", m.n_attempted)
             # Per-seed breakdown (not just the pooled mean) so a later analysis
             # can check how seed-sensitive a config is -- see analyze_sweep.py.
             trial.set_user_attr("n_seeds", len(trial_seeds))
             trial.set_user_attr("trial_seeds", trial_seeds)
-            trial.set_user_attr("flip_rate_per_seed", flip_rate_per_seed)
+            trial.set_user_attr("gross_yaw_rate_per_seed", gross_yaw_rate_per_seed)
 
             # Log params + metrics together, indexed by trial number -- this is
             # what makes each key's W&B history a real per-trial trend line
@@ -731,20 +897,26 @@ def run_parameter_sweep(
                 {
                     **suggested_params,
                     "depth_trunc": depth_trunc,
-                    "accuracy_score": accuracy_score,
-                    "p95_time": p95_time,
-                    "average_recall": ar,
-                    "detection_failures": det_failed,
-                    "pose_failures": pose_failed,
-                    "flip_rate": flip_rate,
-                    "flip_rate_std": float(np.std(flip_rate_per_seed))
+                    # --- the five ---
+                    "pose_ar": m.pose_ar,
+                    "p95_latency_s": finite_or_none(m.p95_latency_s),
+                    "gross_yaw_rate": m.gross_yaw_rate,
+                    "abstention_rate": m.abstention_rate,
+                    "detection_failure_rate": m.detection_failure_rate,
+                    # --- diagnostics, namespaced so they can never be mistaken
+                    # for the headline five ---
+                    "diag/good_rate": m.good_rate,
+                    "diag/n_attempted": m.n_attempted,
+                    "diag/trans_xy_p50": m.trans_xy_p50,
+                    "diag/yaw_p50": m.yaw_p50,
+                    "diag/gross_yaw_rate_std": float(np.std(gross_yaw_rate_per_seed))
                     if len(trial_seeds) > 1
                     else 0.0,
                 },
                 step=trial.number,
             )
 
-            return accuracy_score, p95_time
+            return m.pose_ar, m.p95_latency_s
 
         print(f"Sweep results are being saved to SQLite database: '{db_name}'")
 
@@ -775,10 +947,11 @@ def run_parameter_sweep(
                 columns = [
                     "trial_number",
                     *param_names,
-                    "accuracy_score",
-                    "p95_time",
-                    "average_recall",
-                    "flip_rate",
+                    "pose_ar",
+                    "p95_latency_s",
+                    "gross_yaw_rate",
+                    "abstention_rate",
+                    "diag_n_attempted",
                 ]
                 rows = [
                     [
@@ -786,8 +959,9 @@ def run_parameter_sweep(
                         *[t.params.get(name) for name in param_names],
                         t.values[0],
                         t.values[1],
-                        t.user_attrs.get("average_recall"),
-                        t.user_attrs.get("flip_rate"),
+                        t.user_attrs.get("gross_yaw_rate"),
+                        t.user_attrs.get("abstention_rate"),
+                        t.user_attrs.get("n_attempted"),
                     ]
                     for t in completed
                 ]
@@ -961,108 +1135,79 @@ def main():
                     os.path.join(frames_dir, f"{args.name}_frames.csv"), frame_records
                 )
 
-            successful = len(error_metrics)
-            total_failed = det_failed + pose_failed
-            total = successful + total_failed
+            m = compute_trial_metrics(error_metrics, times, det_failed, pose_failed)
 
-            print("\n" + "=" * 50)
-            print("BENCHMARK REPORT (Default Parameters)")
-            print("=" * 50)
+            print("\n" + "=" * 58)
+            print("BENCHMARK REPORT")
+            print("=" * 58)
+            print(f"Evaluated {m.n_eval} samples; {m.n_attempted} reached the estimator.")
+            print("")
+            print("THE FIVE:")
+            print(f"  pose_ar                 {m.pose_ar:.4f}   (accuracy, higher is better)")
             print(
-                f"Detections & Matches: {successful} / {total} (Success rate: {successful / total * 100:.1f}%)"
+                f"  p95_latency_s           {m.p95_latency_s:.4f}   (speed, lower is better)"
+                if np.isfinite(m.p95_latency_s)
+                else "  p95_latency_s           n/a      (no successful estimation)"
             )
-            print(f"  - YOLO detection failures: {det_failed}")
-            print(f"  - Pose estimation failures: {pose_failed}")
-            run.log(
-                {
-                    "success_rate": successful / total * 100 if total else 0.0,
-                    "detection_failures": det_failed,
-                    "pose_failures": pose_failed,
-                }
+            print(f"  gross_yaw_rate          {m.gross_yaw_rate:.4f}   (|yaw| > {GROSS_YAW_DEG:g}°)")
+            print(f"  abstention_rate         {m.abstention_rate:.4f}   (no pose returned)")
+            print(f"  detection_failure_rate  {m.detection_failure_rate:.4f}   (YOLO, upstream)")
+            print("")
+            # good + gross + abstention == 1.0 by construction; printing the sum
+            # makes that visible rather than something you have to trust.
+            print(
+                f"  partition check: good {m.good_rate:.4f} + gross {m.gross_yaw_rate:.4f} "
+                f"+ abstained {m.abstention_rate:.4f} = "
+                f"{m.good_rate + m.gross_yaw_rate + m.abstention_rate:.4f}"
             )
 
-            if successful > 0:
-                ar = compute_average_recall(error_metrics, total)
-                print(f"Average Recall (BOP-style AR): {ar:.4f}")
+            log_payload = {
+                "pose_ar": m.pose_ar,
+                "p95_latency_s": finite_or_none(m.p95_latency_s),
+                "gross_yaw_rate": m.gross_yaw_rate,
+                "abstention_rate": m.abstention_rate,
+                "detection_failure_rate": m.detection_failure_rate,
+                "diag/good_rate": m.good_rate,
+                "diag/n_attempted": m.n_attempted,
+                "diag/n_eval": m.n_eval,
+                "diag/trans_xy_p50": m.trans_xy_p50,
+                "diag/yaw_p50": m.yaw_p50,
+            }
 
-                p95_latency = float(np.percentile(times, 95)) if times else float("inf")
-                print(f"p95 Latency: {p95_latency:.4f}s")
+            if m.trans_xy_p50 is not None:
+                print("")
+                print(f"CONDITIONAL ON GOOD SAMPLES ONLY (|yaw| <= {GROSS_YAW_DEG:g}°):")
+                print(f"  median XY translation error  {m.trans_xy_p50:.4f} m")
+                print(f"  median yaw error             {m.yaw_p50:.2f}°")
+                print("  (readable magnitudes -- NOT comparable across configs with")
+                print("   different abstention rates, since the conditioning set differs)")
 
-                # Decompose errors
-                trans_xy_errs = [e.trans_xy for e in error_metrics]
-                trans_z_errs = [e.trans_z for e in error_metrics]
-                yaw_errs = [e.yaw for e in error_metrics]
-                pitch_errs = [e.pitch for e in error_metrics]
-                roll_errs = [e.roll for e in error_metrics]
-                geodesic_errs = [e.geodesic_rot for e in error_metrics]
+            # Abstention causes -- the point of the per-frame records. Answers
+            # "did the estimator starve at the FPFH stage or reject its own
+            # candidates?", which a single pose_failures count cannot.
+            failures = [r for r in frame_records if r.outcome != "good"]
+            if failures:
+                by_reason: dict[str, int] = {}
+                for r in failures:
+                    key = f"{r.outcome}/{r.failure_reason}"
+                    by_reason[key] = by_reason.get(key, 0) + 1
+                print("")
+                print("FAILURE BREAKDOWN:")
+                for key, count in sorted(by_reason.items(), key=lambda kv: -kv[1]):
+                    print(f"  {key:<34} {count:>4}  ({count / m.n_eval * 100:.1f}% of evaluated)")
+                    log_payload[f"diag/failures/{key.replace('/', '_')}"] = count
 
-                print("Translation Error (XY in meters):")
-                print(f"  - Mean:   {np.mean(trans_xy_errs):.4f}")
-                print(f"  - Median: {np.median(trans_xy_errs):.4f}")
-                print("Translation Error (Z in meters):")
-                print(f"  - Bias (signed mean): {np.mean(trans_z_errs):+.4f}")
-                print(f"  - MAE:                {np.mean(np.abs(trans_z_errs)):.4f}")
-                print(f"  - Median (abs):       {np.median(np.abs(trans_z_errs)):.4f}")
+            # True ~180 degree flips, separated from merely-imprecise poses in
+            # the 15-90 degree band: same headline bucket, different root cause.
+            flipped = [r for r in frame_records if r.flipped]
+            if m.n_attempted:
+                flip_share = len(flipped) / m.n_attempted
+                print("")
+                print(f"  of which true flips (|yaw| > 90°): {len(flipped)} ({flip_share:.4f})")
+                log_payload["diag/flip_share"] = flip_share
 
-                print("Yaw Rotation Error (degrees):")
-                print(f"  - Mean:   {np.mean(np.abs(yaw_errs)):.2f}°")
-                print(f"  - Median: {np.median(np.abs(yaw_errs)):.2f}°")
-                print("Pitch Rotation Error (degrees):")
-                print(f"  - Mean:   {np.mean(np.abs(pitch_errs)):.2f}°")
-                print(f"  - Median: {np.median(np.abs(pitch_errs)):.2f}°")
-                print("Roll Rotation Error (degrees):")
-                print(f"  - Mean:   {np.mean(np.abs(roll_errs)):.2f}°")
-                print(f"  - Median: {np.median(np.abs(roll_errs)):.2f}°")
-                print("Geodesic Rotation Error (degrees):")
-                print(f"  - Mean:   {np.mean(geodesic_errs):.2f}°")
-                print(f"  - Median: {np.median(geodesic_errs):.2f}°")
-
-                # Flip rate
-                flips = sum(1 for e in error_metrics if abs(e.yaw) > 90.0)
-                print(
-                    f"Flip Rate (among successful matches): {flips / successful * 100:.1f}% ({flips}/{successful})"
-                )
-
-                run.log(
-                    {
-                        "average_recall": ar,
-                        "p95_latency": p95_latency,
-                        "trans_xy_mean": float(np.mean(trans_xy_errs)),
-                        "trans_xy_median": float(np.median(trans_xy_errs)),
-                        "trans_z_bias": float(np.mean(trans_z_errs)),
-                        "trans_z_mae": float(np.mean(np.abs(trans_z_errs))),
-                        "trans_z_median_abs": float(np.median(np.abs(trans_z_errs))),
-                        "yaw_mean": float(np.mean(np.abs(yaw_errs))),
-                        "yaw_median": float(np.median(np.abs(yaw_errs))),
-                        "pitch_mean": float(np.mean(np.abs(pitch_errs))),
-                        "pitch_median": float(np.median(np.abs(pitch_errs))),
-                        "roll_mean": float(np.mean(np.abs(roll_errs))),
-                        "roll_median": float(np.median(np.abs(roll_errs))),
-                        "geodesic_mean": float(np.mean(geodesic_errs)),
-                        "geodesic_median": float(np.median(geodesic_errs)),
-                        "flip_rate": flips / successful * 100,
-                    }
-                )
-
-                # Median error on non-flipped samples
-                non_flipped_metrics = [e for e in error_metrics if abs(e.yaw) <= 90.0]
-                if non_flipped_metrics:
-                    non_flipped_xy = [e.trans_xy for e in non_flipped_metrics]
-                    non_flipped_yaw = [e.yaw for e in non_flipped_metrics]
-                    print("Median errors on non-flipped samples:")
-                    print(f"  - Translation XY: {np.median(non_flipped_xy):.4f}m")
-                    print(f"  - Yaw Rotation:   {np.median(np.abs(non_flipped_yaw)):.2f}°")
-                    run.log(
-                        {
-                            "non_flipped_trans_xy_median": float(np.median(non_flipped_xy)),
-                            "non_flipped_yaw_median": float(np.median(np.abs(non_flipped_yaw))),
-                        }
-                    )
-                else:
-                    print("All successful matches were flipped.")
-            else:
-                print("No samples were successfully matched.")
-            print("=" * 50)
+            run.log(log_payload)
+            print("=" * 58)
 
 
 if __name__ == "__main__":
