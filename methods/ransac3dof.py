@@ -7,7 +7,9 @@ import numpy as np
 import open3d as o3d
 import trimesh
 
+from methods.base import reorient_normals_to_reference
 from methods.constrained_ransac import constrained_ransac_se2, project_to_se2
+from methods.free_space import VisibilityContext
 from methods.ransac import RansacEstimator, RansacParams
 from methods.se2_icp import refine_pose_dual_hypothesis_se2
 
@@ -118,15 +120,32 @@ class Ransac3DoFParams(RansacParams):
             towing face) instead of the full cart. The slab is asymmetric,
             which disambiguates the 180-degree flip. None (default) uses the
             full mesh.
-        free_space_threshold: Maximum ratio of free-space depth projection
-            violations allowed before triggering the 180-degree flip search.
-        free_space_margin: Depth margin in meters for free-space violation checks.
-        free_space_min_observed: Minimum number of model points that must
-            land on valid (unmasked, in-bounds) depth pixels before a
-            free-space violation ratio is trusted for flip disambiguation.
-            Below this, the view doesn't show enough of the cart to judge
-            front from back by visibility alone, and the decision falls
-            through to front-slab fitness / ICP tiebreaker instead.
+        free_space_margin: Depth margin (meters) for the post-ICP free-space
+            comparison between the two flip hypotheses. The pose is refined by
+            then, so this can stay tight.
+        free_space_separation: Minimum difference between the two hypotheses'
+            violation ratios before free-space evidence is allowed to decide.
+            Below it the decision falls through to ICP fitness, so a
+            coin-flip-sized gap never settles the ambiguous cases this exists for.
+        free_space_min_observed: Minimum number of model points that must land on
+            valid depth pixels before a violation ratio is trusted. A 0/0 "clean"
+            ratio carries no information and must not be mistaken for an
+            unambiguous pose.
+        free_space_gate: Enables the STAGE-1 free-space gate, which refuses to
+            promote a global-registration hypothesis that puts cart geometry
+            inside observed free space. Off by default so it can be ablated: the
+            180-degree choice is made by the global stage's score, and every
+            previous flip fix acted in stage 2, downstream of a choice already
+            made blindly.
+        free_space_gate_margin: Depth margin (meters) for the stage-1 gate.
+            Larger than free_space_margin because the hypothesis is pre-ICP and
+            coarse -- the gate is meant to catch a body displaced by ~1 m, not to
+            adjudicate centimeters, and a tight margin here rejects good poses.
+        free_space_gate_max_ratio: Violation ratio above which a stage-1
+            hypothesis is refused promotion.
+        free_space_gate_points: Size of the deterministic full-cart subsample
+            used by the stage-1 gate, which runs once per promotion rather than
+            once per iteration.
     """
 
     z_offset: float | None = None
@@ -135,9 +154,13 @@ class Ransac3DoFParams(RansacParams):
     ransac_confidence: float = 0.999
     seed: int | None = 0
     front_crop_depth: float | None = None
-    free_space_threshold: float = 0.02
     free_space_margin: float = 0.03
+    free_space_separation: float = 0.02
     free_space_min_observed: int = 30
+    free_space_gate: bool = False
+    free_space_gate_margin: float = 0.07
+    free_space_gate_max_ratio: float = 0.10
+    free_space_gate_points: int = 500
 
 
 # =====================================================================
@@ -179,6 +202,9 @@ class Ransac3DoFEstimator(RansacEstimator):
         self._active_z_offset = 0.0
         self._active_frame = None
         self._active_cart_type = None
+        self._visibility: VisibilityContext | None = None
+        self._free_space_points: np.ndarray | None = None
+        self._gate_points: np.ndarray | None = None
         # Populated by _refine_pose with the flip-disambiguation diagnostics
         # (fitness/violation-ratio for both hypotheses, which one was picked
         # and why) -- read by benchmark.py's evaluate_pipeline right after
@@ -186,9 +212,18 @@ class Ransac3DoFEstimator(RansacEstimator):
         self._last_diagnostics: dict | None = None
 
     def _get_prep_params_key(self) -> tuple:
-        # front_crop_depth changes the prepared model representation, so it
-        # must be part of the cache key alongside voxel_size.
-        return (self.params.voxel_size, self.params.front_crop_depth)
+        # Every parameter that changes the CONTENT of the cached dict has to be
+        # here. _PREPARATION_CACHE is class-level, so two estimators differing
+        # only in an omitted parameter collide on one key within a single
+        # process and the second silently reuses the first's geometry -- which
+        # would quietly turn an A/B into the same arm run twice.
+        # front_crop_depth changes model_pc/model_down/model_fpfh;
+        # free_space_gate_points changes the stride of gate_points.
+        return (
+            self.params.voxel_size,
+            self.params.front_crop_depth,
+            self.params.free_space_gate_points,
+        )
 
     def prepare(self, cad_mesh, cart_type: str) -> None:
         prep_params = self._get_prep_params_key()
@@ -228,16 +263,63 @@ class Ransac3DoFEstimator(RansacEstimator):
         model_down.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
         )
+        # See methods/base.py:reorient_normals_to_reference. This is the model
+        # normal site the 3DoF/VSAC arms actually execute -- prepare() here
+        # overrides RansacEstimator.prepare, so fixing only ransac.py would leave
+        # this path untouched.
+        reorient_normals_to_reference(model_down, model_pc)
 
         model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
             model_down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
         )
 
+        # Registration uses the slab; the free-space test must NOT. Under a flip
+        # the slab pivots about its own centre and maps roughly onto itself, so a
+        # slab-only visibility check compares two hypotheses that occupy the same
+        # space and reports ~0 violations for both. The body is the discriminating
+        # geometry -- it is what ends up between the camera and the measured front
+        # face when the cart is placed the wrong way round.
+        #
+        # Sampled from the UNCROPPED mesh, in the same CAD frame (crop_front_face
+        # does not recentre), so a candidate pose applies to both without
+        # adjustment.
+        full_pc = mesh_copy.sample_points_uniformly(number_of_points=2000)
+        full_points = np.asarray(full_pc.points)
+
+        # Deterministic subsample for the stage-1 gate, which runs inside the
+        # RANSAC loop. Evenly strided rather than randomly drawn: sample_points_
+        # uniformly already distributes over the surface, and a stride keeps the
+        # gate reproducible across runs without consuming the estimator's RNG.
+        stride = max(1, len(full_points) // max(1, self.params.free_space_gate_points))
+
         self._PREPARATION_CACHE[cache_key] = {
             "model_pc": model_pc,
             "model_down": model_down,
             "model_fpfh": model_fpfh,
+            "full_points": full_points,
+            "gate_points": full_points[::stride],
         }
+
+    def _resolve_free_space_geometry(self, cad_mesh, cart_type) -> tuple:
+        """
+        Returns (full_points, gate_points) in the CAD frame for the free-space
+        checks: the dense set for the post-ICP comparison, and the strided
+        subsample for the stage-1 gate.
+
+        Uses the prepared cache when a cart_type is known (prepare() is a no-op
+        on a hit), and falls back to sampling the uncropped mesh directly on the
+        lazy path, where nothing is cached.
+        """
+        if cart_type is not None:
+            self.prepare(cad_mesh, cart_type)
+            prep = self._PREPARATION_CACHE[
+                (self.__class__.__name__, cart_type, self._get_prep_params_key())
+            ]
+            return prep["full_points"], prep["gate_points"]
+
+        full_points = np.asarray(cad_mesh.sample_points_uniformly(number_of_points=2000).points)
+        stride = max(1, len(full_points) // max(1, self.params.free_space_gate_points))
+        return full_points, full_points[::stride]
 
     def estimate_pose(self, pcd, cad_mesh, cart_type=None, **kwargs):
         # Clear last frame's flip-disambiguation diagnostics: _refine_pose only
@@ -256,6 +338,19 @@ class Ransac3DoFEstimator(RansacEstimator):
 
         self._active_frame = kwargs.get("frame", None)
         self._active_cart_type = cart_type
+
+        # Free-space evidence for THIS frame. Built once here, not per hypothesis:
+        # it inverts the extrinsic and materialises the depth array, which would
+        # otherwise be repeated inside the RANSAC loop. None means "this frame
+        # carries no visibility evidence", and every consumer treats it that way.
+        self._visibility = VisibilityContext.from_frame(self._active_frame, self.extrinsic)
+
+        # The free-space test is judged on the FULL cart, never on the front slab,
+        # and must therefore be taken from cad_mesh BEFORE the crop below. See
+        # prepare() for why the slab is blind to the flip it is asked about.
+        self._free_space_points, self._gate_points = self._resolve_free_space_geometry(
+            cad_mesh, cart_type
+        )
 
         # Only crop cad_mesh for lazy local fallback (when cart_type is None).
         # When cart_type is specified, prepare() has already cached the cropped
@@ -299,8 +394,6 @@ class Ransac3DoFEstimator(RansacEstimator):
                 "prepare_scene_point_cloud, which estimates and orients them."
             )
 
-        frame = getattr(self, "_active_frame", None)
-
         result = refine_pose_dual_hypothesis_se2(
             model_points=np.asarray(model_pc.points),
             scene_points=scene_points,
@@ -308,10 +401,11 @@ class Ransac3DoFEstimator(RansacEstimator):
             T_init=np.asarray(T_init),
             max_correspondence_distance=self.params.icp_max_correspondence_distance,
             max_iterations=self.params.icp_max_iterations,
-            frame=frame,
-            extrinsic=self.extrinsic,
-            free_space_threshold=self.params.free_space_threshold,
+            visibility=self._visibility,
+            # Full cart, not the slab in model_pc: see refine_pose_dual_hypothesis_se2.
+            free_space_points=self._free_space_points,
             free_space_margin=self.params.free_space_margin,
+            free_space_separation=self.params.free_space_separation,
             free_space_min_observed=self.params.free_space_min_observed,
         )
         self._last_diagnostics = getattr(result, "diagnostics", None)
@@ -353,8 +447,13 @@ class Ransac3DoFEstimator(RansacEstimator):
         # beyond that the crop no longer removes any mesh, silently
         # re-introducing the front/back symmetry this parameter exists to break.
         params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 2.5)
-        params["free_space_threshold"] = trial.suggest_float("free_space_threshold", 0.005, 0.08)
         params["free_space_margin"] = trial.suggest_float("free_space_margin", 0.01, 0.08)
+        params["free_space_separation"] = trial.suggest_float(
+            "free_space_separation", 0.005, 0.08
+        )
+        # free_space_gate is NOT suggested: it is the arm's independent variable,
+        # and letting Optuna choose it would make on/off a tuned nuisance rather
+        # than a controlled contrast. It is set per-arm via --model.profile.params.
         return params
 
 

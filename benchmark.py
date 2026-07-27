@@ -44,6 +44,7 @@ CLI Configuration Overrides:
   --model.profile.depth-trunc <value>      Override the chosen profile's depth truncation.
 """
 
+import ast
 import csv
 import dataclasses
 import glob
@@ -61,6 +62,10 @@ from pydantic import BaseModel, Field
 
 import wandb
 from cli_config import BenchmarkArgs
+
+# tyro hands override values through as raw strings; ast.literal_eval wants the
+# Python spellings, so these three are title-cased before parsing.
+_BOOLS = {"true", "false", "none"}
 from methods.base import BasePoseEstimator
 from pipeline import (
     Camera,
@@ -686,6 +691,48 @@ def build_pareto_figure(pareto, dominated, param_names, study_name):
     return fig
 
 
+def resolve_param_overrides(
+    estimator_cls: type[BasePoseEstimator],
+    extrinsic: np.ndarray,
+    overrides: dict | None,
+) -> dict:
+    """
+    Validates and type-coerces CLI parameter overrides against the estimator's
+    own params dataclass.
+
+    An unknown field name raises rather than warning. The whole reason this
+    mechanism exists is that a sweep silently ignored parameters set on the
+    command line; replacing one silent no-op with another (a warning nobody reads
+    in a 200-trial log) would leave the same failure available -- an arm that
+    reports it is testing something while running the control.
+
+    Values arrive as strings from tyro and are parsed as Python literals, so
+    `free_space_gate=true`, `voxel_size=0.04` and `z_offset=None` all land as the
+    right type; anything unparseable is kept as the raw string.
+    """
+    if not overrides:
+        return {}
+
+    probe_params = estimator_cls(extrinsic=extrinsic).params
+    valid_fields = {f.name for f in dataclasses.fields(probe_params)}
+
+    resolved = {}
+    for name, raw in overrides.items():
+        if name not in valid_fields:
+            raise ValueError(
+                f"Unknown parameter override '{name}' for {estimator_cls.__name__}. "
+                f"Available: {sorted(valid_fields)}"
+            )
+        if isinstance(raw, str):
+            try:
+                resolved[name] = ast.literal_eval(raw.capitalize() if raw in _BOOLS else raw)
+            except (ValueError, SyntaxError):
+                resolved[name] = raw
+        else:
+            resolved[name] = raw
+    return resolved
+
+
 def run_parameter_sweep(
     dataset,
     model,
@@ -702,6 +749,7 @@ def run_parameter_sweep(
     n_seeds: int = 1,
     supports_seed: bool = True,
     dump_frames: bool = True,
+    param_overrides: dict | None = None,
 ):
     """
     Launches a Multi-Objective Bayesian Optimization sweep using Optuna
@@ -713,7 +761,14 @@ def run_parameter_sweep(
     when False, n_seeds is ignored (nothing to vary) rather than silently
     re-running identical repeats. dump_frames: write each trial's per-frame
     CSV (see FrameRecord) under sweeps/<study_name>_frames/.
+    param_overrides: estimator params pinned for every trial, declaring the arm
+    (see BenchmarkArgs.param_overrides). Validated here, before any compute, so a
+    typo cannot turn a treatment arm into a silent second copy of the control.
     """
+    resolved_overrides = resolve_param_overrides(estimator_cls, extrinsic, param_overrides)
+    if resolved_overrides:
+        print(f"Parameter overrides pinned for every trial: {resolved_overrides}")
+
     # Stable, run-independent storage location: restarting the same command
     # after a crash (or on a new instance with the file restored) resumes the
     # study instead of starting a fresh DB in a new Hydra timestamped dir.
@@ -809,8 +864,10 @@ def run_parameter_sweep(
             # 1. Suggest global parameters
             depth_trunc = trial.suggest_float("depth_trunc", 2.0, 7.0, step=0.1)
 
-            # 2. Dynamically suggest model-specific parameters
-            suggested_params = estimator_cls.suggest_params(trial)
+            # 2. Dynamically suggest model-specific parameters, then force the
+            # arm's fixed parameters on top. The overrides go LAST so a value
+            # that is also swept cannot drift away from the declared arm.
+            suggested_params = {**estimator_cls.suggest_params(trial), **resolved_overrides}
 
             # 3. Evaluate across effective_n_seeds estimator-internal RANSAC
             # seeds and pool the resulting frames together (rather than
@@ -1045,6 +1102,7 @@ def main():
             n_seeds=args.n_seeds,
             supports_seed=supports_seed,
             dump_frames=args.dump_frames,
+            param_overrides=args.param_overrides,
         )
 
     else:

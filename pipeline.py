@@ -269,13 +269,32 @@ class MaskedImageFrame:
     """
 
     def __init__(
-        self, rgb: torch.Tensor, depth: torch.Tensor, camera: Camera, xmin: int, ymin: int
+        self,
+        rgb: torch.Tensor,
+        depth: torch.Tensor,
+        camera: Camera,
+        xmin: int,
+        ymin: int,
+        depth_full: torch.Tensor,
     ):
         self.rgb = rgb
         self.depth = depth
         self.camera = camera
         self.xmin = xmin
         self.ymin = ymin
+        # Full-frame, unmasked, uncropped depth. Everything else on this class is
+        # crop-aligned; this one field deliberately is not, and it is indexed with
+        # the ORIGINAL intrinsics (no xmin/ymin shift).
+        #
+        # It exists for the free-space visibility test, which needs to know where
+        # the sensor measured a range -- including pixels the YOLO mask blacked
+        # out. `depth` above is masked to the cart silhouette, and
+        # methods/free_space.py treats a 0 as "unobserved", so a pose hypothesis
+        # that throws cart geometry into off-silhouette space registers ZERO
+        # violations and reads as clean. That is precisely the 90-degree failure
+        # mode: the body swings sideways, out of the mask and often out of the
+        # bbox, taking its own evidence with it.
+        self.depth_full = depth_full
 
     @property
     def width(self) -> int:
@@ -342,6 +361,7 @@ def crop_and_mask_inputs(
         camera=camera,
         xmin=xmin,
         ymin=ymin,
+        depth_full=depth_tensor,
     )
 
 

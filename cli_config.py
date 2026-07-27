@@ -505,6 +505,21 @@ class BenchmarkArgs:
     # this config starve at the FPFH stage or reject its own candidates?").
     # Cheap relative to the pose-estimation compute itself; --no-dump-frames opts out.
     dump_frames: bool = True
+    # Sweep-only: estimator params forced to a fixed value in EVERY trial,
+    # overriding whatever suggest_params proposed. This is how an A/B arm is
+    # declared -- e.g. --param-overrides free_space_gate=true.
+    #
+    # It exists because a sweep trial's params come from suggest_params alone
+    # (see benchmark.py's objective); model.profile.params is consulted only on
+    # the single-evaluation path. Without this, naming a flag on the command
+    # line of a --sweep run is silently a no-op and the "treatment" arm runs the
+    # control a second time while its name and logs claim otherwise.
+    #
+    # Values are parsed as Python literals where possible (true/false/1/0.5/None),
+    # falling back to the raw string. Unknown parameter names are a hard error,
+    # not a warning: a typo here would silently produce exactly the phantom
+    # comparison this field exists to prevent.
+    param_overrides: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
