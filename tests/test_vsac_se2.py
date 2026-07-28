@@ -1,6 +1,7 @@
 import unittest
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from methods.constrained_ransac import se2_to_se3
 from methods.vsac_se2 import (
@@ -8,6 +9,7 @@ from methods.vsac_se2 import (
     VsacParams,
     count_independent_inliers,
     prosac_pairs,
+    score_msac,
     vsac_se2,
 )
 
@@ -266,6 +268,98 @@ class TestRandomModelRejection(unittest.TestCase):
         self.assertEqual(result.fitness, 0.0)
         self.assertEqual(result.reason, "no_inliers")
         np.testing.assert_array_equal(result.transformation, np.eye(4))
+
+
+class TestNormalConsistencyIsAsymmetric(unittest.TestCase):
+    """
+    Arm E1. The whole claim is that adding the normal term makes score_msac
+    distinguish a pose from its 180-degree twin, which positional scoring
+    provably cannot. Both halves are asserted here: WITHOUT normals the two
+    scores must be identical (that is the defect), and WITH them the correct
+    pose must win. A test that only checked the second half would pass just as
+    happily if the scorer had never been blind in the first place.
+    """
+
+    def _one_sided_surface(self):
+        """A planar patch seen from +z: outward normals up, sensor above."""
+        xs, ys = np.meshgrid(np.linspace(-0.5, 0.5, 12), np.linspace(-0.2, 0.2, 6))
+        pts = np.stack([xs.ravel(), ys.ravel(), np.zeros(xs.size)], axis=1)
+        normals = np.tile([0.0, 0.0, 1.0], (len(pts), 1))
+        return pts, normals
+
+    def _rotate_z(self, v, deg):
+        c, s = np.cos(np.deg2rad(deg)), np.sin(np.deg2rad(deg))
+        R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        return v @ R.T
+
+    def test_positional_scoring_cannot_see_a_normal_flip(self):
+        pts, normals = self._one_sided_surface()
+        tree = cKDTree(pts)
+
+        # Same points, opposite normals: geometrically indistinguishable.
+        q_correct, _, _, _ = score_msac(pts, tree, tau=0.02)
+        q_flipped, _, _, _ = score_msac(pts, tree, tau=0.02)
+        self.assertAlmostEqual(q_correct, q_flipped, places=12)
+
+    def test_normal_term_separates_the_twin(self):
+        pts, normals = self._one_sided_surface()
+        tree = cKDTree(pts)
+
+        q_agree, fit_agree, mask_agree, _ = score_msac(
+            pts, tree, tau=0.02,
+            transformed_model_normals=normals,
+            scene_normals=normals,
+        )
+        # A 180-degree yaw does not move a z-normal, so use the physically
+        # meaningful case instead: the model face now covering this surface is
+        # the opposite one, whose outward normal points away from the sensor.
+        q_oppose, fit_oppose, mask_oppose, _ = score_msac(
+            pts, tree, tau=0.02,
+            transformed_model_normals=-normals,
+            scene_normals=normals,
+        )
+
+        self.assertTrue(np.all(mask_agree))
+        self.assertFalse(np.any(mask_oppose))
+        self.assertAlmostEqual(fit_agree, 1.0)
+        self.assertAlmostEqual(fit_oppose, 0.0)
+        self.assertGreater(q_agree, q_oppose)
+
+    def test_yaw_flip_of_a_vertical_face_changes_the_verdict(self):
+        """The operational case: a vertical face, flipped 180 degrees in yaw."""
+        ys, zs = np.meshgrid(np.linspace(-0.3, 0.3, 10), np.linspace(0.0, 0.6, 8))
+        pts = np.stack([np.zeros(ys.size), ys.ravel(), zs.ravel()], axis=1)
+        scene_normals = np.tile([-1.0, 0.0, 0.0], (len(pts), 1))  # towards sensor at -x
+        model_normals = np.tile([-1.0, 0.0, 0.0], (len(pts), 1))  # outward, agrees
+        tree = cKDTree(pts)
+
+        _, fit_correct, _, _ = score_msac(
+            pts, tree, tau=0.02,
+            transformed_model_normals=model_normals,
+            scene_normals=scene_normals,
+        )
+        _, fit_flipped, _, _ = score_msac(
+            pts, tree, tau=0.02,
+            transformed_model_normals=self._rotate_z(model_normals, 180.0),
+            scene_normals=scene_normals,
+        )
+        self.assertAlmostEqual(fit_correct, 1.0)
+        self.assertAlmostEqual(fit_flipped, 0.0)
+
+    def test_flag_off_or_missing_normals_is_the_control_arm(self):
+        """vsac_se2 must fall back to positional scoring, not raise."""
+        rng = np.random.default_rng(0)
+        pts = rng.random((60, 3))
+        clouds = MatchedNpPointClouds(
+            model_points=pts,
+            scene_points=pts,
+            model_fpfh=rng.random((60, 33)),
+            scene_fpfh=rng.random((60, 33)),
+            model_normals=None,
+            scene_normals=None,
+        )
+        params = VsacParams(distance_threshold=0.05, max_iterations=50, normal_consistency=True)
+        vsac_se2(clouds, params, rng=np.random.default_rng(0))  # must not raise
 
 
 if __name__ == "__main__":

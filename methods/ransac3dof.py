@@ -7,6 +7,7 @@ import numpy as np
 import open3d as o3d
 import trimesh
 
+from methods.base import orient_normals_hoppe, reorient_normals_to_reference
 from methods.constrained_ransac import constrained_ransac_se2, project_to_se2
 from methods.ransac import RansacEstimator, RansacParams
 from methods.se2_icp import icp_point_to_plane_se2
@@ -287,6 +288,14 @@ class Ransac3DoFParams(RansacParams):
             with. Deliberately absent from suggest_params: it is the A/B's
             independent variable, and letting Optuna choose it would turn an
             on/off contrast into a tuned nuisance.
+        hoppe_normal_orientation: Orient the sampled model normals by MST
+            propagation (methods/base.py orient_normals_hoppe) instead of
+            inheriting the mesh's winding. False (the default) keeps today's
+            behaviour. Required by anything that reads a normal's DIRECTION
+            rather than merely its axis -- all three cart meshes report
+            is_orientable() == False, so their normal signs are arbitrary and
+            VSACSe2Params.normal_consistency measures a coin flip without this.
+            Changes the prepared model, hence part of _get_prep_params_key.
     """
 
     z_offset: float | None = None
@@ -296,6 +305,7 @@ class Ransac3DoFParams(RansacParams):
     seed: int | None = 0
     front_crop_depth: float | None = None
     front_face_max_angle_deg: float | None = None
+    hoppe_normal_orientation: bool = False
 
 
 # =====================================================================
@@ -350,7 +360,11 @@ class Ransac3DoFEstimator(RansacEstimator):
     def _get_prep_params_key(self) -> tuple:
         # front_crop_depth changes the prepared model representation, so it
         # must be part of the cache key alongside voxel_size.
-        return (self.params.voxel_size, self.params.front_crop_depth)
+        return (
+            self.params.voxel_size,
+            self.params.front_crop_depth,
+            self.params.hoppe_normal_orientation,
+        )
 
     def prepare(self, cad_mesh, cart_type: str) -> None:
         prep_params = self._get_prep_params_key()
@@ -384,12 +398,22 @@ class Ransac3DoFEstimator(RansacEstimator):
             slab_mesh = mesh_copy
 
         model_pc = slab_mesh.sample_points_uniformly(number_of_points=2000)
+        # The mesh cannot supply an outward convention (see orient_normals_hoppe),
+        # so re-derive one from the sampled geometry BEFORE model_down inherits
+        # it via reorient_normals_to_reference below.
+        if self.params.hoppe_normal_orientation:
+            model_pc = orient_normals_hoppe(model_pc)
 
         voxel_size = self.params.voxel_size
         model_down = model_pc.voxel_down_sample(voxel_size)
         model_down.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
         )
+        # See methods/base.py:reorient_normals_to_reference. This is the model
+        # normal site the 3DoF and VSAC arms actually execute -- prepare() is
+        # overridden here, so fixing RansacEstimator.prepare alone would leave
+        # every arm on this branch running the unfixed path.
+        reorient_normals_to_reference(model_down, model_pc)
 
         model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
             model_down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)

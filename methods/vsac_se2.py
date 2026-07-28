@@ -21,6 +21,12 @@ class MatchedNpPointClouds:
     scene_points: np.ndarray  # (M, 3) downsampled scene points
     model_fpfh: np.ndarray  # (N, 33) FPFH descriptors of model
     scene_fpfh: np.ndarray  # (M, 33) FPFH descriptors of scene
+    # Oriented normals, for the E1 normal-agreement term. Optional because every
+    # caller predating that arm builds this without them, and because the term
+    # is off by default -- vsac_se2 falls back to purely positional scoring when
+    # either is None, which is exactly the control arm.
+    model_normals: np.ndarray | None = None  # (N, 3) outward, CAD convention
+    scene_normals: np.ndarray | None = None  # (M, 3) oriented towards the sensor
 
 
 @dataclass
@@ -35,6 +41,7 @@ class VsacParams:
     min_sample_distance: float = 0.0
     scoring_subsample_size: int = 100
     rho: float = 0.3  # Spatial independence radius for flip-disambiguation
+    normal_consistency: bool = False  # E1: require agreeing normals to count an inlier
 
 
 def prosac_pairs(
@@ -85,26 +92,61 @@ def score_msac(
     transformed_model_points: np.ndarray,
     scene_kdtree_3d: cKDTree,
     tau: float,
+    transformed_model_normals: np.ndarray | None = None,
+    scene_normals: np.ndarray | None = None,
 ) -> tuple[float, float, np.ndarray, np.ndarray]:
     """
     Computes MSAC quality score, inlier ratio (fitness), inlier mask, and distance array
     in 3D Euclidean space (x, y, z).
 
+    Positional scoring alone is provably blind to the cart's 180-degree symmetry:
+    a flipped pose lands model points on the SAME surfaces, so it queries the same
+    neighbours at the same distances and scores identically (see
+    30.04.2 - E02 Failure Mode Characterisation). Position is invariant under the
+    flip; oriented normals are not. The model's normals point outward from the CAD
+    surface and the scene's point back towards the sensor, so on the visible side
+    of a solid the two agree. Rotate the model by 180 degrees and the face now
+    covering that surface is the far one, whose outward normal points AWAY from
+    the sensor -- the dot product changes sign. Requiring
+    n_model . n_scene > 0 therefore makes the score asymmetric, which no
+    threshold on distance can be.
+
+    This is arm E1 of the flip-disambiguation roadmap. It is a no-op unless both
+    normal arrays are supplied, which is the control arm.
+
     Args:
         transformed_model_points: (N, 3) 3D transformed model point cloud.
         scene_kdtree_3d: 3D cKDTree of scene (x, y, z) points.
         tau: Distance threshold in meters.
+        transformed_model_normals: (N, 3) model normals under the SAME candidate
+            rotation as `transformed_model_points` (rotation only -- normals do
+            not translate). None disables the term.
+        scene_normals: (M, 3) scene normals, indexed like the KD-tree's points.
+            None disables the term.
 
     Returns:
         quality: float MSAC quality score sum(tau^2 - r^2)
         fitness: float inlier ratio in [0.0, 1.0]
-        inlier_mask: (N,) boolean mask where 3D distance < tau
+        inlier_mask: (N,) boolean mask where 3D distance < tau AND, when the
+            normal term is active, the matched normals agree
         dists: (N,) 3D Euclidean distance array from cKDTree
     """
     # Compute the 3D distances from the transformed model points to the nearest scene points in (x, y, z)
-    distances, _ = scene_kdtree_3d.query(transformed_model_points, k=1, distance_upper_bound=tau)
+    distances, indices = scene_kdtree_3d.query(
+        transformed_model_points, k=1, distance_upper_bound=tau
+    )
 
     inlier_mask = distances < np.inf
+
+    if transformed_model_normals is not None and scene_normals is not None:
+        # A miss returns index == len(scene_points), which would raise on gather.
+        # Clip and let inlier_mask discard those rows: the clipped index reads a
+        # real but irrelevant normal, and its agreement verdict is ANDed against
+        # an already-False positional test.
+        safe = np.minimum(indices, len(scene_normals) - 1)
+        agree = np.einsum("ij,ij->i", transformed_model_normals, scene_normals[safe]) > 0.0
+        inlier_mask &= agree
+
     fitness = float(np.mean(inlier_mask))
 
     # Compute the MSAC quality score
@@ -173,6 +215,18 @@ def vsac_se2(
 
     model_points = point_clouds.model_points
     scene_points = point_clouds.scene_points
+
+    # E1 normal-agreement term. Requires the flag AND both normal arrays; a
+    # missing array silently degrades to the control arm rather than raising,
+    # because call sites without mesh context (unit tests, inspect_pose on a bare
+    # cloud) legitimately have no normals to supply.
+    use_normals = (
+        params.normal_consistency
+        and point_clouds.model_normals is not None
+        and point_clouds.scene_normals is not None
+    )
+    model_normals = point_clouds.model_normals if use_normals else None
+    scene_normals = point_clouds.scene_normals if use_normals else None
 
     rng = np.random.default_rng() if rng is None else rng
 
@@ -301,12 +355,24 @@ def vsac_se2(
         transformed_model_points = (
             model_points @ T_candidate[:3, :3].T + T_candidate[:3, 3]
         )
+        # Normals rotate but do not translate. The rotation is a yaw about z and
+        # therefore orthogonal, so the rotated normals stay unit length and the
+        # sign test below needs no renormalisation.
+        transformed_model_normals = (
+            model_normals @ T_candidate[:3, :3].T if model_normals is not None else None
+        )
 
         # Prescoring on subsampled 3D points to speed up the process
         sub_quality, _, _, _ = score_msac(
             transformed_model_points=transformed_model_points[subsample_indices],
             scene_kdtree_3d=scene_kdtree_3d,
             tau=params.distance_threshold,
+            transformed_model_normals=(
+                transformed_model_normals[subsample_indices]
+                if transformed_model_normals is not None
+                else None
+            ),
+            scene_normals=scene_normals,
         )
 
         max_possible_quality = (
@@ -321,6 +387,8 @@ def vsac_se2(
             transformed_model_points=transformed_model_points,
             scene_kdtree_3d=scene_kdtree_3d,
             tau=params.distance_threshold,
+            transformed_model_normals=transformed_model_normals,
+            scene_normals=scene_normals,
         )
 
         n_independent = count_independent_inliers(
@@ -410,7 +478,7 @@ def vsac_se2(
 
 @dataclass(frozen=True)
 class VSACSe2Params(Ransac3DoFParams):
-    """Ransac3DoFParams plus the one knob specific to the VSAC global-registration
+    """Ransac3DoFParams plus the knobs specific to the VSAC global-registration
     stage. Everything else (voxel_size, front_crop_depth, front_face_max_angle_deg,
     z_gate_threshold, seed, ...) is shared with Ransac3DoFEstimator, since
     VSACSe2Estimator only swaps out _global_registration.
@@ -419,9 +487,20 @@ class VSACSe2Params(Ransac3DoFParams):
         tiebreak in vsac_se2 -- inliers within rho of an already-accepted
         independent inlier (in the CAD model's own frame) count as
         dependent/clustered rather than adding new spatial support.
+    normal_consistency: arm E1. When True, score_msac only counts a model point
+        as an inlier if its normal agrees with the matched scene point's
+        (n_model . n_scene > 0), making the MSAC score asymmetric under the
+        180-degree flip that positional scoring cannot see. False (the default)
+        is the control arm. Deliberately absent from suggest_params for the same
+        reason as front_face_max_angle_deg: it is an A/B's independent variable,
+        and letting Optuna tune it would turn an on/off contrast into a nuisance
+        parameter. Requires the model normal-sign fix (methods/base.py
+        reorient_normals_to_reference) to be meaningful -- without it the sign
+        test reads rounding noise.
     """
 
     rho: float = 0.3
+    normal_consistency: bool = False
 
 
 class VSACSe2Estimator(Ransac3DoFEstimator):
@@ -463,6 +542,16 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
             scene_points=np.asarray(pcd_down.points),
             model_fpfh=np.asarray(model_fpfh.data).T,  # (33, N) -> (N, 33)
             scene_fpfh=np.asarray(pcd_fpfh.data).T,
+            # Both clouds already carry oriented normals at this point -- the
+            # model's outward (mesh convention, re-signed by
+            # reorient_normals_to_reference) and the scene's towards-sensor. They
+            # were simply never threaded through to the scorer. Passed
+            # unconditionally; params.normal_consistency decides whether they are
+            # used, so the two arms differ by one flag and not by a code path.
+            model_normals=(
+                np.asarray(model_down.normals) if model_down.has_normals() else None
+            ),
+            scene_normals=(np.asarray(pcd_down.normals) if pcd_down.has_normals() else None),
         )
         vsac_params = VsacParams(
             distance_threshold=distance_threshold,
@@ -476,6 +565,7 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
             # (matches Ransac3DoFEstimator._global_registration's own rule).
             min_sample_distance=3.0 * self.params.voxel_size,
             rho=self.params.rho,
+            normal_consistency=self.params.normal_consistency,
         )
         return vsac_se2(
             point_clouds,
