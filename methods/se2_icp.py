@@ -18,8 +18,6 @@ import logging
 import numpy as np
 from scipy.spatial import cKDTree
 
-from methods.free_space import count_violations
-
 from methods.constrained_ransac import RansacResult
 from methods.se2_lie_utils import se2_exp
 
@@ -133,36 +131,33 @@ def refine_pose_dual_hypothesis_se2(
     T_init,
     max_correspondence_distance,
     max_iterations=100,
-    visibility=None,
-    free_space_points=None,
+    frame=None,
+    extrinsic=None,
+    free_space_threshold=0.02,
     free_space_margin=0.03,
-    free_space_separation=0.02,
     free_space_min_observed=30,
 ):
     """
     SE(2)-constrained counterpart of methods.base.refine_pose_dual_hypothesis with
-    flip disambiguation:
+    Phase 1 flip disambiguation:
 
-    1. Runs SE(2) ICP Pass 1 on the primary hypothesis T_init using model_points --
-       the discriminative front slab when the caller crops for asymmetry, so ICP and
-       RANSAC register against the same geometry.
-    2. Runs SE(2) ICP Pass 2 on the 180-degree-flipped hypothesis, pivoted about the
-       slab's own centre so the two hypotheses differ in FACING rather than location.
-    3. Decides between them: free-space violations first, then ICP fitness, then RMSE.
+    1. Runs SE(2) ICP Pass 1 on primary hypothesis T_init using model_points (the
+       discriminative front slab when the caller crops for asymmetry; ICP and RANSAC
+       register against the same geometry, so this fitness already reflects slab fit).
+    2. Early-Exit Gate: If frame & extrinsic are provided, evaluates free-space violations.
+       If violation_ratio < free_space_threshold (default 2%), T_init is clean (not flipped).
+       Returns Pass 1 result immediately (fast path, <0.5 ms overhead).
+    3. Fallback Path (potential flip): Runs SE(2) ICP Pass 2 on T_init @ T_flip (180° rotated).
+       Evaluates free-space violations for both hypotheses and, absent a reliable free-space
+       signal, compares ICP fitness with a noise margin before falling back to an RMSE tiebreak.
 
-    `model_points` and `free_space_points` are deliberately separate arguments and
-    must not be conflated. Registration wants the slab (asymmetric, densely observed);
-    the free-space test wants the FULL cart. Judging visibility on the slab alone is
-    self-defeating: the flip pivots the slab about its own centre, so it maps roughly
-    onto itself, both hypotheses occupy the same space, and both score ~0 violations.
-    The body is the geometry that ends up between the camera and the measured front
-    face when the cart faces the wrong way, and it is the entire signal.
-
-    Free-space evidence is only trusted when at least `free_space_min_observed` model
-    points landed on valid depth pixels for the hypothesis being judged. A view that
-    puts the model where nothing was measured yields a 0/0 "clean" ratio carrying no
-    information; without this guard that degenerate case is indistinguishable from a
-    genuinely unambiguous pose, exactly on the hard views this check exists for.
+    Free-space evidence (the early-exit gate and decision A below) is only trusted when at
+    least `free_space_min_observed` model points landed on valid depth pixels for the
+    hypothesis being judged. A depth crop with too few valid pixels near the model (front face
+    barely visible, masked out, or out of frame) yields a 0/0 "clean" ratio that carries no
+    information; without this guard that degenerate case is indistinguishable from a genuinely
+    unambiguous pose and wrongly short-circuits disambiguation, which defeats the point of this
+    check exactly on the hard, ambiguous views it exists for.
     """
 
     # Pass 1: ICP refinement on primary hypothesis using model_points
@@ -175,11 +170,37 @@ def refine_pose_dual_hypothesis_se2(
         max_iterations,
     )
 
-    # Pass 2 always runs. There used to be an early exit here that returned Pass 1
-    # whenever its violation ratio was low -- but the ratio was computed on the slab,
-    # so it was low for every hypothesis including flipped ones, and the "gate"
-    # rubber-stamped whatever global registration handed over. A cheap check that is
-    # always satisfied is worse than no check: it looks like evidence in the logs.
+    # 2. Fast Free-Space Early-Exit Check
+    n_obs_1, viol_ratio_1 = None, None
+    if frame is not None and extrinsic is not None:
+        from methods.free_space import compute_free_space_violations
+
+        full_pts = np.asarray(
+            model_points.points if hasattr(model_points, "points") else model_points
+        )
+        _, n_obs_1, viol_ratio_1 = compute_free_space_violations(
+            full_pts, result_1.transformation, extrinsic, frame, margin=free_space_margin
+        )
+        if n_obs_1 >= free_space_min_observed and viol_ratio_1 < free_space_threshold:
+            logging.info(
+                f"SE(2) ICP orientation selected: Original [Early Exit - clean free space] "
+                f"(Violations: {viol_ratio_1:.2%} over {n_obs_1} obs, Fitness: {result_1.fitness:.4f}, RMSE: {result_1.inlier_rmse:.4f})"
+            )
+            # Structured diagnostics for offline per-frame auditing (benchmark.py),
+            # attached rather than returned as a second value so every existing
+            # caller that only reads .transformation/.fitness/.inlier_rmse is
+            # unaffected.
+            result_1.diagnostics = {
+                "selected": "original",
+                "decision": "early_exit_clean_free_space",
+                "fitness_1": result_1.fitness,
+                "fitness_2": None,
+                "viol_ratio_1": viol_ratio_1,
+                "viol_ratio_2": None,
+            }
+            return result_1
+
+    # 3. Fallback Path: Pass 2 on 180°-flipped hypothesis
 
     T_init_array = np.asarray(T_init)
     world_pts = model_points @ T_init_array[:3, :3].T + T_init_array[:3, 3]
@@ -200,28 +221,27 @@ def refine_pose_dual_hypothesis_se2(
         max_iterations,
     )
 
-    # Free-space evidence for both hypotheses, judged on the full cart.
-    n_obs_1, viol_ratio_1 = None, None
     n_obs_2, viol_ratio_2 = None, None
-    if visibility is not None and free_space_points is not None:
-        _, n_obs_1, viol_ratio_1 = count_violations(
-            visibility, free_space_points, result_1.transformation, free_space_margin
+    if frame is not None and extrinsic is not None:
+        from methods.free_space import compute_free_space_violations
+
+        full_pts = np.asarray(
+            model_points.points if hasattr(model_points, "points") else model_points
         )
-        _, n_obs_2, viol_ratio_2 = count_violations(
-            visibility, free_space_points, result_2.transformation, free_space_margin
+        _, n_obs_2, viol_ratio_2 = compute_free_space_violations(
+            full_pts, result_2.transformation, extrinsic, frame, margin=free_space_margin
         )
 
     # Decision logic:
-    # A. If the violation ratios differ by more than free_space_separation, pick the
-    # lower one. Only trusted when both hypotheses had enough observed points to make
-    # the ratio meaningful.
+    # A. If free-space violation ratios differ significantly (>2%), pick lower violation ratio.
+    # Only trusted when both hypotheses had enough observed points to make the ratio meaningful.
     free_space_reliable = (
         viol_ratio_1 is not None
         and viol_ratio_2 is not None
         and n_obs_1 >= free_space_min_observed
         and n_obs_2 >= free_space_min_observed
     )
-    if free_space_reliable and abs(viol_ratio_1 - viol_ratio_2) > free_space_separation:
+    if free_space_reliable and abs(viol_ratio_1 - viol_ratio_2) > 0.02:
         if viol_ratio_1 < viol_ratio_2:
             best, label = (
                 result_1,

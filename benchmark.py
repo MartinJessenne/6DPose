@@ -62,10 +62,6 @@ from pydantic import BaseModel, Field
 
 import wandb
 from cli_config import BenchmarkArgs
-
-# tyro hands override values through as raw strings; ast.literal_eval wants the
-# Python spellings, so these three are title-cased before parsing.
-_BOOLS = {"true", "false", "none"}
 from methods.base import BasePoseEstimator
 from pipeline import (
     Camera,
@@ -76,6 +72,10 @@ from pipeline import (
     load_parquet_dataset,
     process_and_reconstruct,
 )
+
+# tyro hands override values through as raw strings; ast.literal_eval wants the
+# Python spellings, so these three are title-cased before parsing.
+_BOOLS = {"true", "false", "none"}
 
 
 # =====================================================================

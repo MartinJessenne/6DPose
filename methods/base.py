@@ -68,68 +68,6 @@ class BasePoseEstimator(ABC):
         )
 
 
-def reorient_normals_to_reference(
-    target: o3d.geometry.PointCloud,
-    reference: o3d.geometry.PointCloud,
-) -> None:
-    """
-    Re-imposes `reference`'s normal orientation convention on `target`, in place.
-
-    Why this is needed at all: geometry determines a normal only up to sign (the
-    orthogonal complement of the tangent plane is a line, and a line holds two
-    unit vectors). PCA cannot pick between them -- its objective satisfies
-    E(n) = E(-n) -- so `estimate_normals` resolves the sign by *inheriting* the
-    normal already present at that point (Open3D >= 0.14). That inheritance is
-    exactly the problem here: `voxel_down_sample` averages the normals falling
-    into a voxel WITHOUT renormalising, so on this fleet's thin tubular frame the
-    two walls of a tube land in one voxel and their outward normals cancel. The
-    prior handed to `estimate_normals` is then a near-zero vector whose direction
-    is rounding noise, and the estimated normal faithfully inherits that noise.
-    Measured on colruyt.ply: ~12% of model normals affected at voxel_size 0.02,
-    ~47.5% at 0.06.
-
-    The repair uses the densely sampled cloud, whose normals are interpolated
-    from the mesh's own consistently-wound triangles and are therefore exactly
-    outward. Only the SIGN is taken from the reference: the estimated direction
-    (and hence the support radius it was computed at) is left untouched, so this
-    changes one variable and not two.
-
-    Args:
-        target: Point cloud whose normals are re-signed in place. Must have normals.
-        reference: Densely sampled cloud carrying the trusted convention.
-    """
-    if target.is_empty() or reference.is_empty() or not reference.has_normals():
-        return
-
-    target_normals = np.asarray(target.normals)
-    if len(target_normals) == 0:
-        return
-
-    reference_normals = np.asarray(reference.normals)
-    kdtree = o3d.geometry.KDTreeFlann(reference)
-
-    nearest = np.empty(len(target_normals), dtype=np.int64)
-    for i, point in enumerate(np.asarray(target.points)):
-        _, idx, _ = kdtree.search_knn_vector_3d(point, 1)
-        nearest[i] = idx[0]
-
-    reference_at_target = reference_normals[nearest]
-
-    # A cancelled voxel average can leave an estimated normal of near-zero
-    # length; renormalise so downstream dot products are comparable. Points whose
-    # normal is degenerate beyond rescue fall back to the mesh normal outright.
-    lengths = np.linalg.norm(target_normals, axis=1)
-    degenerate = lengths < 1e-9
-    target_normals[degenerate] = reference_at_target[degenerate]
-    lengths[degenerate] = np.linalg.norm(target_normals[degenerate], axis=1)
-    target_normals /= np.maximum(lengths, 1e-12)[:, None]
-
-    flip = np.einsum("ij,ij->i", target_normals, reference_at_target) < 0.0
-    target_normals[flip] *= -1.0
-
-    target.normals = o3d.utility.Vector3dVector(target_normals)
-
-
 def prepare_scene_point_cloud(
     pcd: o3d.geometry.PointCloud,
     T_robot_camera: np.ndarray,

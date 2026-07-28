@@ -6,12 +6,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import open3d as o3d
 
-from methods.base import (
-    BasePoseEstimator,
-    prepare_scene_point_cloud,
-    refine_pose_dual_hypothesis,
-    reorient_normals_to_reference,
-)
+from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
 
 if TYPE_CHECKING:
     import optuna
@@ -105,11 +100,6 @@ class RansacEstimator(BasePoseEstimator):
         model_down.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
         )
-        # voxel_down_sample averages normals without renormalising, so opposite
-        # walls of a tube cancel; estimate_normals then inherits that near-zero
-        # direction. Re-impose the mesh's outward convention before FPFH, which
-        # is equivariant (not invariant) under per-point normal sign flips.
-        reorient_normals_to_reference(model_down, model_pc)
 
         model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
             model_down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
@@ -163,7 +153,6 @@ class RansacEstimator(BasePoseEstimator):
             model_down.estimate_normals(
                 o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
             )
-            reorient_normals_to_reference(model_down, model_pc)
             model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
                 model_down,
                 o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100),
@@ -190,17 +179,9 @@ class RansacEstimator(BasePoseEstimator):
         # 1. Downsample point clouds for fast descriptor calculation
         pcd_down = pcd.voxel_down_sample(voxel_size)
 
-        # estimate_normals inherits the sign already present at each point, and
-        # voxel_down_sample's unrenormalised averaging can leave that prior
-        # near-zero. Re-imposing the towards-sensor convention afterwards is what
-        # keeps the scene cloud's signs comparable with the model's outward ones
-        # (they agree on the visible side of a solid). In the robot frame the
-        # camera centre is extrinsic[:3, 3], not the origin.
+        # Normals are preserved during downsampling, but let's ensure they are updated
         pcd_down.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
-        )
-        pcd_down.orient_normals_towards_camera_location(
-            camera_location=np.asarray(self.extrinsic, dtype=np.float64)[:3, 3]
         )
 
         # 2. Compute FPFH (Fast Point Feature Histograms) descriptors

@@ -232,9 +232,7 @@ class TestMaskedImageFrameIntrinsics(unittest.TestCase):
         rgb = torch.zeros(crop_h, crop_w, 3, dtype=torch.uint8)
         depth = torch.zeros(crop_h, crop_w, dtype=torch.float32)
 
-        frame = MaskedImageFrame(
-            rgb=rgb, depth=depth, camera=camera, xmin=100, ymin=50, depth_full=depth
-        )
+        frame = MaskedImageFrame(rgb=rgb, depth=depth, camera=camera, xmin=100, ymin=50)
 
         intrinsics = frame.get_o3d_intrinsics()
 
@@ -265,9 +263,7 @@ class TestMaskedImageFrameIntrinsics(unittest.TestCase):
         rgb = torch.zeros(800, 1280, 3, dtype=torch.uint8)
         depth = torch.zeros(800, 1280, dtype=torch.float32)
 
-        frame = MaskedImageFrame(
-            rgb=rgb, depth=depth, camera=camera, xmin=0, ymin=0, depth_full=depth
-        )
+        frame = MaskedImageFrame(rgb=rgb, depth=depth, camera=camera, xmin=0, ymin=0)
 
         intrinsics = frame.get_o3d_intrinsics()
         intrinsic_matrix = intrinsics.intrinsic_matrix

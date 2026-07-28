@@ -1,4 +1,3 @@
-import logging
 from collections.abc import Generator
 from dataclasses import dataclass
 from math import comb
@@ -8,7 +7,6 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from methods.constrained_ransac import RansacResult, match_correspondences_fpfh, se2_to_se3
-from methods.free_space import count_violations
 from methods.ransac3dof import Ransac3DoFEstimator, Ransac3DoFParams
 from methods.se2_lie_utils import minimal_solver_se2
 
@@ -22,54 +20,6 @@ class MatchedNpPointClouds:
     scene_points: np.ndarray  # (M, 3) downsampled scene points
     model_fpfh: np.ndarray  # (N, 33) FPFH descriptors of model
     scene_fpfh: np.ndarray  # (M, 33) FPFH descriptors of scene
-
-
-@dataclass(frozen=True)
-class FreeSpaceGate:
-    """
-    Visibility veto for the global stage.
-
-    The 180-degree ambiguity is created here, not in ICP: MSAC scores how many
-    model points land near a scene point, which is a distance count, so a pose
-    and its 180-degree twin land on the same surfaces and tie exactly. Every
-    previous flip fix acted in stage 2, downstream of a choice already made
-    blindly. This gate gives the global stage a criterion that is not symmetric
-    under the flip -- a cart facing the wrong way puts its body between the
-    camera and the surface the camera measured.
-
-    Applied at promotion rather than at scoring: a candidate is only tested when
-    it is about to become the new best, which happens a few dozen times per run
-    instead of thousands, so the cost is negligible next to the KD-tree queries.
-    A vetoed candidate is simply not promoted, leaving the search free to find a
-    correct pose later, and leaving the adaptive iteration bound untouched.
-
-    Deliberately a hard veto rather than a term in the MSAC score: free space is
-    a physical constraint, not evidence of fit, and blending the two would make
-    the score's units meaningless and the arm uninterpretable.
-
-    Attributes:
-        context: Per-frame VisibilityContext (methods/free_space.py).
-        points: (K, 3) FULL-cart points in the CAD frame. The front slab is
-            useless here -- it is near-invariant under the flip being tested.
-        margin: Depth tolerance in meters. Larger than the post-ICP value: the
-            hypothesis is coarse, and the gate is looking for a body displaced by
-            roughly a meter, not for centimeter errors.
-        max_ratio: Violation ratio above which promotion is refused.
-        min_observed: Minimum points landing on measured pixels before the ratio
-            is trusted. Below it the gate abstains rather than vetoing, since an
-            unobserved region is not evidence of anything.
-    """
-
-    context: Any
-    points: np.ndarray
-    margin: float
-    max_ratio: float
-    min_observed: int
-
-    def rejects(self, T: np.ndarray) -> bool:
-        """True when this pose puts cart geometry inside observed free space."""
-        _, n_observed, ratio = count_violations(self.context, self.points, T, self.margin)
-        return n_observed >= self.min_observed and ratio > self.max_ratio
 
 
 @dataclass
@@ -207,7 +157,6 @@ def vsac_se2(
     point_clouds=MatchedNpPointClouds,
     params=VsacParams,
     rng: np.random.Generator | None = None,
-    free_space_gate: "FreeSpaceGate | None" = None,
 ) -> RansacResult:
 
     model_points = point_clouds.model_points
@@ -282,10 +231,6 @@ def vsac_se2(
     best_transformation = np.eye(4)
     best_rmse = np.inf
     best_inlier_mask: np.ndarray | None = None
-    # Diagnostic only: how many promotions the visibility gate refused. A run
-    # reporting 0 rejections means the gate is inert, which is what the previous
-    # slab-based check was doing while looking active in the logs.
-    n_free_space_rejections = 0
 
     # Adaptive early termination (ported from constrained_ransac_se2): without
     # this, the loop always drains the full max_iterations budget regardless
@@ -365,14 +310,6 @@ def vsac_se2(
         if (
             is_quality_better or is_tiebreak_win or best_inlier_mask is None
         ):  # Accept the first valid solution
-            # Visibility veto, evaluated only for candidates about to be promoted.
-            # `continue` rather than a score penalty: the candidate is discarded
-            # whole, best_* is left as it was, and the adaptive iteration bound
-            # below is not updated from a pose we just refused.
-            if free_space_gate is not None and free_space_gate.rejects(T_candidate):
-                n_free_space_rejections += 1
-                continue
-
             best_quality = quality
             best_fitness = fitness
             best_n_independent = n_independent
@@ -419,16 +356,7 @@ def vsac_se2(
     # count_independent_inliers still drives the is_tiebreak_win spatial-support
     # tiebreak above, which is the actual flip-disambiguation mechanism.
     if best_fitness == 0.0:
-        # Distinguish "nothing fit" from "everything that fit was vetoed as
-        # physically impossible": they are different failures and the second one
-        # is the gate's own doing, so it must not hide inside no_inliers.
-        reason = "free_space_vetoed" if n_free_space_rejections > 0 else "no_inliers"
-        return RansacResult(np.eye(4), 0.0, np.inf, reason=reason)
-
-    if n_free_space_rejections:
-        logging.info(
-            f"VSAC free-space gate refused {n_free_space_rejections} promotion(s)."
-        )
+        return RansacResult(np.eye(4), 0.0, np.inf, reason="no_inliers")
 
     return RansacResult(best_transformation, best_fitness, best_rmse)
 
@@ -496,33 +424,7 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
             min_sample_distance=3.0 * self.params.voxel_size,
             rho=self.params.rho,
         )
-        return vsac_se2(
-            point_clouds,
-            vsac_params,
-            rng=np.random.default_rng(self.params.seed),
-            free_space_gate=self._build_free_space_gate(),
-        )
-
-    def _build_free_space_gate(self) -> FreeSpaceGate | None:
-        """
-        Assembles the stage-1 visibility veto, or None when it is switched off or
-        the frame carries no usable evidence.
-
-        Returning None on missing evidence keeps the estimator usable from call
-        sites with no depth frame at all (unit tests, inspect_pose on a bare
-        point cloud) without those paths silently behaving like a different arm.
-        """
-        if not self.params.free_space_gate:
-            return None
-        if self._visibility is None or self._gate_points is None:
-            return None
-        return FreeSpaceGate(
-            context=self._visibility,
-            points=self._gate_points,
-            margin=self.params.free_space_gate_margin,
-            max_ratio=self.params.free_space_gate_max_ratio,
-            min_observed=self.params.free_space_min_observed,
-        )
+        return vsac_se2(point_clouds, vsac_params, rng=np.random.default_rng(self.params.seed))
 
     @classmethod
     def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:

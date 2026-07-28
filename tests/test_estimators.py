@@ -55,8 +55,8 @@ class TestEstimatorSweeps(unittest.TestCase):
             "z_gate_threshold": 0.12,
             "ransac_max_iterations": 20000,
             "front_crop_depth": 0.35,
+            "free_space_threshold": 0.02,
             "free_space_margin": 0.03,
-            "free_space_separation": 0.02,
         }
         trial = optuna.trial.FixedTrial(fixed_values)
         suggested = Ransac3DoFEstimator.suggest_params(trial)
@@ -96,46 +96,3 @@ class TestEstimatorSweeps(unittest.TestCase):
         # register against an empty model.
         with self.assertRaises(ValueError):
             crop_front_face(mesh, depth=-1.0)
-
-
-class TestSweepParamOverrides(unittest.TestCase):
-    """A sweep trial's params come from suggest_params alone, so a flag named on
-    the command line used to be silently dropped -- the treatment arm ran the
-    control a second time while its logs claimed otherwise. These guard the
-    mechanism that closes that hole."""
-
-    def setUp(self):
-        import numpy as np
-
-        from benchmark import resolve_param_overrides
-        from methods.vsac_se2 import VSACSe2Estimator
-
-        self.resolve = resolve_param_overrides
-        self.cls = VSACSe2Estimator
-        self.extrinsic = np.eye(4)
-
-    def test_parses_literals_by_type(self):
-        resolved = self.resolve(
-            self.cls,
-            self.extrinsic,
-            {"free_space_gate": "true", "free_space_gate_max_ratio": "0.05", "z_offset": "none"},
-        )
-        self.assertIs(resolved["free_space_gate"], True)
-        self.assertEqual(resolved["free_space_gate_max_ratio"], 0.05)
-        self.assertIsNone(resolved["z_offset"])
-
-    def test_unknown_parameter_is_an_error_not_a_warning(self):
-        with self.assertRaises(ValueError):
-            self.resolve(self.cls, self.extrinsic, {"free_space_gaet": "true"})
-
-    def test_override_wins_over_a_swept_value(self):
-        # Overrides are merged last precisely so a parameter that is also swept
-        # cannot drift away from the declared arm.
-        suggested = {"voxel_size": 0.05, "free_space_gate": False}
-        resolved = self.resolve(self.cls, self.extrinsic, {"free_space_gate": "true"})
-        merged = {**suggested, **resolved}
-        self.assertIs(merged["free_space_gate"], True)
-
-    def test_empty_overrides_are_a_noop(self):
-        self.assertEqual(self.resolve(self.cls, self.extrinsic, None), {})
-        self.assertEqual(self.resolve(self.cls, self.extrinsic, {}), {})
