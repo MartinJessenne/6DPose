@@ -398,11 +398,6 @@ class Ransac3DoFEstimator(RansacEstimator):
             slab_mesh = mesh_copy
 
         model_pc = slab_mesh.sample_points_uniformly(number_of_points=2000)
-        # The mesh cannot supply an outward convention (see orient_normals_hoppe),
-        # so re-derive one from the sampled geometry BEFORE model_down inherits
-        # it via reorient_normals_to_reference below.
-        if self.params.hoppe_normal_orientation:
-            model_pc = orient_normals_hoppe(model_pc)
 
         voxel_size = self.params.voxel_size
         model_down = model_pc.voxel_down_sample(voxel_size)
@@ -413,7 +408,28 @@ class Ransac3DoFEstimator(RansacEstimator):
         # normal site the 3DoF and VSAC arms actually execute -- prepare() is
         # overridden here, so fixing RansacEstimator.prepare alone would leave
         # every arm on this branch running the unfixed path.
+        #
+        # Runs FIRST even under hoppe_normal_orientation, for its degenerate
+        # rescue: a cancelled voxel average leaves a near-zero normal whose
+        # AXIS is noise too, and MST propagation can only fix signs, not axes.
         reorient_normals_to_reference(model_down, model_pc)
+
+        # Then impose a real convention, on model_down itself.
+        #
+        # Applying this to model_pc instead and letting the line above propagate
+        # signs downward loses most of the benefit -- measured as local sign
+        # coherence (fraction of near-parallel neighbours whose normals agree in
+        # sign; 0.5 is a coin flip):
+        #
+        #                            colruyt  leanflow  picanol
+        #   mesh normals only          0.517     0.514    0.484
+        #   hoppe on model_pc          0.783     0.769    0.705
+        #   hoppe on model_down        0.953     0.988    0.982
+        #
+        # The dense cloud's own orientation is fine; it is the propagation
+        # through a downsampled cloud's re-estimated normals that degrades it.
+        if self.params.hoppe_normal_orientation:
+            model_down = orient_normals_hoppe(model_down)
 
         model_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
             model_down, o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5.0, max_nn=100)
