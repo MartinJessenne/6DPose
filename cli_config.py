@@ -315,6 +315,45 @@ VSACSe2ProfileSelect = Union[
             default=VSACSe2Profile(),
         ),
     ],
+    Annotated[
+        VSACSe2Profile,
+        tyro.conf.subcommand(
+            name="tuned",
+            # Optuna study VSAC_NullOff_M2 (W&B s3zi4564) trial #33: the sweep's
+            # pose_ar argmax (0.2833, good_rate 0.7246) and the configuration the
+            # roadmap's standing conclusion quotes.
+            #
+            # This exists because "default" is NOT a tuned configuration -- it
+            # carries voxel_size 0.06 while every good trial in that sweep sits at
+            # 0.02 (median good_rate by voxel: 0.02 -> 0.681, 0.06 -> 0.304). Every
+            # local number recorded so far ran at "default" and is therefore
+            # systematically pessimistic relative to the sweep.
+            #
+            # ADDED rather than folded into "default" on purpose: changing what
+            # "default" means would silently invalidate the local numbers already
+            # recorded against it (E03's control arm, E04's `default` row).
+            #
+            # Not the configuration to deploy. Trial #28 reaches a HIGHER
+            # good_rate (0.744) at 2575 iterations and 2.03s p95; #33 wins on
+            # pose_ar while costing 5.65s. Within this sweep's voxel_size 0.02
+            # bucket, Spearman(ransac_max_iterations, good_rate) = -0.006 --
+            # iterations buy latency, not accuracy.
+            default=VSACSe2Profile(
+                params=VSACSe2Params(
+                    voxel_size=0.02,
+                    front_crop_depth=0.7352383501440559,
+                    z_gate_threshold=0.34896831026780845,
+                    ransac_max_iterations=46940,
+                    icp_max_iterations=100,
+                    icp_max_correspondence_distance=0.13768813892484938,
+                    edge_length_threshold=0.8960310052849256,
+                    rho=0.108351160884956,
+                    z_offset=0.01,
+                ),
+                depth_trunc=4.6,
+            ),
+        ),
+    ],
 ]
 
 
@@ -451,7 +490,10 @@ ModelPreset = Union[
         VSACSe2Preset,
         tyro.conf.subcommand(
             name="vsac3dof",
-            description="profiles: model.profile:default",
+            description=(
+                "profiles: model.profile:default, model.profile:bare, "
+                "model.profile:tuned"
+            ),
         ),
     ],
 ]

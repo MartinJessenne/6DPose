@@ -90,12 +90,33 @@ def main() -> int:
     tau = voxel * 1.5
     budget = estimator.params.ransac_max_iterations
 
-    print(f"voxel_size={voxel}  tau={tau:.3f}  ransac_max_iterations={budget}")
+    # Three tolerances, because "correct" is not one question.
+    #
+    #   tau = 1.5*voxel  -- the SCORER's threshold (methods/vsac_se2.py:460), so
+    #       it is the right bar for "would MSAC have counted this an inlier".
+    #       But it SCALES WITH THE PRESET: 3cm at voxel 0.02, 9cm at 0.06. The
+    #       original run of this script compared presets on it and read the
+    #       difference as a property of the preset, which it is not.
+    #   TAU_ABS = 0.05 -- fixed, so preset rows are finally comparable.
+    #   tau_icp = icp_max_correspondence_distance -- the REACHABILITY bar. The
+    #       global stage does not have to be right, it has to land inside ICP's
+    #       basin. A hypothesis 6cm off is "incorrect" at 3cm and recoverable.
+    #       This is the column that reconciles this script with W&B xadco0h8,
+    #       which scores yaw_median 1.10deg on 1500 frames at a preset this
+    #       script previously measured at 0/18 frames carrying >= 2.
+    TAU_ABS = 0.05
+    tau_icp = estimator.params.icp_max_correspondence_distance
+
     print(
-        f"\n{'frame':>5} {'cart':9} {'gt_ang':>7} {'n_model':>7} {'n_scene':>7} "
-        f"{'n_mut':>6} {'n_gate':>6} {'n_ok':>5} {'w':>7} {'iters@99.9%':>12} {'gt_fit':>7}"
+        f"voxel_size={voxel}  tau_scorer={tau:.3f}  tau_abs={TAU_ABS:.3f}  "
+        f"tau_icp={tau_icp:.3f}  ransac_max_iterations={budget}"
     )
-    print("-" * 96)
+    print(
+        f"\n{'frame':>5} {'cart':9} {'gt_ang':>7} {'n_scene':>7} {'n_gate':>6} "
+        f"{'ok_scr':>6} {'ok_abs':>6} {'ok_icp':>6} "
+        f"{'w_scr':>7} {'w_icp':>7} {'iter_scr':>10} {'iter_icp':>10} {'gt_fit':>7}"
+    )
+    print("-" * 110)
 
     rows = []
     splits = SPLITS if args.split == "all" else (args.split,)
@@ -156,10 +177,14 @@ def main() -> int:
             # the sampler's success probability is a function of.
             if n_gated:
                 posed = model_pts[gated[:, 0]] @ T_gt[:3, :3].T + T_gt[:3, 3]
-                n_ok = int((np.linalg.norm(posed - scene_pts[gated[:, 1]], axis=1) < tau).sum())
+                resid = np.linalg.norm(posed - scene_pts[gated[:, 1]], axis=1)
+                n_ok = int((resid < tau).sum())
+                n_ok_abs = int((resid < TAU_ABS).sum())
+                n_ok_icp = int((resid < tau_icp).sum())
             else:
-                n_ok = 0
+                n_ok = n_ok_abs = n_ok_icp = 0
             w = n_ok / n_gated if n_gated else 0.0
+            w_icp = n_ok_icp / n_gated if n_gated else 0.0
 
             # Ceiling: how much of the model the scene can support at all.
             posed_all = model_pts @ T_gt[:3, :3].T + T_gt[:3, 3]
@@ -168,10 +193,12 @@ def main() -> int:
 
             gt_ang = front_face_angle_deg(T_gt, front_face_from_mesh(mesh), cam_xy)
             need = required_iterations(w)
-            rows.append((w, need, gt_fit, n_gated, n_ok))
+            need_icp = required_iterations(w_icp)
+            rows.append((w, need, gt_fit, n_gated, n_ok, n_ok_abs, n_ok_icp, w_icp, need_icp))
             print(
-                f"{i:>5} {cart_type:9} {gt_ang:7.1f} {len(model_pts):7d} {len(scene_pts):7d} "
-                f"{n_mutual:6d} {n_gated:6d} {n_ok:5d} {w:7.3f} {need:12,.0f} {gt_fit:7.3f}"
+                f"{i:>5} {cart_type:9} {gt_ang:7.1f} {len(scene_pts):7d} {n_gated:6d} "
+                f"{n_ok:6d} {n_ok_abs:6d} {n_ok_icp:6d} {w:7.3f} {w_icp:7.3f} "
+                f"{need:10,.0f} {need_icp:10,.0f} {gt_fit:7.3f}"
             )
 
     if not rows:
@@ -183,17 +210,33 @@ def main() -> int:
     fit_all = np.array([r[2] for r in rows])
     gated_all = np.array([r[3] for r in rows])
     ok_all = np.array([r[4] for r in rows])
+    ok_abs_all = np.array([r[5] for r in rows])
+    ok_icp_all = np.array([r[6] for r in rows])
+    w_icp_all = np.array([r[7] for r in rows])
+    need_icp_all = np.array([r[8] for r in rows])
 
-    print("-" * 96)
+    print("-" * 110)
     print(f"frames                     {len(rows)}")
     print(f"n_gated       median/min   {np.median(gated_all):.0f} / {gated_all.min():.0f}")
-    print(f"n_correct     median/min   {np.median(ok_all):.0f} / {ok_all.min():.0f}")
-    print(f"w             median/min   {np.median(w_all):.3f} / {w_all.min():.3f}")
     print(f"gt_fitness    median/min   {np.median(fit_all):.3f} / {fit_all.min():.3f}")
-    print(f"iters needed  median/max   {np.median(need_all):,.0f} / {need_all.max():,.0f}")
     print(f"budget                     {budget:,}")
-    print(f"frames whose budget is too small: {int((need_all > budget).sum())} / {len(rows)}")
-    print(f"frames with ZERO correct correspondences: {int((ok_all == 0).sum())} / {len(rows)}")
+
+    # The decisive quantity is frames carrying >= 2 correct correspondences: the
+    # SE(2) minimal solver consumes two, so below that the pose is unreachable at
+    # any budget. Reported at all three tolerances, because which one you pick
+    # changes the answer -- and that sensitivity is itself the result.
+    print(f"\n{'tolerance':<14} {'metres':>7} {'n_ok med':>9} {'w med':>7} "
+          f"{'iters med':>11} {'frames >=2':>11} {'over budget':>12}")
+    for label, metres, ok, ww, nd in (
+        ("scorer 1.5v", tau, ok_all, w_all, need_all),
+        ("absolute", TAU_ABS, ok_abs_all, None, None),
+        ("ICP basin", tau_icp, ok_icp_all, w_icp_all, need_icp_all),
+    ):
+        w_s = f"{np.median(ww):7.3f}" if ww is not None else f"{'-':>7}"
+        n_s = f"{np.median(nd):11,.0f}" if nd is not None else f"{'-':>11}"
+        ob_s = f"{int((nd > budget).sum()):5d} /{len(rows):3d}" if nd is not None else f"{'-':>12}"
+        print(f"{label:<14} {metres:7.3f} {np.median(ok):9.0f} {w_s} {n_s} "
+              f"{int((ok >= 2).sum()):5d} /{len(rows):3d} {ob_s}")
     return 0
 
 
