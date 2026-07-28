@@ -1,0 +1,125 @@
+{
+  "test": {
+    "source_shard": "test-00000-of-00016.parquet",
+    "frames": [
+      {
+        "index": 45,
+        "cart_type": "picanol",
+        "bearing_deg": 0.89,
+        "range_m": 2.815
+      },
+      {
+        "index": 60,
+        "cart_type": "colruyt",
+        "bearing_deg": 43.97,
+        "range_m": 2.897
+      },
+      {
+        "index": 61,
+        "cart_type": "colruyt",
+        "bearing_deg": -0.13,
+        "range_m": 1.35
+      },
+      {
+        "index": 63,
+        "cart_type": "leanflow",
+        "bearing_deg": 1.99,
+        "range_m": 1.895
+      },
+      {
+        "index": 66,
+        "cart_type": "picanol",
+        "bearing_deg": 44.61,
+        "range_m": 1.865
+      },
+      {
+        "index": 77,
+        "cart_type": "leanflow",
+        "bearing_deg": 42.32,
+        "range_m": 2.018
+      }
+    ]
+  },
+  "validation": {
+    "source_shard": "validation-00000-of-00016.parquet",
+    "frames": [
+      {
+        "index": 23,
+        "cart_type": "colruyt",
+        "bearing_deg": 44.88,
+        "range_m": 0.909
+      },
+      {
+        "index": 37,
+        "cart_type": "picanol",
+        "bearing_deg": 42.16,
+        "range_m": 1.575
+      },
+      {
+        "index": 65,
+        "cart_type": "leanflow",
+        "bearing_deg": 0.15,
+        "range_m": 1.659
+      },
+      {
+        "index": 81,
+        "cart_type": "colruyt",
+        "bearing_deg": 3.02,
+        "range_m": 1.741
+      },
+      {
+        "index": 84,
+        "cart_type": "picanol",
+        "bearing_deg": 2.94,
+        "range_m": 2.106
+      },
+      {
+        "index": 90,
+        "cart_type": "leanflow",
+        "bearing_deg": 43.96,
+        "range_m": 2.422
+      }
+    ]
+  },
+  "train": {
+    "source_shard": "train-00000-of-00127.parquet",
+    "frames": [
+      {
+        "index": 28,
+        "cart_type": "picanol",
+        "bearing_deg": -1.17,
+        "range_m": 2.563
+      },
+      {
+        "index": 33,
+        "cart_type": "colruyt",
+        "bearing_deg": 44.82,
+        "range_m": 2.308
+      },
+      {
+        "index": 40,
+        "cart_type": "leanflow",
+        "bearing_deg": 0.58,
+        "range_m": 1.009
+      },
+      {
+        "index": 48,
+        "cart_type": "colruyt",
+        "bearing_deg": 1.59,
+        "range_m": 1.674
+      },
+      {
+        "index": 61,
+        "cart_type": "leanflow",
+        "bearing_deg": 43.66,
+        "range_m": 1.699
+      },
+      {
+        "index": 90,
+        "cart_type": "picanol",
+        "bearing_deg": 44.86,
+        "range_m": 0.993
+      }
+    ]
+  }
+}

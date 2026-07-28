@@ -8,7 +8,7 @@ from methods.constrained_ransac import (
     project_to_se2,
     se2_to_se3,
 )
-from methods.se2_icp import icp_point_to_plane_se2, refine_pose_dual_hypothesis_se2
+from methods.se2_icp import icp_point_to_plane_se2
 from methods.se2_lie_utils import (
     minimal_solver_se2,
     se2_exp,
@@ -365,33 +365,6 @@ class TestSe2Icp(unittest.TestCase):
         )
         self.assertEqual(result.fitness, 0.0)
         np.testing.assert_array_equal(result.transformation, T_init)
-
-    def test_dual_hypothesis_recovers_flipped_init(self):
-        rng = np.random.default_rng(21)
-        theta_true, t_true, z_offset = 0.6, np.array([0.2, 0.1]), 0.05
-        model_points, scene_points, scene_normals, _ = self._make_problem(
-            rng, theta_true, t_true, z_offset
-        )
-
-        # Start from a near-true guess flipped 180° about local Z; the corner
-        # geometry is asymmetric, so the flipped-back hypothesis must win.
-        T_flip = np.diag([-1.0, -1.0, 1.0, 1.0])
-        T_init_flipped = se2_to_se3(theta_true - 0.05, t_true + 0.05, z_offset) @ T_flip
-
-        result = refine_pose_dual_hypothesis_se2(
-            model_points,
-            scene_points,
-            scene_normals,
-            T_init_flipped,
-            max_correspondence_distance=0.3,
-            max_iterations=50,
-        )
-
-        T = result.transformation
-        theta_est = np.arctan2(T[1, 0], T[0, 0])
-        angle_err = np.arctan2(np.sin(theta_est - theta_true), np.cos(theta_est - theta_true))
-        self.assertAlmostEqual(angle_err, 0.0, delta=5e-3)
-        np.testing.assert_allclose(T[:2, 3], t_true, atol=5e-3)
 
 
 if __name__ == "__main__":

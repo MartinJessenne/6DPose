@@ -507,7 +507,7 @@ class BenchmarkArgs:
     dump_frames: bool = True
     # Sweep-only: estimator params forced to a fixed value in EVERY trial,
     # overriding whatever suggest_params proposed. This is how an A/B arm is
-    # declared -- e.g. --param-overrides free_space_gate=true.
+    # declared -- e.g. --param-overrides front_face_max_angle_deg=60.0
     #
     # It exists because a sweep trial's params come from suggest_params alone
     # (see benchmark.py's objective); model.profile.params is consulted only on
@@ -546,3 +546,41 @@ class InspectArgs:
     random_samples: int = 10
     indices: tuple[int, ...] = ()
     output_dir: str = "debug_output/"
+
+
+@dataclass(frozen=True)
+class LocalEvalArgs:
+    """Example: uv run scripts/local_eval.py model:vsac3dof model.profile:default
+
+    TWO subcommand tokens are ALWAYS required together: model:<algo> AND
+    model.profile:<tuning>. Forgetting model.profile:<tuning> is the single
+    most common mistake here -- if you see "Missing subcommand: Expected one
+    of {model.profile:default, model.profile:acc-opt, ...}", that's it, you
+    picked model:<algo> but forgot to also pick model.profile:<tuning>.
+
+    Runs the full pipeline over the committed fixtures (tests/fixtures, produced
+    by scripts/fetch_test_samples.py) and prints the headline metrics. This is
+    the pre-push gate: it exists because three flip-disambiguation mechanisms
+    each shipped after improving a headline rate, and each turned out to have
+    done so by converting flips into abstentions -- all three detectable on a
+    handful of frames, none detected, because the only way to run the real
+    pipeline was a multi-hour remote sweep.
+    """
+
+    model: ModelPreset
+    yolo: YoloConfig = field(default_factory=YoloConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    # Which fixture split(s) to evaluate. "all" pools the 18 frames; the single
+    # splits are for iterating faster on one slice.
+    split: Literal["all", "test", "validation", "train"] = "all"
+    fixtures_path: str = "tests/fixtures"
+    # Same mechanism and validation as BenchmarkArgs.param_overrides: this is how
+    # an A/B arm is declared, e.g. --param-overrides front_face_max_angle_deg=60.0
+    param_overrides: dict[str, str] = field(default_factory=dict)
+    # Open3D keeps its OWN global RNG, and prepare() calls sample_points_uniformly
+    # to build the model cloud. Left unseeded, that cloud -- and therefore FPFH
+    # and the entire result -- differs on every run: measured gross_yaw_rate
+    # swinging 0.556-0.833 across three identical invocations. Seed it, or the
+    # arms of an A/B are not comparable.
+    o3d_seed: int | None = 0
+    csv: str | None = None

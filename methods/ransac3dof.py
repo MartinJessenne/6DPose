@@ -9,10 +9,169 @@ import trimesh
 
 from methods.constrained_ransac import constrained_ransac_se2, project_to_se2
 from methods.ransac import RansacEstimator, RansacParams
-from methods.se2_icp import refine_pose_dual_hypothesis_se2
+from methods.se2_icp import icp_point_to_plane_se2
 
 if TYPE_CHECKING:
     import optuna
+
+
+@dataclass(frozen=True)
+class FrontFace:
+    """
+    Outward-facing arrow of a cart's towing face, in the CAD frame.
+
+    No validation to perform for this class,
+    every criterion would be an ad-hod criterion based on the current meshes,
+    the only validation that can be done is a visual inspection of the mesh and the derived anchor and normal.
+
+    So potentially a display method that would output a .glb file could be interesting.
+    """
+
+    anchor: np.ndarray  # (3,) center of the towing face
+    normal: np.ndarray  # (3,) unit vector pointing outward from the towing face (+x convention)
+
+    def __post_init__(self):
+        for field_name in ("anchor", "normal"):
+            arr = np.array(getattr(self, field_name), dtype=float)  # fresh contiguous copy
+            arr.flags.writeable = False
+            object.__setattr__(self, field_name, arr)
+
+
+def front_face_from_mesh(mesh) -> FrontFace:
+    """
+    Derives the outward-facing arrow of a cart's towing face from its CAD mesh.
+
+    Fleet CAD convention (measured on colruyt/leanflow/picanol): the origin sits
+    at the bottom centre of the towing face, the face itself at x_max ~ 0, and
+    the body extends toward -x. So the outward arrow is +x, anchored on the floor
+    at the hitch point.
+
+    Args:
+        mesh: The CAD mesh of the cart, UNCROPPED. crop_front_face removes the
+            body, which does not move x_max but leaves nothing to inspect if the
+            convention is ever checked visually.
+
+    Returns:
+        A FrontFace with the anchor point and outward normal, both in the CAD frame.
+    """
+    vertices = np.asarray(mesh.vertices)
+    x_max = float(vertices[:, 0].max())
+    z_floor = float(vertices[:, 2].min())
+    return FrontFace(
+        anchor=np.array([x_max, 0.0, z_floor], dtype=float),
+        normal=np.array([1.0, 0.0, 0.0], dtype=float),
+    )
+
+
+def front_face_angle_deg(T: np.ndarray, front_face: FrontFace, camera_xy: np.ndarray) -> float:
+    """
+    Signed angle in degrees between the cart's outward front-face arrow and the
+    direction from the face to the camera. 0 means facing the camera head-on.
+
+    Sign is retained deliberately: a cluster near +/-180 in the per-frame CSV is a
+    flip, a spread around +/-30 is ordinary yaw error, and an unsigned magnitude
+    would merge the two.
+
+    XY-only, and exact rather than a projection. For an SE(2)-embedded pose,
+    T[:3, :3] = Rz(theta) = [[c, -s, 0], [s, c, 0], [0, 0, 1]], so the rotated 3D
+    normal is [c, s, 0] -- its z component is identically zero, not merely small --
+    and the 3D anchor's xy equals the 2D result exactly. Including z would be the
+    bug, not the fix: it would add the camera's elevation above the face, which is
+    unrelated to yaw and worth up to 35 degrees on the tall picanol cart at 1 m.
+
+    Args:
+        T: (4, 4) candidate pose, CAD frame -> robot base_link frame.
+        front_face: The cart's arrow in the CAD frame.
+        camera_xy: (2,) camera centre in base_link, i.e. extrinsic[:3, 3][:2].
+    """
+    R2 = T[:2, :2]
+    n2 = R2 @ front_face.normal[:2]  # (2,) rotated arrow, unit for any SE(2) pose
+    a2 = R2 @ front_face.anchor[:2] + T[:2, 3]  # (2,) face centre in base_link
+    v = camera_xy - a2
+    # z component of the 2-D cross product. Written out rather than np.cross,
+    # which is deprecated for 2-vectors in numpy 2.0.
+    det = n2[0] * v[1] - n2[1] * v[0]
+    return float(np.degrees(np.arctan2(det, float(n2 @ v))))
+
+
+@dataclass(frozen=True)
+class FrontFaceGate:
+    """
+    Rejects candidate poses whose towing face points away from the camera.
+
+    This is not a score, and that is the whole point. MSAC, the z-gate and
+    point-to-plane ICP are all symmetric under a 180-degree flip -- a cart and its
+    twin occupy the same volume and tie, often exactly -- so no amount of tuning
+    makes them prefer one. The arrow is a hard geometric fact about the model that
+    the flip maps to its exact negation, evaluated in about ten flops.
+
+    Measured on 560 ground-truth poses across all three dataset splits, using this
+    exact anchor: |bearing| has p90 42.7, p99 46.1, max 48.79 degrees. A flipped
+    pose therefore can come no closer to head-on than 180 - 48.79 = 131.2. Any
+    threshold in the open interval (48.8, 131.2) separates the two perfectly.
+
+    The arms use 60: 11 degrees of slack above the ground-truth maximum, 71 below
+    the nearest flip. Note that 45 -- the angle the dataset's cart yaw is sampled
+    within -- is NOT safe: measured against the towing face rather than the CAD
+    origin, 18 of those 560 ground-truth poses exceed it, so a 45-degree gate
+    would veto 3.2% of correct answers outright and could only turn them into
+    abstentions.
+
+    Attributes:
+        front_face: The cart's arrow in the CAD frame.
+        camera_xy: (2,) camera centre in base_link.
+        max_angle_deg: Largest permitted absolute angle.
+    """
+
+    front_face: FrontFace
+    camera_xy: np.ndarray
+    max_angle_deg: float
+
+    def accepts(self, T: np.ndarray) -> bool:
+        """True when this pose's towing face points within the allowed angle."""
+        return abs(front_face_angle_deg(T, self.front_face, self.camera_xy)) <= self.max_angle_deg
+
+
+def export_front_face_glb(mesh, front_face: FrontFace, path: str, shaft_len: float = 0.6) -> None:
+    """
+    Writes the mesh plus its front-face arrow to a .glb for visual inspection.
+
+    The convention this fleet relies on cannot be validated by assertion without
+    inventing thresholds tuned to today's three meshes, so the honest check is to
+    look at it. A mesh exported mirrored would invert the arrow and make the gate
+    enforce the flip on every frame -- consistently, and with nothing in the log.
+
+    Args:
+        mesh: CAD mesh, uncropped.
+        front_face: Arrow derived from that mesh.
+        path: Output .glb path.
+        shaft_len: Arrow length in meters.
+    """
+    scene = trimesh.Scene()
+    scene.add_geometry(
+        trimesh.Trimesh(
+            vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.triangles)
+        )
+    )
+
+    # trimesh builds cylinders along +z, so rotate +z onto the arrow direction.
+    arrow = trimesh.creation.cylinder(radius=0.02, height=shaft_len)
+    arrow.apply_translation([0.0, 0.0, shaft_len / 2.0])
+    z_axis = np.array([0.0, 0.0, 1.0])
+    direction = np.asarray(front_face.normal, dtype=float)
+    direction = direction / np.linalg.norm(direction)
+    axis = np.cross(z_axis, direction)
+    axis_norm = float(np.linalg.norm(axis))
+    if axis_norm > 1e-9:
+        angle = float(np.arccos(np.clip(z_axis @ direction, -1.0, 1.0)))
+        arrow.apply_transform(trimesh.transformations.rotation_matrix(angle, axis / axis_norm))
+    elif z_axis @ direction < 0:
+        arrow.apply_transform(trimesh.transformations.rotation_matrix(np.pi, [1.0, 0.0, 0.0]))
+    arrow.apply_translation(np.asarray(front_face.anchor, dtype=float))
+    arrow.visual.face_colors = [255, 40, 40, 255]
+
+    scene.add_geometry(arrow)
+    scene.export(path)
 
 
 def crop_front_face(
@@ -44,8 +203,10 @@ def crop_front_face(
 
     # vertices is an (N, 3) array where col 0 is X (longitudinal), col 1 is Y (transverse), col 2 is Z (height).
     vertices = np.asarray(cad_mesh.vertices)
-    # x_max is the maximum X coordinate across all vertices, representing the front-most tip of the cart face.
-    x_max = float(vertices[:, 0].max())
+    # The cut plane comes from the same place as the orientation arrow, so the
+    # crop and the gate can never disagree about where the towing face is.
+    front_face = front_face_from_mesh(cad_mesh)
+    x_max = float(front_face.anchor[0])
     z_floor = float(vertices[:, 2].min())
 
     # Two chained single-plane slices (X-depth, then Z-height). cap=False (the
@@ -118,15 +279,14 @@ class Ransac3DoFParams(RansacParams):
             towing face) instead of the full cart. The slab is asymmetric,
             which disambiguates the 180-degree flip. None (default) uses the
             full mesh.
-        free_space_threshold: Maximum ratio of free-space depth projection
-            violations allowed before triggering the 180-degree flip search.
-        free_space_margin: Depth margin in meters for free-space violation checks.
-        free_space_min_observed: Minimum number of model points that must
-            land on valid (unmasked, in-bounds) depth pixels before a
-            free-space violation ratio is trusted for flip disambiguation.
-            Below this, the view doesn't show enough of the cart to judge
-            front from back by visibility alone, and the decision falls
-            through to front-slab fitness / ICP tiebreaker instead.
+        front_face_max_angle_deg: Largest angle (degrees) permitted between the
+            cart's outward towing-face arrow and the direction to the camera.
+            None (the default) disables the constraint entirely, which is the
+            control arm of the A/B; the treatment arm uses 60.0. See
+            FrontFaceGate for why 60 rather than the 45 the data is generated
+            with. Deliberately absent from suggest_params: it is the A/B's
+            independent variable, and letting Optuna choose it would turn an
+            on/off contrast into a tuned nuisance.
     """
 
     z_offset: float | None = None
@@ -135,9 +295,7 @@ class Ransac3DoFParams(RansacParams):
     ransac_confidence: float = 0.999
     seed: int | None = 0
     front_crop_depth: float | None = None
-    free_space_threshold: float = 0.02
-    free_space_margin: float = 0.03
-    free_space_min_observed: int = 30
+    front_face_max_angle_deg: float | None = None
 
 
 # =====================================================================
@@ -179,10 +337,14 @@ class Ransac3DoFEstimator(RansacEstimator):
         self._active_z_offset = 0.0
         self._active_frame = None
         self._active_cart_type = None
-        # Populated by _refine_pose with the flip-disambiguation diagnostics
-        # (fitness/violation-ratio for both hypotheses, which one was picked
-        # and why) -- read by benchmark.py's evaluate_pipeline right after
-        # estimate_pose() returns, for per-frame auditing.
+        # This cart's towing-face arrow, resolved per frame in estimate_pose.
+        # _global_registration receives only clouds and features, so an instance
+        # attribute is the gate's only route in.
+        self._front_face: FrontFace | None = None
+        # Populated by _refine_pose: fitness, RMSE, the final pose's signed
+        # front-face angle, and how far ICP rotated it. Read by benchmark.py's
+        # evaluate_pipeline right after estimate_pose() returns, for per-frame
+        # auditing.
         self._last_diagnostics: dict | None = None
 
     def _get_prep_params_key(self) -> tuple:
@@ -237,6 +399,10 @@ class Ransac3DoFEstimator(RansacEstimator):
             "model_pc": model_pc,
             "model_down": model_down,
             "model_fpfh": model_fpfh,
+            # From the UNCROPPED mesh: the crop leaves x_max untouched, so the
+            # arrow is identical either way, but taking it from the full cart
+            # keeps the stored geometry meaningful for visual inspection.
+            "front_face": front_face_from_mesh(mesh_copy),
         }
 
     def estimate_pose(self, pcd, cad_mesh, cart_type=None, **kwargs):
@@ -256,6 +422,18 @@ class Ransac3DoFEstimator(RansacEstimator):
 
         self._active_frame = kwargs.get("frame", None)
         self._active_cart_type = cart_type
+
+        # Resolve the towing-face arrow for THIS cart. Taken from the prepared
+        # cache when a cart_type is known (prepare() is a no-op on a hit), and
+        # derived directly on the lazy path used by unit tests and inspect_pose
+        # on a bare cloud -- if that path silently produced no arrow, those call
+        # sites would exercise a different estimator than the benchmark does.
+        if cart_type is not None:
+            self.prepare(cad_mesh, cart_type)
+            cache_key = (self.__class__.__name__, cart_type, self._get_prep_params_key())
+            self._front_face = self._PREPARATION_CACHE[cache_key]["front_face"]
+        else:
+            self._front_face = front_face_from_mesh(cad_mesh)
 
         # Only crop cad_mesh for lazy local fallback (when cart_type is None).
         # When cart_type is specified, prepare() has already cached the cropped
@@ -287,9 +465,16 @@ class Ransac3DoFEstimator(RansacEstimator):
 
     def _refine_pose(self, model_pc, scene_pcd, T_init: np.ndarray) -> np.ndarray:
         """
-        SE(2)-constrained Gauss-Newton point-to-plane ICP (dual hypothesis).
+        SE(2)-constrained Gauss-Newton point-to-plane ICP, single pass.
         Every increment is composed through the se(2) exponential map, so the
         refined pose never leaves the planar manifold.
+
+        There is deliberately no second, 180-degree-flipped hypothesis here. The
+        flip is settled upstream by FrontFaceGate, geometrically, before a
+        candidate is ever scored. Re-opening it downstream on a fitness or RMSE
+        tiebreak -- margins of 2% and less, on a near-symmetric object -- is what
+        the previous design did, and it could only undo a decision that had
+        already been made on stronger evidence.
         """
         scene_points = np.asarray(scene_pcd.points)
         scene_normals = np.asarray(scene_pcd.normals)
@@ -299,22 +484,33 @@ class Ransac3DoFEstimator(RansacEstimator):
                 "prepare_scene_point_cloud, which estimates and orients them."
             )
 
-        frame = getattr(self, "_active_frame", None)
-
-        result = refine_pose_dual_hypothesis_se2(
+        T_init = np.asarray(T_init)
+        result = icp_point_to_plane_se2(
             model_points=np.asarray(model_pc.points),
             scene_points=scene_points,
             scene_normals=scene_normals,
-            T_init=np.asarray(T_init),
+            T_init=T_init,
             max_correspondence_distance=self.params.icp_max_correspondence_distance,
             max_iterations=self.params.icp_max_iterations,
-            frame=frame,
-            extrinsic=self.extrinsic,
-            free_space_threshold=self.params.free_space_threshold,
-            free_space_margin=self.params.free_space_margin,
-            free_space_min_observed=self.params.free_space_min_observed,
         )
-        self._last_diagnostics = getattr(result, "diagnostics", None)
+
+        diagnostics = {"fitness": result.fitness, "inlier_rmse": result.inlier_rmse}
+        if self._front_face is not None:
+            camera_xy = np.asarray(self.extrinsic, dtype=float)[:3, 3][:2]
+            diagnostics["front_face_angle_deg"] = front_face_angle_deg(
+                result.transformation, self._front_face, camera_xy
+            )
+            # How far ICP rotated the pose the gate approved. ICP is
+            # unconstrained in yaw, so it can in principle walk a candidate
+            # accepted at the boundary across it; this is the field that says
+            # whether that actually happens, and it is what would size a bound
+            # if it ever needs one.
+            yaw_init = float(np.arctan2(T_init[1, 0], T_init[0, 0]))
+            yaw_final = float(np.arctan2(result.transformation[1, 0], result.transformation[0, 0]))
+            diagnostics["icp_yaw_delta_deg"] = float(
+                np.degrees(np.arctan2(np.sin(yaw_final - yaw_init), np.cos(yaw_final - yaw_init)))
+            )
+        self._last_diagnostics = diagnostics
         return result.transformation
 
     def _project_pose(self, T: np.ndarray) -> np.ndarray:
@@ -353,8 +549,9 @@ class Ransac3DoFEstimator(RansacEstimator):
         # beyond that the crop no longer removes any mesh, silently
         # re-introducing the front/back symmetry this parameter exists to break.
         params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 2.5)
-        params["free_space_threshold"] = trial.suggest_float("free_space_threshold", 0.005, 0.08)
-        params["free_space_margin"] = trial.suggest_float("free_space_margin", 0.01, 0.08)
+        # front_face_max_angle_deg is NOT suggested: it is the arm's independent
+        # variable, set per-arm via --param-overrides. A parameter Optuna sweeps
+        # but nothing contrasts is a tuned nuisance, not a controlled comparison.
         return params
 
 

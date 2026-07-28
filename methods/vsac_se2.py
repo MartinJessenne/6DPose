@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Generator
 from dataclasses import dataclass
 from math import comb
@@ -7,7 +8,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from methods.constrained_ransac import RansacResult, match_correspondences_fpfh, se2_to_se3
-from methods.ransac3dof import Ransac3DoFEstimator, Ransac3DoFParams
+from methods.ransac3dof import FrontFaceGate, Ransac3DoFEstimator, Ransac3DoFParams
 from methods.se2_lie_utils import minimal_solver_se2
 
 if TYPE_CHECKING:
@@ -157,7 +158,18 @@ def vsac_se2(
     point_clouds=MatchedNpPointClouds,
     params=VsacParams,
     rng: np.random.Generator | None = None,
+    front_face_gate: "FrontFaceGate | None" = None,
 ) -> RansacResult:
+    """SE(2) PROSAC + MSAC global registration.
+
+    front_face_gate, when given, vetoes any candidate whose towing face points
+    more than the allowed angle away from the camera. It is applied at CANDIDATE
+    GENERATION rather than at promotion: the predicate costs about ten flops, so
+    discarding the wrong half of the hypothesis space before it reaches a KD-tree
+    query lets the same max_iterations budget buy roughly twice the search in the
+    half that can still win. Gating at promotion would instead spend full MSAC
+    scoring on poses about to be refused.
+    """
 
     model_points = point_clouds.model_points
     scene_points = point_clouds.scene_points
@@ -231,6 +243,13 @@ def vsac_se2(
     best_transformation = np.eye(4)
     best_rmse = np.inf
     best_inlier_mask: np.ndarray | None = None
+    # Instrumentation, not bookkeeping. Three previous gates in this pipeline
+    # "improved" a headline rate by vetoing nearly everything and turning flips
+    # into abstentions -- a rate with a success denominator always improves when
+    # you empty it. The RATIO below is what distinguishes a working gate from a
+    # silently inverted one, and it is cheap enough to log every frame.
+    n_orientation_rejected = 0
+    n_candidates_valid = 0
 
     # Adaptive early termination (ported from constrained_ransac_se2): without
     # this, the loop always drains the full max_iterations budget regardless
@@ -270,6 +289,13 @@ def vsac_se2(
 
         theta, t_xy = sol
         T_candidate = se2_to_se3(theta, t_xy, z=params.z_offset)  # 4x4 SE(3) matrix
+        n_candidates_valid += 1
+
+        # Orientation veto, before any scoring. See the docstring for why here
+        # and not at promotion.
+        if front_face_gate is not None and not front_face_gate.accepts(T_candidate):
+            n_orientation_rejected += 1
+            continue
 
         # Apply the candidate 4x4 transformation to the 3D model points
         transformed_model_points = (
@@ -355,8 +381,29 @@ def vsac_se2(
     # NOTE the independent-inlier machinery itself is NOT ablated:
     # count_independent_inliers still drives the is_tiebreak_win spatial-support
     # tiebreak above, which is the actual flip-disambiguation mechanism.
+    if front_face_gate is not None and n_candidates_valid:
+        ratio = n_orientation_rejected / n_candidates_valid
+        # Read this every run. FPFH is flip-symmetric on this geometry, so roughly
+        # half the candidates SHOULD point the wrong way:
+        #   ~50%  healthy.
+        #   ~100% the sign convention is inverted somewhere -- check the arrow is
+        #         +x and that extrinsic is camera->robot, not its inverse. Do not
+        #         trust a sweep run in this state.
+        #   ~0%   the gate is inert: not wired, or the arm never got its override.
+        # Both the 100% and the 0% cases otherwise produce a run that looks
+        # entirely plausible.
+        logging.info(
+            f"Front-face gate rejected {n_orientation_rejected}/{n_candidates_valid} "
+            f"candidates ({ratio:.1%})."
+        )
+
     if best_fitness == 0.0:
-        return RansacResult(np.eye(4), 0.0, np.inf, reason="no_inliers")
+        # "Nothing fit" and "everything that fit was vetoed" are different
+        # failures, and the second is the gate's own doing, so it must not hide
+        # inside no_inliers -- that is precisely how the earlier gates looked
+        # healthy in the logs while emptying the eval set.
+        reason = "orientation_rejected" if n_orientation_rejected > 0 else "no_inliers"
+        return RansacResult(np.eye(4), 0.0, np.inf, reason=reason)
 
     return RansacResult(best_transformation, best_fitness, best_rmse)
 
@@ -364,7 +411,7 @@ def vsac_se2(
 @dataclass(frozen=True)
 class VSACSe2Params(Ransac3DoFParams):
     """Ransac3DoFParams plus the one knob specific to the VSAC global-registration
-    stage. Everything else (voxel_size, front_crop_depth, free_space_*,
+    stage. Everything else (voxel_size, front_crop_depth, front_face_max_angle_deg,
     z_gate_threshold, seed, ...) is shared with Ransac3DoFEstimator, since
     VSACSe2Estimator only swaps out _global_registration.
 
@@ -384,8 +431,14 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
     tiebreak that prefers spatially spread support over the clustered support
     a 180-degree-flipped pose typically accumulates (see
     VSAC_Implementation_Plan.md). Overrides only _global_registration --
-    prepare/crop/z-offset, dual-hypothesis SE(2) ICP refinement, and the
-    SE(2) projection safety net are all inherited unchanged.
+    prepare/crop/z-offset, single-pass SE(2) ICP refinement, and the SE(2)
+    projection safety net are all inherited unchanged.
+
+    This is also where the front-face orientation veto lives, because this is the
+    stage that creates the 180-degree ambiguity in the first place: MSAC counts
+    how many model points land near a scene point, which a pose and its flipped
+    twin do equally well. Every earlier attempt at the flip acted downstream in
+    ICP, on a choice the global stage had already made blind.
     """
 
     params: VSACSe2Params
@@ -424,7 +477,32 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
             min_sample_distance=3.0 * self.params.voxel_size,
             rho=self.params.rho,
         )
-        return vsac_se2(point_clouds, vsac_params, rng=np.random.default_rng(self.params.seed))
+        return vsac_se2(
+            point_clouds,
+            vsac_params,
+            rng=np.random.default_rng(self.params.seed),
+            front_face_gate=self._build_front_face_gate(),
+        )
+
+    def _build_front_face_gate(self) -> FrontFaceGate | None:
+        """
+        The orientation veto for this frame, or None when it is switched off.
+
+        Returns None when front_face_max_angle_deg is unset (the control arm) or
+        when no cart geometry has been resolved. Returning None rather than
+        raising keeps call sites with no mesh context -- unit tests, inspect_pose
+        on a bare cloud -- working, instead of silently behaving like a third,
+        undeclared arm.
+        """
+        if self.params.front_face_max_angle_deg is None:
+            return None
+        if self._front_face is None:
+            return None
+        return FrontFaceGate(
+            front_face=self._front_face,
+            camera_xy=np.asarray(self.extrinsic, dtype=float)[:3, 3][:2],
+            max_angle_deg=float(self.params.front_face_max_angle_deg),
+        )
 
     @classmethod
     def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:

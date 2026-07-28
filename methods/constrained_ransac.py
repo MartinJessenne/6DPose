@@ -76,6 +76,12 @@ ABSTENTION_REASONS = (
     # sweeps run before the ablation (e.g. study VSAC_NullOn_M2) have frame CSVs
     # full of it, and a reader of those files needs the name to mean something.
     "null_rejected",
+    # VSAC only: every candidate that fit was vetoed by FrontFaceGate for pointing
+    # its towing face away from the camera. Separate from "no_inliers" because the
+    # two demand opposite responses -- no_inliers means the scene gave nothing to
+    # work with, this means the gate refused what it was given, and if it appears
+    # in bulk the gate is misconfigured (see the rejection-ratio log in vsac_se2).
+    "orientation_rejected",
     "empty_scene_cloud",  # segmentation/reprojection produced no scene points
     "registration",  # abstained without naming a cause (estimator not yet instrumented)
 )

@@ -377,12 +377,17 @@ class FrameRecord:
     flipped: bool | None = None
     trans_xy: float | None = None
     yaw_err: float | None = None
-    selected: str | None = None
-    decision: str | None = None
-    fitness_1: float | None = None
-    fitness_2: float | None = None
-    viol_ratio_1: float | None = None
-    viol_ratio_2: float | None = None
+    fitness: float | None = None
+    inlier_rmse: float | None = None
+    # Signed angle between the final pose's towing-face arrow and the direction
+    # to the camera. Signed on purpose: a cluster near +/-180 is a flip that got
+    # through, a spread around +/-30 is ordinary yaw error, and the unsigned
+    # magnitude would merge two failures that call for different fixes.
+    front_face_angle_deg: float | None = None
+    # How far ICP rotated the pose after the gate approved it. ICP is
+    # unconstrained in yaw, so this is what says whether a candidate accepted at
+    # the boundary can be walked across it -- and what would size a bound.
+    icp_yaw_delta_deg: float | None = None
 
 
 def write_frame_records_csv(path: str, records: list[FrameRecord]) -> None:
@@ -523,12 +528,10 @@ def evaluate_pipeline(
                     flipped=abs(metrics.yaw) > 90.0,
                     trans_xy=metrics.trans_xy,
                     yaw_err=metrics.yaw,
-                    selected=diagnostics.get("selected"),
-                    decision=diagnostics.get("decision"),
-                    fitness_1=diagnostics.get("fitness_1"),
-                    fitness_2=diagnostics.get("fitness_2"),
-                    viol_ratio_1=diagnostics.get("viol_ratio_1"),
-                    viol_ratio_2=diagnostics.get("viol_ratio_2"),
+                    fitness=diagnostics.get("fitness"),
+                    inlier_rmse=diagnostics.get("inlier_rmse"),
+                    front_face_angle_deg=diagnostics.get("front_face_angle_deg"),
+                    icp_yaw_delta_deg=diagnostics.get("icp_yaw_delta_deg"),
                 )
             )
         except Exception:
@@ -707,8 +710,8 @@ def resolve_param_overrides(
     reports it is testing something while running the control.
 
     Values arrive as strings from tyro and are parsed as Python literals, so
-    `free_space_gate=true`, `voxel_size=0.04` and `z_offset=None` all land as the
-    right type; anything unparseable is kept as the raw string.
+    `front_face_max_angle_deg=60.0`, `voxel_size=0.04` and `z_offset=None` all land
+    as the right type; anything unparseable is kept as the raw string.
     """
     if not overrides:
         return {}
