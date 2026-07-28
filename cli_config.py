@@ -354,6 +354,41 @@ VSACSe2ProfileSelect = Union[
             ),
         ),
     ],
+    Annotated[
+        VSACSe2Profile,
+        tyro.conf.subcommand(
+            name="tuned-cheap",
+            # Same sweep (s3zi4564), trial #28. Reaches a HIGHER good_rate than
+            # #33 -- 0.7440 vs 0.7246 -- at 2575 iterations instead of 46940 and
+            # 2.03s p95 instead of 5.65s. #33 wins only on pose_ar (0.2833 vs
+            # 0.2789), which is inside that sweep's best-of-N inflation (measured
+            # at +0.021 when #33 was re-run standalone as W&B y4ctgo32).
+            #
+            # This exists because within the sweep's voxel 0.02 bucket,
+            # Spearman(ransac_max_iterations, good_rate) = -0.006 and
+            # Spearman(ransac_max_iterations, p95) = +0.930. Sampling effort buys
+            # latency and nothing else, so the 18x iteration budget of "tuned" is
+            # pure cost. Deployment needs 200ms (>= 5 Hz on a Jetson Orin Nano,
+            # AGENTS.md); 2.03s is 10x over, 5.65s is 28x over.
+            #
+            # Untested with hoppe_normal_orientation / normal_consistency, which
+            # is exactly the run this profile exists to make a one-liner.
+            default=VSACSe2Profile(
+                params=VSACSe2Params(
+                    voxel_size=0.02,
+                    front_crop_depth=0.8340255546463509,
+                    z_gate_threshold=0.10155507475760123,
+                    ransac_max_iterations=2575,
+                    icp_max_iterations=50,
+                    icp_max_correspondence_distance=0.07362195960602905,
+                    edge_length_threshold=0.8764833108790312,
+                    rho=0.49565427444240406,
+                    z_offset=0.01,
+                ),
+                depth_trunc=4.6,
+            ),
+        ),
+    ],
 ]
 
 
@@ -492,7 +527,7 @@ ModelPreset = Union[
             name="vsac3dof",
             description=(
                 "profiles: model.profile:default, model.profile:bare, "
-                "model.profile:tuned"
+                "model.profile:tuned, model.profile:tuned-cheap"
             ),
         ),
     ],
