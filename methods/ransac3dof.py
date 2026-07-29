@@ -10,10 +10,23 @@ import trimesh
 from methods.base import orient_normals_hoppe, reorient_normals_to_reference
 from methods.constrained_ransac import constrained_ransac_se2, project_to_se2
 from methods.ransac import RansacEstimator, RansacParams
-from methods.se2_icp import icp_point_to_plane_se2
+from methods.se2_icp import icp_point_to_plane_se2, icp_translation_only
 
 if TYPE_CHECKING:
     import optuna
+
+# Below this many visible model points a refinement stage falls back to the full
+# model cloud: the pose is far enough from the scene that the visible set is not
+# a meaningful subset, and refining against a handful of points is worse than
+# refining against a biased many.
+_MIN_VISIBLE_MODEL_POINTS = 50
+
+
+def _yaw_delta_deg(T_a: np.ndarray, T_b: np.ndarray) -> float:
+    """Absolute yaw difference between two SE(2) poses, wrapped to [0, 180]."""
+    yaw_a = float(np.arctan2(T_a[1, 0], T_a[0, 0]))
+    yaw_b = float(np.arctan2(T_b[1, 0], T_b[0, 0]))
+    return abs(float(np.degrees(np.arctan2(np.sin(yaw_b - yaw_a), np.cos(yaw_b - yaw_a)))))
 
 
 @dataclass(frozen=True)
@@ -296,6 +309,33 @@ class Ransac3DoFParams(RansacParams):
             is_orientable() == False, so their normal signs are arbitrary and
             VSACSe2Params.normal_consistency measures a coin flip without this.
             Changes the prepared model, hence part of _get_prep_params_key.
+        icp_visibility_cull: Restrict the ICP model cloud to the points actually
+            visible from the camera, recomputed at each refinement stage.
+            prepare() samples uniformly over the whole slab, but only ~33% of
+            those points can be seen: the meshes are zero-thickness shells, so
+            every tube contributes a near sheet and a far sheet, and the far
+            sheet is fiction as far as the depth camera is concerned. Left in,
+            those points still demand a correspondence within
+            icp_max_correspondence_distance and drag the model toward the
+            sensor -- a ~2.2 cm bias along the cart's own +x, measured by
+            initialising ICP AT the ground truth and watching it walk away.
+            False (the default) keeps today's behaviour. See vault note
+            "30.06 - T0 Translation Error and the Visibility Cull".
+        icp_refine_ladder: Extra refinement stages run after the shipped wide
+            stage, as decreasing correspondence distances in meters, e.g.
+            (0.05, 0.02, 0.01). The wide stage keeps its large capture basin;
+            these only tighten. None (the default) runs the single wide stage
+            alone. Nearly all of the benefit needs icp_visibility_cull too --
+            tightening against a cloud that is two thirds fictional just finds
+            the same biased minimum more precisely.
+        icp_yaw_guard_deg: Largest yaw change a ladder stage may make. A tight
+            culled objective is sharp enough to fall into a symmetry twin: the
+            leanflow slab is 0.735 x 0.704 m, near-square in plan, and the tight
+            stage snapped every correct leanflow frame to ~90 degrees without
+            this. When a stage exceeds the guard its rotation is discarded and
+            the stage is re-run in translation only, which keeps the precision
+            and forbids the jump. None disables the guard (not recommended with
+            a ladder). Ignored when icp_refine_ladder is None.
     """
 
     z_offset: float | None = None
@@ -306,6 +346,9 @@ class Ransac3DoFParams(RansacParams):
     front_crop_depth: float | None = None
     front_face_max_angle_deg: float | None = None
     hoppe_normal_orientation: bool = False
+    icp_visibility_cull: bool = False
+    icp_refine_ladder: tuple[float, ...] | None = None
+    icp_yaw_guard_deg: float | None = 5.0
 
 
 # =====================================================================
@@ -503,11 +546,40 @@ class Ransac3DoFEstimator(RansacEstimator):
             rng=np.random.default_rng(self.params.seed),
         )
 
+    def _visible_model_indices(self, model_points: np.ndarray, T: np.ndarray) -> np.ndarray:
+        """
+        Indices of the model points visible from the camera at pose `T`.
+
+        Katz et al. hidden point removal, which is purely geometric: it needs no
+        normals, which matters here because all three cart meshes report
+        is_orientable() == False and their normal signs are therefore arbitrary
+        (see methods/base.py reorient_normals_to_reference).
+
+        The radius multiplier is deliberately large. Katz's parameter trades
+        recall against precision on the visible set; at 100x the cloud diameter
+        the spherical flip is nearly a plane, which keeps grazing-incidence
+        surface -- real, if noisy, observations -- rather than discarding it.
+        """
+        world = model_points @ T[:3, :3].T + T[:3, 3]
+        pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(world))
+        diameter = float(np.linalg.norm(pc.get_max_bound() - pc.get_min_bound()))
+        camera = np.asarray(self.extrinsic, dtype=float)[:3, 3]
+        _mesh, kept = pc.hidden_point_removal(camera.tolist(), diameter * 100.0)
+        return np.asarray(kept, dtype=int)
+
     def _refine_pose(self, model_pc, scene_pcd, T_init: np.ndarray) -> np.ndarray:
         """
-        SE(2)-constrained Gauss-Newton point-to-plane ICP, single pass.
+        SE(2)-constrained Gauss-Newton point-to-plane ICP.
         Every increment is composed through the se(2) exponential map, so the
         refined pose never leaves the planar manifold.
+
+        One wide stage always runs, at icp_max_correspondence_distance and over
+        the full model cloud -- that is the stage with the capture basin, and it
+        is bit-identical to what shipped before. icp_refine_ladder then adds
+        optional tightening stages on top; params.icp_visibility_cull decides
+        whether they see the whole model or only the part of it the camera can
+        actually observe. Ordering matters: culling first and tightening after
+        would hand the tight stage a smaller basin than the geometry warrants.
 
         There is deliberately no second, 180-degree-flipped hypothesis here. The
         flip is settled upstream by FrontFaceGate, geometrically, before a
@@ -525,8 +597,9 @@ class Ransac3DoFEstimator(RansacEstimator):
             )
 
         T_init = np.asarray(T_init)
+        model_points = np.asarray(model_pc.points)
         result = icp_point_to_plane_se2(
-            model_points=np.asarray(model_pc.points),
+            model_points=model_points,
             scene_points=scene_points,
             scene_normals=scene_normals,
             T_init=T_init,
@@ -534,7 +607,52 @@ class Ransac3DoFEstimator(RansacEstimator):
             max_iterations=self.params.icp_max_iterations,
         )
 
+        n_guard_trips = 0
+        for stage_distance in self.params.icp_refine_ladder or ():
+            T_stage = result.transformation
+            stage_points = model_points
+            if self.params.icp_visibility_cull:
+                visible = self._visible_model_indices(model_points, T_stage)
+                # A near-empty visible set means the pose is nowhere near the
+                # scene (a flipped or runaway candidate). Falling back to the
+                # full cloud keeps such a frame on exactly the code path it
+                # would have taken before the cull existed, rather than
+                # refining against a handful of points.
+                if len(visible) >= _MIN_VISIBLE_MODEL_POINTS:
+                    stage_points = model_points[visible]
+
+            stage = icp_point_to_plane_se2(
+                model_points=stage_points,
+                scene_points=scene_points,
+                scene_normals=scene_normals,
+                T_init=T_stage,
+                max_correspondence_distance=stage_distance,
+                max_iterations=self.params.icp_max_iterations,
+            )
+
+            guard = self.params.icp_yaw_guard_deg
+            if guard is not None and _yaw_delta_deg(T_stage, stage.transformation) > guard:
+                # The stage tried to jump to a symmetry twin. Discard its
+                # rotation, keep its translation: the gain this ladder exists
+                # for is positional, and yaw was already settled upstream.
+                n_guard_trips += 1
+                stage = icp_translation_only(
+                    model_points=stage_points,
+                    scene_points=scene_points,
+                    scene_normals=scene_normals,
+                    T_init=T_stage,
+                    max_correspondence_distance=stage_distance,
+                    max_iterations=self.params.icp_max_iterations,
+                )
+            result = stage
+
         diagnostics = {"fitness": result.fitness, "inlier_rmse": result.inlier_rmse}
+        if self.params.icp_refine_ladder:
+            # How often the tight stages tried to rotate away. Non-zero is not a
+            # fault -- it is the guard doing its job -- but a frame where it
+            # trips on every stage is a frame whose slab is symmetric enough
+            # that front_crop_depth should be revisited for that cart.
+            diagnostics["icp_yaw_guard_trips"] = n_guard_trips
         if self._front_face is not None:
             camera_xy = np.asarray(self.extrinsic, dtype=float)[:3, 3][:2]
             diagnostics["front_face_angle_deg"] = front_face_angle_deg(
@@ -592,6 +710,13 @@ class Ransac3DoFEstimator(RansacEstimator):
         # front_face_max_angle_deg is NOT suggested: it is the arm's independent
         # variable, set per-arm via --param-overrides. A parameter Optuna sweeps
         # but nothing contrasts is a tuned nuisance, not a controlled comparison.
+        #
+        # icp_visibility_cull / icp_refine_ladder / icp_yaw_guard_deg are left
+        # out for the same reason -- they are the T0 arm's independent variables
+        # and are selected by profile (tuned-vis) so control and treatment differ
+        # by the profile token alone. icp_max_correspondence_distance IS swept
+        # (inherited from RansacEstimator) and should be re-swept once the cull
+        # lands: its current optimum was found against a biased objective.
         return params
 
 

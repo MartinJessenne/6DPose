@@ -49,6 +49,82 @@ def _lift_se2_increment(xi, center_xy):
     return T
 
 
+def icp_translation_only(
+    model_points,  # (N, 3) model points (already sampled from the CAD)
+    scene_points,  # (M, 3) scene points in the Z-up robot base frame
+    scene_normals,  # (M, 3) scene normals (oriented toward the sensor)
+    T_init,  # (4, 4) SE(2)-embedded initial pose
+    max_correspondence_distance,
+    max_iterations=100,
+    tolerance=1e-8,
+):
+    """
+    Point-to-plane ICP over ground-plane translation only; yaw is frozen.
+
+    The residual n_i . (R p_i + t - q_i) is already linear in t, so the Jacobian
+    is just [n_x, n_y] and 2x2 normal equations solve it -- there is no rotation
+    parameter to move, by construction rather than by penalty.
+
+    This exists because the tightened refinement of
+    Ransac3DoFEstimator._refine_pose is sharp enough to fall into a symmetry
+    twin: the front slab of the smallest cart in the fleet is 0.735 x 0.704 m,
+    near-square in plan, and a culled tight objective has a genuine 90-degree
+    minimum there. When the yaw guard trips, this recovers the stage's
+    translation gain while leaving the orientation the wide stage chose intact.
+
+    Returns:
+        RansacResult, same contract as icp_point_to_plane_se2.
+    """
+    model_points = np.asarray(model_points, dtype=float)
+    scene_points = np.asarray(scene_points, dtype=float)
+    scene_normals = np.asarray(scene_normals, dtype=float)
+    T = np.array(T_init, dtype=float, copy=True)
+
+    scene_tree = cKDTree(scene_points)
+    n_model = len(model_points)
+
+    def _evaluate(T_eval):
+        transformed = model_points @ T_eval[:3, :3].T + T_eval[:3, 3]
+        dists, idx = scene_tree.query(
+            transformed, k=1, distance_upper_bound=max_correspondence_distance
+        )
+        valid = np.isfinite(dists)
+        return transformed, dists, idx, valid
+
+    for _ in range(max_iterations):
+        transformed, _dists, idx, valid = _evaluate(T)
+        if valid.sum() < 3:
+            logging.warning(
+                "SE(2) translation-only ICP: fewer than 3 correspondences within "
+                f"{max_correspondence_distance} m; stopping refinement."
+            )
+            break
+
+        p = transformed[valid]
+        q = scene_points[idx[valid]]
+        n = scene_normals[idx[valid]]
+
+        r = np.einsum("ij,ij->i", n, p - q)
+        J = n[:, :2]
+
+        JTJ = J.T @ J + 1e-12 * np.eye(2)
+        try:
+            dt = np.linalg.solve(JTJ, -(J.T @ r))
+        except np.linalg.LinAlgError:
+            logging.warning("SE(2) translation-only ICP: singular normal equations; stopping.")
+            break
+
+        T[:2, 3] += dt
+        if np.linalg.norm(dt) < tolerance:
+            break
+
+    _, dists, _, valid = _evaluate(T)
+    n_inliers = valid.sum()
+    fitness = n_inliers / n_model if n_model else 0.0
+    inlier_rmse = np.sqrt(np.mean(dists[valid] ** 2)) if n_inliers > 0 else np.inf
+    return RansacResult(T, fitness, inlier_rmse)
+
+
 def icp_point_to_plane_se2(
     model_points,  # (N, 3) model points (already sampled from the CAD)
     scene_points,  # (M, 3) scene points in the Z-up robot base frame

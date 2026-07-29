@@ -389,6 +389,84 @@ VSACSe2ProfileSelect = Union[
             ),
         ),
     ],
+    Annotated[
+        VSACSe2Profile,
+        tyro.conf.subcommand(
+            name="tuned-vis",
+            # "tuned" plus the T0 refinement: visibility-culled, tightened,
+            # yaw-guarded ICP. Identical in every other parameter, so
+            # `tuned` vs `tuned-vis` is a one-token A/B.
+            #
+            # Local, 18 fixtures, --o3d-seed 0, against tuned:
+            #   pose_ar      0.1971 -> 0.4101
+            #   good_rate    0.6111 -> 0.6111  (bit-identical, 0 abstentions)
+            #   trans p50    2.24cm -> 0.81cm
+            #   yaw p50      1.02deg -> 0.10deg
+            #   p95          7.05s  -> 7.35s
+            #
+            # The mechanism is measured RNG-free by initialising ICP at ground
+            # truth and watching it walk away 2.2cm; see the vault note
+            # "30.06 - T0 Translation Error and the Visibility Cull". Local
+            # fixtures overstate effects ~2.5x -- only the ranking transfers.
+            default=VSACSe2Profile(
+                params=VSACSe2Params(
+                    voxel_size=0.02,
+                    front_crop_depth=0.7352383501440559,
+                    z_gate_threshold=0.34896831026780845,
+                    ransac_max_iterations=46940,
+                    icp_max_iterations=100,
+                    icp_max_correspondence_distance=0.13768813892484938,
+                    edge_length_threshold=0.8960310052849256,
+                    rho=0.108351160884956,
+                    z_offset=0.01,
+                    icp_visibility_cull=True,
+                    icp_refine_ladder=(0.05, 0.02, 0.01),
+                    icp_yaw_guard_deg=5.0,
+                ),
+                depth_trunc=4.6,
+            ),
+        ),
+    ],
+    Annotated[
+        VSACSe2Profile,
+        tyro.conf.subcommand(
+            name="tuned-vis-gate",
+            # "tuned-vis" plus the front-face orientation veto at 60 degrees.
+            # E03 measured that veto NEGATIVE before the model-normal fix (flips
+            # became abstentions, good_rate flat); re-measured on the fixed
+            # pipeline it converts flips into correct poses instead, which is
+            # what the 29-07 report predicted and listed as its step 3.
+            #
+            # Local, 18 fixtures, --o3d-seed 0, against tuned:
+            #   pose_ar      0.1971 -> 0.4511
+            #   good_rate    0.6111 -> 0.7778
+            #   abstention   0.0000 -> 0.0000
+            #   trans p50    2.24cm -> 0.82cm
+            #   p95          7.05s  -> 4.70s   (the veto prunes the search)
+            #
+            # 60 rather than 45: ground-truth bearings reach 48.79 deg measured
+            # from the towing face, so a 45 deg veto rejects 3.2% of correct
+            # poses. See Ransac3DoFParams.front_face_max_angle_deg.
+            default=VSACSe2Profile(
+                params=VSACSe2Params(
+                    voxel_size=0.02,
+                    front_crop_depth=0.7352383501440559,
+                    z_gate_threshold=0.34896831026780845,
+                    ransac_max_iterations=46940,
+                    icp_max_iterations=100,
+                    icp_max_correspondence_distance=0.13768813892484938,
+                    edge_length_threshold=0.8960310052849256,
+                    rho=0.108351160884956,
+                    z_offset=0.01,
+                    icp_visibility_cull=True,
+                    icp_refine_ladder=(0.05, 0.02, 0.01),
+                    icp_yaw_guard_deg=5.0,
+                    front_face_max_angle_deg=60.0,
+                ),
+                depth_trunc=4.6,
+            ),
+        ),
+    ],
 ]
 
 
@@ -527,7 +605,8 @@ ModelPreset = Union[
             name="vsac3dof",
             description=(
                 "profiles: model.profile:default, model.profile:bare, "
-                "model.profile:tuned, model.profile:tuned-cheap"
+                "model.profile:tuned, model.profile:tuned-cheap, "
+                "model.profile:tuned-vis, model.profile:tuned-vis-gate"
             ),
         ),
     ],
