@@ -428,8 +428,7 @@ class Ransac3DoFEstimator(RansacEstimator):
         # (dense model_pc): the crop is what breaks the front/back symmetry, so
         # both stages should register against the same asymmetric geometry
         # instead of RANSAC seeing a crop while ICP falls back to the full,
-        # near-symmetric cart. front_crop_depth=None (Ransac3DoFFullMeshEstimator's
-        # ablation baseline) means no crop at all, not a fallback depth.
+        # near-symmetric cart.
         if self.params.front_crop_depth is not None:
             try:
                 slab_mesh = crop_front_face(mesh_copy, depth=self.params.front_crop_depth)
@@ -686,54 +685,35 @@ class Ransac3DoFEstimator(RansacEstimator):
         return T_projected
 
     @classmethod
-    def suggest_params(cls, trial, fixed: frozenset[str] = frozenset()) -> dict[str, Any]:
+    def suggest_params(
+        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
         """Suggests parameters for the SE(2)-constrained RANSAC + ICP registration."""
+
+        # Here for documentation purposes it would be nice to list all the parameters that are suggested through the base class.
         params = super().suggest_params(trial, fixed=fixed)
-        params["edge_length_threshold"] = trial.suggest_float("edge_length_threshold", 0.8, 0.95)
-        # First z-gate sweep pressed against the old 0.20 ceiling (19/20 top
-        # trials above 0.15): the optimum lies higher, so give it headroom.
-        params["z_gate_threshold"] = trial.suggest_float("z_gate_threshold", 0.05, 0.35)
-        # Let Optuna trade RANSAC budget against latency explicitly instead of
-        # only implicitly through voxel_size.
-        params["ransac_max_iterations"] = trial.suggest_int(
-            "ransac_max_iterations", 2000, 100000, log=True
-        )
-        # Registering the asymmetric front slab instead of the full cart
-        # halved the flip rate and doubled AR in A/B benchmarks; the slab
-        # depth trades feature support against re-imported symmetry. Upper
-        # bound is the longest cart in the fleet (colruyt, ~2.57 m x-extent):
-        # beyond that the crop no longer removes any mesh, silently
-        # re-introducing the front/back symmetry this parameter exists to break.
-        params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 2.5)
+
+        if "edge_length_threshold" not in fixed:
+            params["edge_length_threshold"] = trial.suggest_float(
+                "edge_length_threshold", 0.8, 0.95
+            )
+
+        # I'm wondering if 0.35 is too high,this has also to be checked against noise resolution levels.
+        if "z_gate_threshold" not in fixed:
+            params["z_gate_threshold"] = trial.suggest_float("z_gate_threshold", 0.05, 0.35)
+
+        # This will later be modified to be based on a fraction of the mesh to crop out
+        if "front_crop_depth" not in fixed:
+            params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 2.5)
+
         # front_face_max_angle_deg is NOT suggested: it is the arm's independent
         # variable, set per-arm via --param-overrides. A parameter Optuna sweeps
         # but nothing contrasts is a tuned nuisance, not a controlled comparison.
         #
         # icp_visibility_cull / icp_refine_ladder / icp_yaw_guard_deg are left
-        # out for the same reason -- they are the T0 arm's independent variables
+        # out for the same reason -- they are the arm's independent variables
         # and are selected by profile (tuned-vis) so control and treatment differ
         # by the profile token alone. icp_max_correspondence_distance IS swept
         # (inherited from RansacEstimator) and should be re-swept once the cull
         # lands: its current optimum was found against a biased objective.
-        return params
-
-
-class Ransac3DoFFullMeshEstimator(Ransac3DoFEstimator):
-    """Ransac3DoFEstimator variant that never crops the CAD mesh.
-
-    front_crop_depth is simply never suggested, so it stays at its
-    Ransac3DoFParams default of None (full mesh). This is the "before crop"
-    ablation baseline for the SE(2) benchmark report -- superseded by
-    Ransac3DoFEstimator once front-crop tuning landed, kept only to
-    reproduce that historical data point.
-    """
-
-    @classmethod
-    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
-        params = RansacEstimator.suggest_params(trial)
-        params["edge_length_threshold"] = trial.suggest_float("edge_length_threshold", 0.8, 0.95)
-        params["z_gate_threshold"] = trial.suggest_float("z_gate_threshold", 0.05, 0.35)
-        params["ransac_max_iterations"] = trial.suggest_int(
-            "ransac_max_iterations", 2000, 100000, log=True
-        )
         return params

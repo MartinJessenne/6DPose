@@ -711,7 +711,7 @@ def resolve_param_overrides(
 
     Values arrive as strings from tyro and are parsed as Python literals, so
     `front_face_max_angle_deg 60.0`, `voxel_size 0.04`, `z_offset None`,
-    `icp_refine_ladder "(0.05,0.02,0.01)` (note the syntax for tuple values)
+    `icp_refine_ladder "(0.05,0.02,0.01)"` (note the syntax for tuple values)
     all land as the right type; anything unparseable is kept as the raw string.
     """
     if not overrides:
@@ -735,6 +735,23 @@ def resolve_param_overrides(
         else:
             resolved[name] = raw
     return resolved
+
+
+def reject_param_overrides_outside_sweep(args) -> None:
+    """
+    --param-overrides reaches only the sweep path; refuse it anywhere else.
+
+    On the plain-benchmark path parameters come from args.model.profile.params and
+    args.param_overrides is never read, so accepting it silently would run the control while
+    the run's --name, its W&B config, and its logged hyperparameters all claim a treatment arm.
+    Same reasoning as resolve_param_overrides' unknown-name error: raise, don't warn.
+    """
+
+    if args.param_overrides and not args.sweep:
+        raise ValueError(
+            "--param-overrides is only valid with --sweep; "
+            "on a plain benchmark run, estimator params come from the model profile."
+        )
 
 
 def run_parameter_sweep(
@@ -871,7 +888,10 @@ def run_parameter_sweep(
             # 2. Dynamically suggest model-specific parameters, then force the
             # arm's fixed parameters on top. The overrides go LAST so a value
             # that is also swept cannot drift away from the declared arm.
-            suggested_params = {**estimator_cls.suggest_params(trial), **resolved_overrides}
+            suggested_params = {
+                **estimator_cls.suggest_params(trial, fixed=frozenset(resolved_overrides)),
+                **resolved_overrides,
+            }
 
             # 3. Evaluate across effective_n_seeds estimator-internal RANSAC
             # seeds and pool the resulting frames together (rather than
@@ -1065,6 +1085,8 @@ def run_parameter_sweep(
 # values. See docs/explanation/tyro_cli_config.md for the full picture.
 def main():
     args = tyro.cli(BenchmarkArgs)
+
+    reject_param_overrides_outside_sweep(args)
 
     # Load model, camera, and dataset
     print("Loading pipeline assets...")

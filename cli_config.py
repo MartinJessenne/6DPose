@@ -19,7 +19,6 @@ from methods.ppf import PPFEstimator, PPFParams
 from methods.ransac import RansacEstimator, RansacParams
 from methods.ransac3dof import (
     Ransac3DoFEstimator,
-    Ransac3DoFFullMeshEstimator,
     Ransac3DoFParams,
 )
 from methods.vsac_se2 import VSACSe2Estimator, VSACSe2Params
@@ -551,14 +550,6 @@ class Ransac3DoFPreset:
 
 
 @dataclass(frozen=True)
-class Ransac3DoFFullMeshPreset:
-    """No-crop ablation baseline -- see Ransac3DoFFullMeshEstimator."""
-
-    ESTIMATOR_CLS: ClassVar[type[BasePoseEstimator]] = Ransac3DoFFullMeshEstimator
-    profile: Ransac3DoFFullMeshProfileSelect
-
-
-@dataclass(frozen=True)
 class VSACSe2Preset:
     """PROSAC/MSAC + independent-inlier-tiebreak variant of Ransac3DoFPreset --
     see VSACSe2Estimator, VSAC_Implementation_Plan.md."""
@@ -589,13 +580,6 @@ ModelPreset = Union[
         Ransac3DoFPreset,
         tyro.conf.subcommand(
             name="ransac3dof",
-            description="profiles: model.profile:default, model.profile:acc-opt, model.profile:rt-opt",
-        ),
-    ],
-    Annotated[
-        Ransac3DoFFullMeshPreset,
-        tyro.conf.subcommand(
-            name="ransac3dof-fullmesh",
             description="profiles: model.profile:default, model.profile:acc-opt, model.profile:rt-opt",
         ),
     ],

@@ -78,22 +78,41 @@ class PPFEstimator(BasePoseEstimator):
             self.extrinsic = None
 
     @classmethod
-    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
+    def suggest_params(
+        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
         """Suggests parameters for PPF + ICP registration."""
-        return {
-            "ppf_sampling_step": trial.suggest_float("ppf_sampling_step", 0.02, 0.10, step=0.01),
-            "ppf_distance_step": trial.suggest_float("ppf_distance_step", 0.02, 0.10, step=0.01),
-            "ppf_match_threshold": trial.suggest_float(
+        params = {}
+
+        if "ppf_sampling_step" not in fixed:
+            params["ppf_sampling_step"] = trial.suggest_float(
+                "ppf_sampling_step", 0.02, 0.10, step=0.01
+            )
+
+        if "ppf_distance_step" not in fixed:
+            params["ppf_distance_step"] = trial.suggest_float(
+                "ppf_distance_step", 0.02, 0.10, step=0.01
+            )
+
+        if "ppf_match_threshold" not in fixed:
+            params["ppf_match_threshold"] = trial.suggest_float(
                 "ppf_match_threshold", 0.02, 0.10, step=0.01
-            ),
-            "ppf_match_tolerance": trial.suggest_float(
+            )
+
+        if "ppf_match_tolerance" not in fixed:
+            params["ppf_match_tolerance"] = trial.suggest_float(
                 "ppf_match_tolerance", 0.01, 0.08, step=0.01
-            ),
-            "icp_max_correspondence_distance": trial.suggest_float(
+            )
+
+        if "icp_max_correspondence_distance" not in fixed:
+            params["icp_max_correspondence_distance"] = trial.suggest_float(
                 "icp_max_correspondence_distance", 0.02, 0.20
-            ),
-            "icp_max_iterations": trial.suggest_int("icp_max_iterations", 10, 100, step=10),
-        }
+            )
+
+        if "icp_max_iterations" not in fixed:
+            params["icp_max_iterations"] = trial.suggest_int("icp_max_iterations", 10, 100, step=10)
+
+        return params
 
     def _get_prep_params_key(self) -> tuple:
         """Returns only the parameters affecting offline preparation."""

@@ -352,9 +352,7 @@ def vsac_se2(
             continue
 
         # Apply the candidate 4x4 transformation to the 3D model points
-        transformed_model_points = (
-            model_points @ T_candidate[:3, :3].T + T_candidate[:3, 3]
-        )
+        transformed_model_points = model_points @ T_candidate[:3, :3].T + T_candidate[:3, 3]
         # Normals rotate but do not translate. The rotation is a yaw about z and
         # therefore orthogonal, so the rotated normals stay unit length and the
         # sign test below needs no renormalisation.
@@ -548,9 +546,7 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
             # were simply never threaded through to the scorer. Passed
             # unconditionally; params.normal_consistency decides whether they are
             # used, so the two arms differ by one flag and not by a code path.
-            model_normals=(
-                np.asarray(model_down.normals) if model_down.has_normals() else None
-            ),
+            model_normals=(np.asarray(model_down.normals) if model_down.has_normals() else None),
             scene_normals=(np.asarray(pcd_down.normals) if pcd_down.has_normals() else None),
         )
         vsac_params = VsacParams(
@@ -595,11 +591,15 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
         )
 
     @classmethod
-    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
+    def suggest_params(
+        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
         """Suggests parameters for the VSAC-based SE(2) RANSAC + ICP registration."""
-        params = super().suggest_params(trial)
+        # For documentation purposes, it would be good to detail the params that are being suggested here through the parent class.
+        params = super().suggest_params(trial, fixed=fixed)
         # rho ~ a few voxels to a few tens of cm: too small and every inlier
         # looks independent (the tiebreak never fires); too large and the
         # whole cart collapses to ~1 independent cluster (same failure mode).
-        params["rho"] = trial.suggest_float("rho", 0.05, 0.6)
+        if "rho" not in fixed:
+            params["rho"] = trial.suggest_float("rho", 0.05, 0.6)
         return params

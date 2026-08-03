@@ -7,7 +7,7 @@ import numpy as np
 import open3d as o3d
 
 if TYPE_CHECKING:
-    pass
+    import optuna
 
 
 class BasePoseEstimator(ABC):
@@ -50,13 +50,19 @@ class BasePoseEstimator(ABC):
         pass
 
     @classmethod
-    def suggest_params(cls, trial, fixed: frozenset[str] = frozenset()) -> dict[str, Any]:
+    def suggest_params(
+        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
         """
         Suggests hyperparameters for this matching method using an Optuna trial.
 
         Args:
             trial: The active Optuna trial.
-            fixed (frozenset[str]): Set of parameter names to keep fixed (not suggested during the sweep, and that override default values).
+            fixed: Parameter names already pinned for this arm (via --param-overrides)
+                and which must therefore NOT be suggested. Suggesting one anyway costs
+                a TPE dimension that cannot affect the objective, and makes Optuna's
+                parameter-importance output meaningless for that field.
+
         Returns:
             dict[str, Any]: Suggested parameter dictionary.
 

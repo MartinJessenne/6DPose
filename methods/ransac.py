@@ -14,7 +14,7 @@ from methods.base import (
 )
 
 if TYPE_CHECKING:
-    pass
+    import optuna
 
 
 # =====================================================================
@@ -64,25 +64,30 @@ class RansacEstimator(BasePoseEstimator):
             self.extrinsic = None
 
     @classmethod
-    def suggest_params(cls, trial, fixed: frozenset[str] = frozenset()) -> dict[str, Any]:
+    def suggest_params(
+        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
+    ) -> dict[str, Any]:
         """Suggests parameters for RANSAC + ICP registration."""
         params = {}
 
         if "icp_max_correspondence_distance" not in fixed:
             params["icp_max_correspondence_distance"] = trial.suggest_float(
-                "icp_max_correspondence_distance", 0.05, 0.25
+                name="icp_max_correspondence_distance",
+                low=0.02,
+                high=0.10,
+                step=0.01,  # This needs to be checked against noise resolution levels
             )
 
         if "icp_max_iterations" not in fixed:
-            params["icp_max_iterations"] = trial.suggest_int("icp_max_iterations", 10, 100, step=10)
+            params["icp_max_iterations"] = trial.suggest_int(
+                name="icp_max_iterations", low=10, high=100, step=10
+            )
 
         if "voxel_size" not in fixed:
-            params["voxel_size"] = trial.suggest_float("voxel_size", 0.02, 0.10, step=0.01)
-
-        if "ransac_max_iterations" not in fixed:
-            params["ransac_max_iterations"] = trial.suggest_int(
-                "ransac_max_iterations", 10000, 200000, step=10000
+            params["voxel_size"] = trial.suggest_float(
+                name="voxel_size", low=0.02, high=0.10, step=0.01
             )
+
         return params
 
     def _get_prep_params_key(self) -> tuple:
