@@ -663,7 +663,8 @@ class BenchmarkArgs:
     dump_frames: bool = True
     # Sweep-only: estimator params forced to a fixed value in EVERY trial,
     # overriding whatever suggest_params proposed. This is how an A/B arm is
-    # declared -- e.g. --param-overrides front_face_max_angle_deg=60.0
+    # declared in a sweep -- e.g. --param-overrides front_face_max_angle_deg 60.0
+    # Note the syntax for tuple values e.g. : --param-overrides icp_refine_ladder "(0.05, 0.02, 0.01)"
     #
     # It exists because a sweep trial's params come from suggest_params alone
     # (see benchmark.py's objective); model.profile.params is consulted only on

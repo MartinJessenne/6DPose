@@ -7,7 +7,7 @@ import numpy as np
 import open3d as o3d
 
 if TYPE_CHECKING:
-    import optuna
+    pass
 
 
 class BasePoseEstimator(ABC):
@@ -50,13 +50,13 @@ class BasePoseEstimator(ABC):
         pass
 
     @classmethod
-    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
+    def suggest_params(cls, trial, fixed: frozenset[str] = frozenset()) -> dict[str, Any]:
         """
         Suggests hyperparameters for this matching method using an Optuna trial.
 
         Args:
             trial: The active Optuna trial.
-
+            fixed (frozenset[str]): Set of parameter names to keep fixed (not suggested during the sweep, and that override default values).
         Returns:
             dict[str, Any]: Suggested parameter dictionary.
 
@@ -130,9 +130,7 @@ def reorient_normals_to_reference(
     target.normals = o3d.utility.Vector3dVector(target_normals)
 
 
-def orient_normals_hoppe(
-    pcd: o3d.geometry.PointCloud, k: int = 30
-) -> o3d.geometry.PointCloud:
+def orient_normals_hoppe(pcd: o3d.geometry.PointCloud, k: int = 30) -> o3d.geometry.PointCloud:
     """
     Gives a point cloud a globally consistent, outward-pointing normal
     convention without using mesh topology. Returns a new cloud.

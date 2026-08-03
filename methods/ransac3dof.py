@@ -163,9 +163,7 @@ def export_front_face_glb(mesh, front_face: FrontFace, path: str, shaft_len: flo
     """
     scene = trimesh.Scene()
     scene.add_geometry(
-        trimesh.Trimesh(
-            vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.triangles)
-        )
+        trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.triangles))
     )
 
     # trimesh builds cylinders along +z, so rotate +z onto the arrow direction.
@@ -688,9 +686,9 @@ class Ransac3DoFEstimator(RansacEstimator):
         return T_projected
 
     @classmethod
-    def suggest_params(cls, trial: "optuna.Trial") -> dict[str, Any]:
+    def suggest_params(cls, trial, fixed: frozenset[str] = frozenset()) -> dict[str, Any]:
         """Suggests parameters for the SE(2)-constrained RANSAC + ICP registration."""
-        params = super().suggest_params(trial)
+        params = super().suggest_params(trial, fixed=fixed)
         params["edge_length_threshold"] = trial.suggest_float("edge_length_threshold", 0.8, 0.95)
         # First z-gate sweep pressed against the old 0.20 ceiling (19/20 top
         # trials above 0.15): the optimum lies higher, so give it headroom.

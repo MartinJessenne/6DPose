@@ -710,8 +710,9 @@ def resolve_param_overrides(
     reports it is testing something while running the control.
 
     Values arrive as strings from tyro and are parsed as Python literals, so
-    `front_face_max_angle_deg=60.0`, `voxel_size=0.04` and `z_offset=None` all land
-    as the right type; anything unparseable is kept as the raw string.
+    `front_face_max_angle_deg 60.0`, `voxel_size 0.04`, `z_offset None`,
+    `icp_refine_ladder "(0.05,0.02,0.01)` (note the syntax for tuple values)
+    all land as the right type; anything unparseable is kept as the raw string.
     """
     if not overrides:
         return {}
@@ -920,9 +921,7 @@ def run_parameter_sweep(
                 frame_records.extend(fr)
                 # Per-seed rate uses the same n_attempted denominator as the
                 # pooled metric, so the spread is comparable to the mean.
-                gross_yaw_rate_per_seed.append(
-                    compute_trial_metrics(em, t, df, pf).gross_yaw_rate
-                )
+                gross_yaw_rate_per_seed.append(compute_trial_metrics(em, t, df, pf).gross_yaw_rate)
 
             if dump_frames:
                 write_frame_records_csv(
@@ -1136,6 +1135,12 @@ def main():
             print(f"Pooled over {effective_n_seeds} internal RANSAC seeds: {internal_seeds}")
         print(f"Indices: {eval_indices}\n")
 
+        # Checking if --param-overrides has been wrongly used in this branch
+        if args.param_overrides:
+            raise ValueError(
+                "--param-overrides is only valid in sweep mode; it has no effect in evaluation mode. Set profile params directly instead, e.g. --model.profile.params.icp-visibility-cull"
+            )
+
         wandb_config = {
             **dataclasses.asdict(args.model.profile.params),
             "depth_trunc": args.model.profile.depth_trunc,
@@ -1210,7 +1215,9 @@ def main():
                 if np.isfinite(m.p95_latency_s)
                 else "  p95_latency_s           n/a      (no successful estimation)"
             )
-            print(f"  gross_yaw_rate          {m.gross_yaw_rate:.4f}   (|yaw| > {GROSS_YAW_DEG:g}°)")
+            print(
+                f"  gross_yaw_rate          {m.gross_yaw_rate:.4f}   (|yaw| > {GROSS_YAW_DEG:g}°)"
+            )
             print(f"  abstention_rate         {m.abstention_rate:.4f}   (no pose returned)")
             print(f"  detection_failure_rate  {m.detection_failure_rate:.4f}   (YOLO, upstream)")
             print("")

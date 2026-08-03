@@ -13,6 +13,7 @@ train/
 
 *.pth
 *.pt
+*.db
 
 /dataset/
 
@@ -38,3 +39,8 @@ wandb/
 # Sweep result databases: small enough to keep deliberately-committed ones
 # (see git history), but new sweep runs shouldn't get auto-added by accident.
 sweeps/*.db
+depth_image.py
+inspect_crop.py
+scratch/DIFF_WALKTHROUGH.md
+
+scratch
