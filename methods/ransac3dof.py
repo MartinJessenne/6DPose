@@ -1,19 +1,19 @@
 import copy
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated
 
 import numpy as np
 import open3d as o3d
 import trimesh
 
-from methods.base import orient_normals_hoppe, reorient_normals_to_reference
+from methods.base import SearchRange, orient_normals_hoppe, reorient_normals_to_reference
 from methods.constrained_ransac import constrained_ransac_se2, project_to_se2
 from methods.ransac import RansacEstimator, RansacParams
 from methods.se2_icp import icp_point_to_plane_se2, icp_translation_only
 
 if TYPE_CHECKING:
-    import optuna
+    pass
 
 # Below this many visible model points a refinement stage falls back to the full
 # model cloud: the pose is far enough from the scene that the visible set is not
@@ -278,19 +278,15 @@ class Ransac3DoFParams(RansacParams):
             FPFH correspondences. A sensor-noise property, so it is tuned
             independently of voxel_size (default 0.09 matches the previous
             voxel_size * 1.5 coupling at voxel_size 0.06).
-        edge_length_threshold: Edge-length similarity checker ratio for
-            RANSAC sample pairs (Open3D-equivalent, default 0.9).
+        edge_length_tolerance: Maximum absolute length difference (meters)
+            for RANSAC sample pairs (default 0.14m).
         ransac_confidence: Early-exit confidence for the RANSAC iteration
             bound.
         seed: Seed for the RANSAC random generator. Defaults to 0 so
-            benchmark sweeps (which build params from suggest_params alone,
-            bypassing the yaml) stay deterministic per trial; pass None
+            benchmark sweeps stay deterministic per trial; pass None
             explicitly for non-deterministic runs.
-        front_crop_depth: When set, register against only the front slab of
-            the CAD model (the `depth` meters nearest the +x face, i.e. the
-            towing face) instead of the full cart. The slab is asymmetric,
-            which disambiguates the 180-degree flip. None (default) uses the
-            full mesh.
+        front_crop_aspect: Aspect ratio divisor for towing face slab depth
+            (depth = l_y / front_crop_aspect). None uses the full mesh.
         front_face_max_angle_deg: Largest angle (degrees) permitted between the
             cart's outward towing-face arrow and the direction to the camera.
             None (the default) disables the constraint entirely, which is the
@@ -337,11 +333,14 @@ class Ransac3DoFParams(RansacParams):
     """
 
     z_offset: float | None = None
-    z_gate_threshold: float = 0.09
-    edge_length_threshold: float = 0.9
+    z_gate_threshold: Annotated[float, SearchRange(min=0.05, max=0.35)] = 0.09
+    edge_length_tolerance: float = 0.14
     ransac_confidence: float = 0.999
     seed: int | None = 0
-    front_crop_depth: float | None = None
+    front_crop_aspect: float | None = 2.0
+    # The five below are deliberately NOT searchable: each is an A/B arm's
+    # independent variable, set per-arm via --overrides or selected by profile.
+    # Letting Optuna tune one turns an on/off contrast into a nuisance parameter.
     front_face_max_angle_deg: float | None = None
     hoppe_normal_orientation: bool = False
     icp_visibility_cull: bool = False
@@ -366,17 +365,16 @@ class Ransac3DoFEstimator(RansacEstimator):
     camera frame (Z-forward) and the XY projection would be meaningless.
     """
 
+    params_cls = Ransac3DoFParams
     params: Ransac3DoFParams
 
     def __init__(
         self,
-        params: Ransac3DoFParams | dict | None = None,
+        params: Ransac3DoFParams | None = None,
         extrinsic: list | np.ndarray | None = None,
     ):
         if params is None:
             params = Ransac3DoFParams()
-        elif not isinstance(params, Ransac3DoFParams):
-            params = Ransac3DoFParams(**dict(params))
 
         if extrinsic is None:
             raise ValueError(
@@ -399,11 +397,11 @@ class Ransac3DoFEstimator(RansacEstimator):
         self._last_diagnostics: dict | None = None
 
     def _get_prep_params_key(self) -> tuple:
-        # front_crop_depth changes the prepared model representation, so it
+        # front_crop_aspect changes the prepared model representation, so it
         # must be part of the cache key alongside voxel_size.
         return (
             self.params.voxel_size,
-            self.params.front_crop_depth,
+            self.params.front_crop_aspect,
             self.params.hoppe_normal_orientation,
         )
 
@@ -429,9 +427,12 @@ class Ransac3DoFEstimator(RansacEstimator):
         # both stages should register against the same asymmetric geometry
         # instead of RANSAC seeing a crop while ICP falls back to the full,
         # near-symmetric cart.
-        if self.params.front_crop_depth is not None:
+        if self.params.front_crop_aspect is not None:
+            verts = np.asarray(mesh_copy.vertices)
+            l_y = float(verts[:, 1].max() - verts[:, 1].min())
+            crop_depth = l_y / self.params.front_crop_aspect
             try:
-                slab_mesh = crop_front_face(mesh_copy, depth=self.params.front_crop_depth)
+                slab_mesh = crop_front_face(mesh_copy, depth=crop_depth)
             except Exception:
                 slab_mesh = mesh_copy
         else:
@@ -456,12 +457,6 @@ class Ransac3DoFEstimator(RansacEstimator):
 
         # Then impose a real convention, on model_down itself.
         #
-        # Applying this to model_pc instead and letting the line above propagate
-        # signs downward loses most of the benefit -- measured as local sign
-        # coherence (fraction of near-parallel neighbours whose normals agree in
-        # sign; 0.5 is a coin flip):
-        #
-        #                            colruyt  leanflow  picanol
         #   mesh normals only          0.517     0.514    0.484
         #   hoppe on model_pc          0.783     0.769    0.705
         #   hoppe on model_down        0.953     0.988    0.982
@@ -518,8 +513,11 @@ class Ransac3DoFEstimator(RansacEstimator):
         # Only crop cad_mesh for lazy local fallback (when cart_type is None).
         # When cart_type is specified, prepare() has already cached the cropped
         # model geometry in _PREPARATION_CACHE, avoiding per-frame cropping overhead.
-        if cart_type is None and self.params.front_crop_depth is not None:
-            cad_mesh = crop_front_face(cad_mesh, self.params.front_crop_depth)
+        if cart_type is None and self.params.front_crop_aspect is not None:
+            verts = np.asarray(cad_mesh.vertices)
+            l_y = float(verts[:, 1].max() - verts[:, 1].min())
+            crop_depth = l_y / self.params.front_crop_aspect
+            cad_mesh = crop_front_face(cad_mesh, crop_depth)
 
         return super().estimate_pose(pcd, cad_mesh, cart_type=cart_type, **kwargs)
 
@@ -534,9 +532,8 @@ class Ransac3DoFEstimator(RansacEstimator):
             distance_threshold=distance_threshold,
             max_iterations=self.params.ransac_max_iterations,
             confidence=self.params.ransac_confidence,
-            z_offset=self._active_z_offset,
             z_gate_threshold=self.params.z_gate_threshold,
-            edge_length_threshold=self.params.edge_length_threshold,
+            edge_length_tolerance=self.params.edge_length_tolerance,
             # Short sample baselines give yaw hypotheses dominated by voxel
             # noise; require the 2 sampled model points to span a few voxels.
             min_sample_distance=3.0 * self.params.voxel_size,
@@ -683,37 +680,3 @@ class Ransac3DoFEstimator(RansacEstimator):
                 "the constrained RANSAC/ICP should never leave the planar manifold."
             )
         return T_projected
-
-    @classmethod
-    def suggest_params(
-        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
-    ) -> dict[str, Any]:
-        """Suggests parameters for the SE(2)-constrained RANSAC + ICP registration."""
-
-        # Here for documentation purposes it would be nice to list all the parameters that are suggested through the base class.
-        params = super().suggest_params(trial, fixed=fixed)
-
-        if "edge_length_threshold" not in fixed:
-            params["edge_length_threshold"] = trial.suggest_float(
-                "edge_length_threshold", 0.8, 0.95
-            )
-
-        # I'm wondering if 0.35 is too high,this has also to be checked against noise resolution levels.
-        if "z_gate_threshold" not in fixed:
-            params["z_gate_threshold"] = trial.suggest_float("z_gate_threshold", 0.05, 0.35)
-
-        # This will later be modified to be based on a fraction of the mesh to crop out
-        if "front_crop_depth" not in fixed:
-            params["front_crop_depth"] = trial.suggest_float("front_crop_depth", 0.1, 2.5)
-
-        # front_face_max_angle_deg is NOT suggested: it is the arm's independent
-        # variable, set per-arm via --param-overrides. A parameter Optuna sweeps
-        # but nothing contrasts is a tuned nuisance, not a controlled comparison.
-        #
-        # icp_visibility_cull / icp_refine_ladder / icp_yaw_guard_deg are left
-        # out for the same reason -- they are the arm's independent variables
-        # and are selected by profile (tuned-vis) so control and treatment differ
-        # by the profile token alone. icp_max_correspondence_distance IS swept
-        # (inherited from RansacEstimator) and should be re-swept once the cull
-        # lands: its current optimum was found against a biased objective.
-        return params

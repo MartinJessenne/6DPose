@@ -134,7 +134,7 @@ class TestPreparedModelNormals(unittest.TestCase):
 
     def prepared(self, voxel_size: float) -> dict:
         estimator = Ransac3DoFEstimator(
-            params=Ransac3DoFParams(voxel_size=voxel_size, front_crop_depth=None),
+            params=Ransac3DoFParams(voxel_size=voxel_size, front_crop_aspect=None),
             extrinsic=np.eye(4),
         )
         cart_type = f"unit_test_{voxel_size}"
@@ -147,9 +147,7 @@ class TestPreparedModelNormals(unittest.TestCase):
         for voxel_size in (0.02, 0.06):
             with self.subTest(voxel_size=voxel_size):
                 normals = np.asarray(self.prepared(voxel_size)["model_down"].normals)
-                np.testing.assert_allclose(
-                    np.linalg.norm(normals, axis=1), 1.0, atol=1e-9
-                )
+                np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1e-9)
 
     def test_all_model_normals_agree_with_the_mesh(self):
         for voxel_size in (0.02, 0.06):
@@ -162,9 +160,6 @@ class TestPreparedModelNormals(unittest.TestCase):
                 nearest = np.array(
                     [tree.search_knn_vector_3d(p, 1)[1][0] for p in np.asarray(down.points)]
                 )
-                dots = np.einsum(
-                    "ij,ij->i", np.asarray(down.normals), dense_normals[nearest]
-                )
+                dots = np.einsum("ij,ij->i", np.asarray(down.normals), dense_normals[nearest])
 
                 self.assertTrue(np.all(dots >= 0.0))
-

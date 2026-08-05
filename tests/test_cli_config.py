@@ -14,11 +14,14 @@ import tyro
 
 from cli_config import (
     CameraConfig,
+    Command,
     DatasetConfig,
+    EvalArgs,
     ModelPreset,
     PPFPreset,
     Ransac3DoFPreset,
     RansacPreset,
+    SweepArgs,
     VSACSe2Preset,
     YoloConfig,
 )
@@ -184,8 +187,8 @@ class TestRansac3DoFProfiles(unittest.TestCase):
         self.assertEqual(p.icp_max_iterations, 100)
         self.assertEqual(p.z_offset, 0.01)
         self.assertEqual(p.z_gate_threshold, 0.09)
-        self.assertEqual(p.edge_length_threshold, 0.9)
-        self.assertEqual(p.front_crop_depth, 0.35)
+        self.assertEqual(p.edge_length_tolerance, 0.14)
+        self.assertEqual(p.front_crop_aspect, 2.0)
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
 
@@ -199,8 +202,8 @@ class TestRansac3DoFProfiles(unittest.TestCase):
         self.assertEqual(p.icp_max_iterations, 70)
         self.assertEqual(p.z_offset, 0.01)
         self.assertEqual(p.z_gate_threshold, 0.30986258444115694)
-        self.assertEqual(p.edge_length_threshold, 0.85427888273254)
-        self.assertEqual(p.front_crop_depth, 0.8092762136127303)
+        self.assertEqual(p.edge_length_tolerance, 0.14)
+        self.assertEqual(p.front_crop_aspect, 2.0)
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
 
@@ -214,58 +217,15 @@ class TestRansac3DoFProfiles(unittest.TestCase):
         self.assertEqual(p.icp_max_iterations, 10)
         self.assertEqual(p.z_offset, 0.01)
         self.assertEqual(p.z_gate_threshold, 0.1343018655763445)
-        self.assertEqual(p.edge_length_threshold, 0.826763881996128)
-        self.assertEqual(p.front_crop_depth, 1.5094694353528446)
+        self.assertEqual(p.edge_length_tolerance, 0.14)
+        self.assertEqual(p.front_crop_aspect, 2.0)
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
 
 
-class TestRansac3DoFFullMeshProfiles(unittest.TestCase):
-    def test_default(self):
-        r = _select("ransac3dof-fullmesh", "profile:default")
-        self.assertEqual(r.profile.depth_trunc, 3.0)
-        p = r.profile.params
-        self.assertEqual(p.z_offset, 0.01)
-        self.assertIsNone(p.front_crop_depth)
-
-    def test_acc_opt_matches_trial25(self):
-        r = _select("ransac3dof-fullmesh", "profile:acc-opt")
-        self.assertEqual(r.profile.depth_trunc, 3.0)
-        p = r.profile.params
-        self.assertEqual(p.voxel_size, 0.04)
-        self.assertEqual(p.ransac_max_iterations, 39267)
-        self.assertEqual(p.icp_max_correspondence_distance, 0.07851111384977721)
-        self.assertEqual(p.icp_max_iterations, 40)
-        self.assertEqual(p.z_offset, 0.01)
-        self.assertEqual(p.z_gate_threshold, 0.3186998846185683)
-        self.assertEqual(p.edge_length_threshold, 0.8389466396574985)
-        self.assertIsNone(p.front_crop_depth)
-
-    def test_rt_opt_matches_trial34(self):
-        r = _select("ransac3dof-fullmesh", "profile:rt-opt")
-        self.assertEqual(r.profile.depth_trunc, 4.1)
-        p = r.profile.params
-        self.assertEqual(p.voxel_size, 0.06)
-        self.assertEqual(p.ransac_max_iterations, 2847)
-        self.assertEqual(p.icp_max_correspondence_distance, 0.08274659221521605)
-        self.assertEqual(p.icp_max_iterations, 50)
-        self.assertEqual(p.z_offset, 0.01)
-        self.assertEqual(p.z_gate_threshold, 0.17182370500647015)
-        self.assertEqual(p.edge_length_threshold, 0.8556119078087416)
-        self.assertIsNone(p.front_crop_depth)
-
-
 class TestVSACSe2Profiles(unittest.TestCase):
     """
-    VSACSe2ProfileSelect has only 2 arms (default, bare) instead of the usual
-    3+ specifically because Python's typing.Union[X] collapses a single-member
-    Union down to bare X, which silently breaks tyro's subcommand dispatch --
-    confirmed by testing: model.profile:default stopped being an accepted
-    token, and even without a token the field fell back to VSACSe2Params()'s
-    unmeasured class defaults instead of the subcommand's specified default.
-    "bare" exists to keep this a real 2-member Union, not as filler; these
-    tests exist to catch that regression if the Union is ever "simplified"
-    back down to one arm.
+    VSACSe2ProfileSelect has multiple arms (default, bare, tuned, etc.).
     """
 
     def test_default_matches_ransac3dof_default(self):
@@ -273,7 +233,7 @@ class TestVSACSe2Profiles(unittest.TestCase):
         self.assertEqual(r.profile.depth_trunc, 3.0)
         p = r.profile.params
         self.assertEqual(p.z_offset, 0.01)
-        self.assertEqual(p.front_crop_depth, 0.35)
+        self.assertEqual(p.front_crop_aspect, 2.0)
         self.assertEqual(p.rho, 0.3)
 
     def test_bare_uses_unmeasured_class_defaults(self):
@@ -281,8 +241,22 @@ class TestVSACSe2Profiles(unittest.TestCase):
         self.assertEqual(r.profile.depth_trunc, 3.0)
         p = r.profile.params
         self.assertIsNone(p.z_offset)
-        self.assertIsNone(p.front_crop_depth)
+        self.assertEqual(p.front_crop_aspect, 2.0)
         self.assertEqual(p.rho, 0.3)
+
+
+class TestCommandSubcommands(unittest.TestCase):
+    def test_eval_subcommand_parses_eval_args(self):
+        args = tyro.cli(Command, args=["eval", "model:vsac3dof", "model.profile:tuned"])
+        self.assertIsInstance(args, EvalArgs)
+
+    def test_sweep_subcommand_parses_sweep_args(self):
+        args = tyro.cli(
+            Command,
+            args=["sweep", "--trials", "50", "model:vsac3dof", "model.profile:tuned"],
+        )
+        self.assertIsInstance(args, SweepArgs)
+        self.assertEqual(args.trials, 50)
 
 
 if __name__ == "__main__":

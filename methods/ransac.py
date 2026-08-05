@@ -1,27 +1,29 @@
 import copy
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import numpy as np
 import open3d as o3d
 
 from methods.base import (
+    BaseParams,
     BasePoseEstimator,
+    SearchRange,
     prepare_scene_point_cloud,
     refine_pose_dual_hypothesis,
     reorient_normals_to_reference,
 )
 
 if TYPE_CHECKING:
-    import optuna
+    pass
 
 
 # =====================================================================
 # 1. PARAMETER CLASS
 # =====================================================================
 @dataclass(frozen=True)
-class RansacParams:
+class RansacParams(BaseParams):
     """Hyperparameters specific to the FPFH + RANSAC + ICP matching method.
 
     Attributes:
@@ -33,8 +35,8 @@ class RansacParams:
 
     voxel_size: float = 0.06
     ransac_max_iterations: int = 100000
-    icp_max_correspondence_distance: float = 0.15
-    icp_max_iterations: int = 100
+    icp_max_correspondence_distance: Annotated[float, SearchRange(min=0.01, max=0.25)] = 0.15
+    icp_max_iterations: int = 100  # Pinned (not swept)
 
 
 # =====================================================================
@@ -43,52 +45,17 @@ class RansacParams:
 class RansacEstimator(BasePoseEstimator):
     """6D Pose Estimator using FPFH features, RANSAC Global Registration, and Dual ICP refinement."""
 
-    def __init__(self, params: RansacParams | dict = None, extrinsic: list | np.ndarray = None):
+    params_cls = RansacParams  # Associate the parameter dataclass with this estimator
+
+    def __init__(self, params: RansacParams | None = None, extrinsic: np.ndarray | None = None):
         """
         Initializes the RANSAC + ICP Estimator with matching parameters.
 
         Args:
             params (RansacParams, optional): Dedicated parameters. If None, uses defaults.
         """
-        if params is not None:
-            if not isinstance(params, RansacParams):
-                self.params = RansacParams(**dict(params))
-            else:
-                self.params = params
-        else:
-            self.params = RansacParams()
-
-        if extrinsic is not None:
-            self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
-        else:
-            self.extrinsic = None
-
-    @classmethod
-    def suggest_params(
-        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
-    ) -> dict[str, Any]:
-        """Suggests parameters for RANSAC + ICP registration."""
-        params = {}
-
-        if "icp_max_correspondence_distance" not in fixed:
-            params["icp_max_correspondence_distance"] = trial.suggest_float(
-                name="icp_max_correspondence_distance",
-                low=0.02,
-                high=0.10,
-                step=0.01,  # This needs to be checked against noise resolution levels
-            )
-
-        if "icp_max_iterations" not in fixed:
-            params["icp_max_iterations"] = trial.suggest_int(
-                name="icp_max_iterations", low=10, high=100, step=10
-            )
-
-        if "voxel_size" not in fixed:
-            params["voxel_size"] = trial.suggest_float(
-                name="voxel_size", low=0.02, high=0.10, step=0.01
-            )
-
-        return params
+        self.params = params or RansacParams()
+        self.extrinsic = np.asarray(extrinsic, dtype=np.float64) if extrinsic is not None else None
 
     def _get_prep_params_key(self) -> tuple:
         """Returns only the parameters affecting offline preparation."""

@@ -128,8 +128,12 @@ def main() -> int:
             if not instance_detected(result):
                 continue
             cart_type, pcd, _ = process_and_reconstruct(
-                row["rgb"], row["depth"], result, camera,
-                depth_trunc=args.model.profile.depth_trunc, return_frame=True,
+                row["rgb"],
+                row["depth"],
+                result,
+                camera,
+                depth_trunc=args.model.profile.depth_trunc,
+                return_frame=True,
             )
             mesh = meshes[cart_type]
             t_wc = np.asarray(row["camera_view_transform"], dtype=float).reshape(4, 4).T
@@ -164,9 +168,7 @@ def main() -> int:
 
             z_off = -float(np.asarray(mesh.vertices)[:, 2].min())
             if n_mutual:
-                dz = np.abs(
-                    scene_pts[corr[:, 1], 2] - model_pts[corr[:, 0], 2] - z_off
-                )
+                dz = np.abs(scene_pts[corr[:, 1], 2] - model_pts[corr[:, 0], 2] - z_off)
                 gated = corr[dz < estimator.params.z_gate_threshold]
             else:
                 gated = corr
@@ -225,8 +227,10 @@ def main() -> int:
     # SE(2) minimal solver consumes two, so below that the pose is unreachable at
     # any budget. Reported at all three tolerances, because which one you pick
     # changes the answer -- and that sensitivity is itself the result.
-    print(f"\n{'tolerance':<14} {'metres':>7} {'n_ok med':>9} {'w med':>7} "
-          f"{'iters med':>11} {'frames >=2':>11} {'over budget':>12}")
+    print(
+        f"\n{'tolerance':<14} {'metres':>7} {'n_ok med':>9} {'w med':>7} "
+        f"{'iters med':>11} {'frames >=2':>11} {'over budget':>12}"
+    )
     for label, metres, ok, ww, nd in (
         ("scorer 1.5v", tau, ok_all, w_all, need_all),
         ("absolute", TAU_ABS, ok_abs_all, None, None),
@@ -235,8 +239,10 @@ def main() -> int:
         w_s = f"{np.median(ww):7.3f}" if ww is not None else f"{'-':>7}"
         n_s = f"{np.median(nd):11,.0f}" if nd is not None else f"{'-':>11}"
         ob_s = f"{int((nd > budget).sum()):5d} /{len(rows):3d}" if nd is not None else f"{'-':>12}"
-        print(f"{label:<14} {metres:7.3f} {np.median(ok):9.0f} {w_s} {n_s} "
-              f"{int((ok >= 2).sum()):5d} /{len(rows):3d} {ob_s}")
+        print(
+            f"{label:<14} {metres:7.3f} {np.median(ok):9.0f} {w_s} {n_s} "
+            f"{int((ok >= 2).sum()):5d} /{len(rows):3d} {ob_s}"
+        )
     return 0
 
 

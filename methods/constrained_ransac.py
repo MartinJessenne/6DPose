@@ -166,6 +166,12 @@ def se2_to_se3(theta: float, t_xy: np.ndarray, z: float = 0.0) -> np.ndarray:
         ]
     )
     T[0, 3], T[1, 3], T[2, 3] = t_xy[0], t_xy[1], z
+    R = T[:3, :3]
+    assert np.linalg.norm(R.T @ R - np.eye(3)) < 1e-6, "Rotation matrix orthogonality check failed"
+    assert np.abs(np.linalg.det(R) - 1.0) < 1e-6, "Rotation matrix determinant must be +1"
+    assert abs(R[2, 0]) < 1e-6 and abs(R[2, 1]) < 1e-6 and abs(R[2, 2] - 1.0) < 1e-6, (
+        "SE(2) Z-axis alignment failed"
+    )
     return T
 
 
@@ -195,14 +201,14 @@ def _sample_and_validate_pair(
     model_points: np.ndarray,
     scene_points: np.ndarray,
     min_sample_distance: float,
-    edge_length_threshold: float,
+    edge_length_tolerance: float,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """
     Draws 2 random correspondence pairs and validates their geometric consistency.
 
     Rejects candidate pairs whose model-point baseline is too small (< min_sample_distance)
-    or whose model vs. scene segment lengths disagree significantly (edge length test).
+    or whose model vs. scene segment lengths disagree by more than edge_length_tolerance.
 
     Returns:
         (p1, p2, q1, q2) 2D point pairs if valid, or None if rejected.
@@ -223,9 +229,9 @@ def _sample_and_validate_pair(
     if len_p < max(1e-9, min_sample_distance):
         return None
 
-    # 2. Edge-length ratio test (equivalent to Open3D CorrespondenceCheckerBasedOnEdgeLength):
-    # Rigid bodies preserve distances between points. If length in model differs from scene, reject.
-    if min(len_p, len_q) / max(len_p, len_q) < edge_length_threshold:
+    # 2. Edge-length absolute tolerance test (rigid bodies preserve distance):
+    # If model distance and scene distance differ by more than edge_length_tolerance (e.g. 0.14m), reject.
+    if abs(len_p - len_q) > edge_length_tolerance:
         return None
 
     return p1, p2, q1, q2
@@ -247,7 +253,7 @@ def constrained_ransac_se2(
     confidence: float = 0.999,
     z_offset: float = 0.0,  # height of model origin above ground plane
     z_gate_threshold: float | None = None,
-    edge_length_threshold: float = 0.9,
+    edge_length_tolerance: float = 0.14,
     min_sample_distance: float = 0.0,
     scoring_subsample_size: int = 100,
     rng: np.random.Generator | None = None,
@@ -338,7 +344,7 @@ def constrained_ransac_se2(
             model_points,
             scene_points,
             min_sample_distance,
-            edge_length_threshold,
+            edge_length_tolerance,
             rng,
         )
         if pair is None:

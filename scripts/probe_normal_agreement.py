@@ -99,8 +99,10 @@ def main() -> int:
     voxel = estimator.params.voxel_size
     tau = voxel * 1.5
     print(f"voxel_size={voxel}  tau={tau:.3f}")
-    print(f"\n{'split':11} {'cart':9} {'n_pos_gt':>9} {'keep_gt':>8} "
-          f"{'n_pos_flip':>11} {'keep_flip':>10}")
+    print(
+        f"\n{'split':11} {'cart':9} {'n_pos_gt':>9} {'keep_gt':>8} "
+        f"{'n_pos_flip':>11} {'keep_flip':>10}"
+    )
     print("-" * 62)
 
     keep_gts, keep_flips, pos_ratio = [], [], []
@@ -113,8 +115,12 @@ def main() -> int:
             if not instance_detected(result):
                 continue
             cart_type, pcd, _ = process_and_reconstruct(
-                row["rgb"], row["depth"], result, camera,
-                depth_trunc=args.model.profile.depth_trunc, return_frame=True,
+                row["rgb"],
+                row["depth"],
+                result,
+                camera,
+                depth_trunc=args.model.profile.depth_trunc,
+                return_frame=True,
             )
             t_wc = np.asarray(row["camera_view_transform"], dtype=float).reshape(4, 4).T
             t_wk = np.asarray(row["bbox_3d_transform"][0], dtype=float).reshape(4, 4).T
@@ -164,8 +170,10 @@ def main() -> int:
     print(f"keep at ground truth   median {np.nanmedian(kg):.3f}")
     print(f"keep at 180-deg twin   median {np.nanmedian(kf):.3f}")
     print(f"separation (gt - flip) median {np.nanmedian(kg - kf):+.3f}")
-    print(f"positional inliers, flip/gt ratio  median {np.median(pos_ratio):.3f}"
-          "   (~1.0 = positional scoring is blind, which is the premise)")
+    print(
+        f"positional inliers, flip/gt ratio  median {np.median(pos_ratio):.3f}"
+        "   (~1.0 = positional scoring is blind, which is the premise)"
+    )
     return 0
 
 

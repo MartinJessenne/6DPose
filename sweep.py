@@ -1,3 +1,4 @@
+import dataclasses
 import os
 
 import numpy as np
@@ -7,7 +8,7 @@ import plotly.graph_objects as go
 
 import wandb
 from evaluation import derive_internal_seeds, draw_eval_indices, evaluate_pipeline
-from methods.base import BasePoseEstimator
+from methods.base import BaseParams, BasePoseEstimator
 from metrics import (
     FrameRecord,
     PoseErrorMetrics,
@@ -28,15 +29,15 @@ def run_parameter_sweep(
     camera,
     study_name,
     estimator_cls: type[BasePoseEstimator],
+    profile_params: BaseParams,
     sweep_size: int,
     n_trials: int,
     meshes: dict[str, o3d.geometry.TriangleMesh],
     yolo_cfg,
     dataset_cfg,
-    extrinsic: np.ndarray = None,
-    seed: int = None,
+    extrinsic: np.ndarray | None = None,
+    seed: int | None = None,
     n_seeds: int = 1,
-    supports_seed: bool = True,
     dump_frames: bool = True,
     param_overrides: dict | None = None,
 ):
@@ -45,16 +46,13 @@ def run_parameter_sweep(
     to find the Pareto Front of optimal accuracy vs. speed trade-offs.
 
     n_seeds: number of estimator-internal RANSAC seeds each trial is pooled
-    over (see derive_internal_seeds). supports_seed: whether the chosen
-    estimator's params dataclass actually has a `seed` field to vary --
-    when False, n_seeds is ignored (nothing to vary) rather than silently
-    re-running identical repeats. dump_frames: write each trial's per-frame
+    over (see derive_internal_seeds). dump_frames: write each trial's per-frame
     CSV (see FrameRecord) under sweeps/<study_name>_frames/.
     param_overrides: estimator params pinned for every trial, declaring the arm
     (see BenchmarkArgs.param_overrides). Validated here, before any compute, so a
     typo cannot turn a treatment arm into a silent second copy of the control.
     """
-    resolved_overrides = resolve_param_overrides(estimator_cls, extrinsic, param_overrides)
+    resolved_overrides = resolve_param_overrides(estimator_cls, param_overrides)
     if resolved_overrides:
         print(f"Parameter overrides pinned for every trial: {resolved_overrides}")
 
@@ -127,13 +125,6 @@ def run_parameter_sweep(
     np.random.seed(seed)
     o3d.utility.random.seed(seed)
 
-    if n_seeds > 1 and not supports_seed:
-        print(
-            f"Note: {estimator_cls.__name__}'s params have no 'seed' field; "
-            "--n-seeds > 1 has no effect for this estimator, running each trial once."
-        )
-    effective_n_seeds = n_seeds if supports_seed else 1
-
     # ONE W&B run for this whole sweep (1 CLI execution <-> 1 run), not one per
     # trial -- a 200-trial sweep would otherwise flood the workspace with 200
     # separate run pages. Each trial logs into the SAME run at step=trial.number,
@@ -153,24 +144,12 @@ def run_parameter_sweep(
             # 1. Suggest global parameters
             depth_trunc = trial.suggest_float("depth_trunc", 2.0, 7.0, step=0.1)
 
-            # 2. Dynamically suggest model-specific parameters, then force the
-            # arm's fixed parameters on top. The overrides go LAST so a value
-            # that is also swept cannot drift away from the declared arm.
-            suggested_params = {
-                **estimator_cls.suggest_params(trial, fixed=frozenset(resolved_overrides)),
-                **resolved_overrides,
-            }
-
             # 3. Evaluate across effective_n_seeds estimator-internal RANSAC
             # seeds and pool the resulting frames together (rather than
             # sampling `seed` as its own Optuna dimension -- see
             # derive_internal_seeds), so the search is robust to seed luck
             # instead of resting on a single, possibly-lucky draw.
-            trial_seeds = (
-                derive_internal_seeds(seed, effective_n_seeds, salt=trial.number)
-                if supports_seed
-                else [None]
-            )
+            trial_seeds = derive_internal_seeds(seed, n_seeds, salt=trial.number)
 
             error_metrics: list[PoseErrorMetrics] = []
             times: list[float] = []
@@ -179,15 +158,21 @@ def run_parameter_sweep(
             pose_failed = 0
             gross_yaw_rate_per_seed = []
 
+            trial_params = estimator_cls.params_cls.sample_optuna(
+                trial, base=profile_params, fixed=resolved_overrides
+            ).with_overrides(**resolved_overrides)
+
             for seed_i in trial_seeds:
                 params_i = (
-                    {**suggested_params, "seed": seed_i} if seed_i is not None else suggested_params
+                    dataclasses.replace(trial_params, seed=seed_i)
+                    if seed_i is not None
+                    else trial_params
                 )
                 trial_estimator = estimator_cls(params=params_i, extrinsic=extrinsic)
 
                 # Offline CAD mesh preparation (voxelization, normals, and FPFH/PPF
                 # database generation). Cached per (class, cart_type, voxel_size,
-                # front_crop_depth) -- seed isn't part of that key, so repeats hit
+                # front_crop_aspect) -- seed isn't part of that key, so repeats hit
                 # the cache instead of recomputing, and offline prep costs stay off
                 # the timed online pose estimation latency metric either way.
                 for cart_type, mesh in meshes.items():
@@ -242,7 +227,7 @@ def run_parameter_sweep(
             # instead of a single point.
             run.log(
                 {
-                    **suggested_params,
+                    **dataclasses.asdict(trial_params),
                     "depth_trunc": depth_trunc,
                     # --- the five ---
                     "pose_ar": m.pose_ar,
@@ -262,6 +247,11 @@ def run_parameter_sweep(
                 },
                 step=trial.number,
             )
+
+            if m.abstention_rate == 1.0:
+                raise optuna.TrialPruned(
+                    f"Trial {trial.number} abstained on every frame, skipping."
+                )
 
             return m.pose_ar, m.p95_latency_s
 
@@ -334,8 +324,8 @@ def run_parameter_sweep(
     print(f"Found {len(study.best_trials)} optimal trade-off trials on the Pareto Front:")
     for _, trial in enumerate(study.best_trials):
         print(f"\n[Trial {trial.number}]")
-        print(f"  - Accuracy Loss (1-AR):  {trial.values[0]:.4f}")
-        print(f"  - p95 Execution Time:    {trial.values[1]:.4f}s")
+        print(f"  - pose_ar:  {trial.values[0]:.4f} (↑ better)")
+        print(f"  - p95 Execution Time:    {trial.values[1]:.4f}s (↓ faster)")
         print("  - Hyperparameters:")
         for name, val in trial.params.items():
             print(f"    * {name}: {val}")

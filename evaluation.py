@@ -11,7 +11,7 @@ import open3d as o3d
 from datasets import Dataset
 
 from methods.base import BasePoseEstimator
-from metrics import FrameRecord, GROSS_YAW_DEG, PoseErrorMetrics, extract_pose_errors
+from metrics import GROSS_YAW_DEG, FrameRecord, PoseErrorMetrics, extract_pose_errors
 from pipeline import (
     Camera,
     compute_ground_truth_pose,

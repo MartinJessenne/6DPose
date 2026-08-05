@@ -109,8 +109,10 @@ def main() -> int:
         return 1
     only_c, only_t = set(ctrl) - set(treat), set(treat) - set(ctrl)
     if only_c or only_t:
-        print(f"WARNING: {len(only_c)} frames only in control, {len(only_t)} only in "
-              f"treatment -- dropped. The arms did not evaluate the same set.")
+        print(
+            f"WARNING: {len(only_c)} frames only in control, {len(only_t)} only in "
+            f"treatment -- dropped. The arms did not evaluate the same set."
+        )
 
     def rate(d):
         tot = sum(len(v) for k, v in d.items() if k in shared)
@@ -151,10 +153,14 @@ def main() -> int:
     report("PER EVALUATION (frame x seed, correlated -- p is optimistic)", be, ce, n_eval)
 
     # --- what actually changed ---
-    print(f"\nfixed   ({len(flipped_to_good)}): "
-          f"{Counter(carts.get(i, '?') for i in flipped_to_good).most_common()}")
-    print(f"broken  ({len(flipped_to_bad)}): "
-          f"{Counter(carts.get(i, '?') for i in flipped_to_bad).most_common()}")
+    print(
+        f"\nfixed   ({len(flipped_to_good)}): "
+        f"{Counter(carts.get(i, '?') for i in flipped_to_good).most_common()}"
+    )
+    print(
+        f"broken  ({len(flipped_to_bad)}): "
+        f"{Counter(carts.get(i, '?') for i in flipped_to_bad).most_common()}"
+    )
 
     if flipped_to_bad:
         print("\nregressed frames (sample_idx, cart, control -> treatment outcomes):")

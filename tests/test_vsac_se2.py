@@ -6,7 +6,7 @@ from scipy.spatial import cKDTree
 from methods.constrained_ransac import se2_to_se3
 from methods.vsac_se2 import (
     MatchedNpPointClouds,
-    VsacParams,
+    VsacConfig,
     count_independent_inliers,
     prosac_pairs,
     score_msac,
@@ -50,7 +50,9 @@ class TestIndependentInliers(unittest.TestCase):
         n_indep_clustered = count_independent_inliers(
             inlier_mask=mask_all, model_points_2d=clustered_pts, rho=0.3
         )
-        self.assertEqual(n_indep_clustered, 1, "Tight 5cm cluster should collapse to 1 independent point")
+        self.assertEqual(
+            n_indep_clustered, 1, "Tight 5cm cluster should collapse to 1 independent point"
+        )
 
         # 2. Grid of 100 points spaced 0.5m apart
         x = np.linspace(0, 4.5, 10)
@@ -61,7 +63,9 @@ class TestIndependentInliers(unittest.TestCase):
         n_indep_spread = count_independent_inliers(
             inlier_mask=mask_all, model_points_2d=spread_pts, rho=0.3
         )
-        self.assertEqual(n_indep_spread, 100, "Points spaced 0.5m apart (rho=0.3m) should all be independent")
+        self.assertEqual(
+            n_indep_spread, 100, "Points spaced 0.5m apart (rho=0.3m) should all be independent"
+        )
 
     def test_empty_mask_returns_zero(self):
         pts = np.zeros((50, 2))
@@ -104,7 +108,7 @@ class TestVsacSe2(unittest.TestCase):
             model_fpfh=model_fpfh,
             scene_fpfh=scene_fpfh,
         )
-        params = VsacParams(
+        params = VsacConfig(
             distance_threshold=0.01,
             max_iterations=2000,
             z_offset=z_offset,
@@ -140,9 +144,7 @@ class TestVsacSe2(unittest.TestCase):
         # group. Small per-corner jitter keeps each corner one independent
         # cluster (well under rho) without making same-corner pairs unusable.
         corners = np.array([[0.5, 0.5], [-0.5, 0.5], [0.5, -0.5], [-0.5, -0.5]])
-        spread_xy = np.repeat(corners, 4, axis=0) + rng.normal(
-            scale=0.005, size=(16, 2)
-        )
+        spread_xy = np.repeat(corners, 4, axis=0) + rng.normal(scale=0.005, size=(16, 2))
         spread_model = np.column_stack([spread_xy, np.zeros(16)])
 
         # "Clustered" group: same point count (16), all within one small
@@ -180,7 +182,7 @@ class TestVsacSe2(unittest.TestCase):
             model_fpfh=model_fpfh,
             scene_fpfh=scene_fpfh,
         )
-        params = VsacParams(
+        params = VsacConfig(
             distance_threshold=0.03,
             max_iterations=3000,
             min_sample_distance=0.003,
@@ -213,7 +215,7 @@ class TestVsacSe2(unittest.TestCase):
                 model_fpfh=model_fpfh,
                 scene_fpfh=scene_fpfh,
             )
-            params = VsacParams(
+            params = VsacConfig(
                 distance_threshold=0.01,
                 max_iterations=1000,
                 z_offset=z_offset,
@@ -231,7 +233,7 @@ class TestVsacSe2(unittest.TestCase):
             model_fpfh=np.ones((1, 33)),
             scene_fpfh=np.ones((1, 33)),
         )
-        params = VsacParams(distance_threshold=0.01, max_iterations=10)
+        params = VsacConfig(distance_threshold=0.01, max_iterations=10)
         result = vsac_se2(pt_clouds, params)
         self.assertEqual(result.fitness, 0.0)
         np.testing.assert_array_equal(result.transformation, np.eye(4))
@@ -259,7 +261,7 @@ class TestRandomModelRejection(unittest.TestCase):
             model_fpfh=model_fpfh,
             scene_fpfh=scene_fpfh,
         )
-        params = VsacParams(
+        params = VsacConfig(
             distance_threshold=0.01,
             max_iterations=100,
             z_gate_threshold=100.0,  # wide z-gate so correspondences pass gate
@@ -306,7 +308,9 @@ class TestNormalConsistencyIsAsymmetric(unittest.TestCase):
         tree = cKDTree(pts)
 
         q_agree, fit_agree, mask_agree, _ = score_msac(
-            pts, tree, tau=0.02,
+            pts,
+            tree,
+            tau=0.02,
             transformed_model_normals=normals,
             scene_normals=normals,
         )
@@ -314,7 +318,9 @@ class TestNormalConsistencyIsAsymmetric(unittest.TestCase):
         # meaningful case instead: the model face now covering this surface is
         # the opposite one, whose outward normal points away from the sensor.
         q_oppose, fit_oppose, mask_oppose, _ = score_msac(
-            pts, tree, tau=0.02,
+            pts,
+            tree,
+            tau=0.02,
             transformed_model_normals=-normals,
             scene_normals=normals,
         )
@@ -334,12 +340,16 @@ class TestNormalConsistencyIsAsymmetric(unittest.TestCase):
         tree = cKDTree(pts)
 
         _, fit_correct, _, _ = score_msac(
-            pts, tree, tau=0.02,
+            pts,
+            tree,
+            tau=0.02,
             transformed_model_normals=model_normals,
             scene_normals=scene_normals,
         )
         _, fit_flipped, _, _ = score_msac(
-            pts, tree, tau=0.02,
+            pts,
+            tree,
+            tau=0.02,
             transformed_model_normals=self._rotate_z(model_normals, 180.0),
             scene_normals=scene_normals,
         )
@@ -358,7 +368,7 @@ class TestNormalConsistencyIsAsymmetric(unittest.TestCase):
             model_normals=None,
             scene_normals=None,
         )
-        params = VsacParams(distance_threshold=0.05, max_iterations=50, normal_consistency=True)
+        params = VsacConfig(distance_threshold=0.05, max_iterations=50, normal_consistency=True)
         vsac_se2(clouds, params, rng=np.random.default_rng(0))  # must not raise
 
 

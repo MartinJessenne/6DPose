@@ -58,8 +58,11 @@ SPLITS = ("test", "validation", "train")
 # Cargo is geometry present in the scene cloud and absent from the CAD, so it is
 # unexplained under any scene->model objective -- worth tracking as its own axis.
 LOADED = {
-    ("test", 63), ("test", 77), ("validation", 90),
-    ("train", 40), ("train", 61),
+    ("test", 63),
+    ("test", 77),
+    ("validation", 90),
+    ("train", 40),
+    ("train", 61),
 }
 BARE_LEANFLOW = {("validation", 65)}
 
@@ -95,10 +98,12 @@ def main() -> int:
     overrides = resolve_param_overrides(estimator_cls, extrinsic, args.param_overrides)
     params = type(args.model.profile.params)(**{**vars(args.model.profile.params), **overrides})
 
-    print(f"profile params: voxel_size={params.voxel_size} "
-          f"front_crop_depth={params.front_crop_depth} "
-          f"z_gate={params.z_gate_threshold} iters={params.ransac_max_iterations} "
-          f"depth_trunc={args.model.profile.depth_trunc}")
+    print(
+        f"profile params: voxel_size={params.voxel_size} "
+        f"front_crop_aspect={getattr(params, 'front_crop_aspect', None)} "
+        f"z_gate={params.z_gate_threshold} iters={params.ransac_max_iterations} "
+        f"depth_trunc={args.model.profile.depth_trunc}"
+    )
     print(f"overrides: {overrides or '{}'}\n")
 
     model = load_hf_model(
@@ -130,17 +135,25 @@ def main() -> int:
         for rec in records:
             e = entries[rec.sample_idx]
             key = (split, e["index"])
-            rows.append((
-                split, e["index"], e["cart_type"], e["bearing_deg"], e["range_m"],
-                key in LOADED, rec.outcome,
-            ))
+            rows.append(
+                (
+                    split,
+                    e["index"],
+                    e["cart_type"],
+                    e["bearing_deg"],
+                    e["range_m"],
+                    key in LOADED,
+                    rec.outcome,
+                )
+            )
 
-    print(f"{'split':11} {'idx':>4} {'cart':9} {'bearing':>8} {'range':>6} "
-          f"{'cargo':>6}  outcome")
+    print(f"{'split':11} {'idx':>4} {'cart':9} {'bearing':>8} {'range':>6} {'cargo':>6}  outcome")
     print("-" * 66)
     for r in sorted(rows, key=lambda r: abs(r[3])):
-        print(f"{r[0]:11} {r[1]:4d} {r[2]:9} {r[3]:+8.2f} {r[4]:6.2f} "
-              f"{'boxes' if r[5] else 'bare':>6}  {r[6]}")
+        print(
+            f"{r[0]:11} {r[1]:4d} {r[2]:9} {r[3]:+8.2f} {r[4]:6.2f} "
+            f"{'boxes' if r[5] else 'bare':>6}  {r[6]}"
+        )
 
     print("\n" + "=" * 66)
     print("OVERALL          ", partition([r[6] for r in rows]))

@@ -44,6 +44,7 @@ CLI Configuration Overrides:
   --model.profile.depth-trunc <value>      Override the chosen profile's depth truncation.
 """
 
+import contextlib
 import dataclasses
 import os
 
@@ -52,15 +53,13 @@ import open3d as o3d
 import tyro
 
 import wandb
-from cli_config import BenchmarkArgs
+from cli_config import Command
 from evaluation import derive_internal_seeds, draw_eval_indices, evaluate_pipeline
 from metrics import (
     GROSS_YAW_DEG,
     FrameRecord,
     PoseErrorMetrics,
-    compute_average_recall,
     compute_trial_metrics,
-    extract_pose_errors,
     finite_or_none,
     write_frame_records_csv,
 )
@@ -71,21 +70,25 @@ from pipeline import (
     load_parquet_dataset,
 )
 from reporting import log_input_artifacts
-from run_config import resolve_param_overrides
+from run_config import SweepConfig, resolve_run_config
 from sweep import run_parameter_sweep
 
 
 # =====================================================================
 # 4. CLI ENTRY POINT
 # =====================================================================
-# tyro.cli(BenchmarkArgs) builds the parser directly from the BenchmarkArgs
-# dataclass (cli_config.py) -- no external config file, no dynamic string
-# resolution. `args.model` is already a concrete, type-checked *Preset
-# instance by the time we get here: `.ESTIMATOR_CLS` is the real class object
-# and `.profile.params`/`.profile.depth_trunc` are the chosen profile's
-# values. See docs/explanation/tyro_cli_config.md for the full picture.
 def main():
-    args = tyro.cli(BenchmarkArgs)
+    args = tyro.cli(Command)
+    cfg = resolve_run_config(args)
+
+    np.random.seed(cfg.seed)
+    if cfg.o3d_seed is not None:
+        o3d.utility.random.seed(cfg.o3d_seed)
+
+    if isinstance(cfg, SweepConfig):
+        print(f"Search space ({len(cfg.search_space)} free parameters):")
+        for name, rng in cfg.search_space.items():
+            print(f"  {name:32} {rng}")
 
     # Load model, camera, and dataset
     print("Loading pipeline assets...")
@@ -93,60 +96,41 @@ def main():
         local_model_path=args.yolo.local_path, repo_id=args.yolo.repo, filename=args.yolo.file
     )
     camera = Camera(fx=args.camera.fx, fy=args.camera.fy, cx=args.camera.cx, cy=args.camera.cy)
-    dataset = load_parquet_dataset(dataset_path=args.dataset.path, test_glob=args.dataset.test_glob)
+    dataset = load_parquet_dataset(dataset_path=cfg.dataset_path, test_glob=cfg.dataset_glob)
 
-    estimator_cls = args.model.ESTIMATOR_CLS
-    # Whether this estimator's params dataclass has a 'seed' field to vary at
-    # all (only Ransac3DoFParams and its subclasses do today) -- --n-seeds is
-    # a no-op, not a crash, for estimators with no such field.
-    supports_seed = "seed" in {f.name for f in dataclasses.fields(args.model.profile.params)}
-
-    # Hoist CAD mesh loading
+    estimator_cls = cfg.estimator_cls
     meshes = load_cad_meshes()
+    extrinsic = cfg.extrinsic
 
-    # Camera extrinsic is always present now (CameraConfig has a real default,
-    # not an optional YAML key), so no None-fallback is needed here anymore.
-    extrinsic = np.array(args.camera.extrinsic, dtype=np.float64)
-
-    if args.sweep:
+    if isinstance(cfg, SweepConfig):
         run_parameter_sweep(
             dataset=dataset,
             model=model,
             camera=camera,
-            study_name=args.name,
+            study_name=cfg.study_name,
             estimator_cls=estimator_cls,
-            sweep_size=args.eval_size,
-            n_trials=args.trials,
+            profile_params=cfg.params,
+            sweep_size=cfg.eval_size,
+            n_trials=cfg.n_trials,
             meshes=meshes,
             yolo_cfg=args.yolo,
             dataset_cfg=args.dataset,
             extrinsic=extrinsic,
-            seed=args.seed,
-            n_seeds=args.n_seeds,
-            supports_seed=supports_seed,
-            dump_frames=args.dump_frames,
-            param_overrides=args.param_overrides,
+            seed=cfg.seed,
+            n_seeds=cfg.n_seeds,
+            dump_frames=cfg.dump_frames,
+            param_overrides=cfg.resolved_overrides,
         )
 
     else:
         # Default Evaluation mode
-        seed = args.seed
-        if seed is None:
-            seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
-
-        np.random.seed(seed)
-        o3d.utility.random.seed(seed)
+        seed = cfg.seed
 
         total_samples = len(dataset)
-        eval_indices = draw_eval_indices(total_samples, args.eval_size, seed)
+        eval_indices = draw_eval_indices(total_samples, cfg.eval_size, seed)
 
-        if args.n_seeds > 1 and not supports_seed:
-            print(
-                f"Note: {type(args.model.profile.params).__name__} has no 'seed' field; "
-                "--n-seeds > 1 has no effect for this estimator, running once."
-            )
-        effective_n_seeds = args.n_seeds if supports_seed else 1
-        internal_seeds = derive_internal_seeds(seed, effective_n_seeds) if supports_seed else [None]
+        effective_n_seeds = cfg.n_seeds
+        internal_seeds = derive_internal_seeds(seed, effective_n_seeds)
 
         print(
             f"Evaluating '{estimator_cls.__name__}' parameters on {len(eval_indices)} test samples..."
@@ -156,27 +140,36 @@ def main():
             print(f"Pooled over {effective_n_seeds} internal RANSAC seeds: {internal_seeds}")
         print(f"Indices: {eval_indices}\n")
 
-        # Checking if --param-overrides has been wrongly used in this branch
-        if args.param_overrides:
-            raise ValueError(
-                "--param-overrides is only valid in sweep mode; it has no effect in evaluation mode. Set profile params directly instead, e.g. --model.profile.params.icp-visibility-cull"
+        if cfg.resolved_overrides:
+            print(f"Parameter overrides applied: {cfg.resolved_overrides}")
+
+        base_estimator = estimator_cls.build(
+            profile_params=args.model.profile.params,
+            overrides=args.overrides,
+            extrinsic=extrinsic,
+        )
+
+        if not cfg.use_wandb:
+            run_ctx = contextlib.nullcontext()
+        else:
+            wandb_config = {
+                **dataclasses.asdict(base_estimator.params),
+                "depth_trunc": cfg.depth_trunc,
+                "eval_size": cfg.eval_size,
+                "seed": seed,
+                "n_seeds": effective_n_seeds,
+            }
+            run_ctx = wandb.init(
+                project="6dpose",
+                name=cfg.name,
+                group=estimator_cls.__name__,
+                job_type="benchmark",
+                config=wandb_config,
             )
 
-        wandb_config = {
-            **dataclasses.asdict(args.model.profile.params),
-            "depth_trunc": args.model.profile.depth_trunc,
-            "eval_size": args.eval_size,
-            "seed": seed,
-            "n_seeds": effective_n_seeds,
-        }
-        with wandb.init(
-            project="6dpose",
-            name=args.name,
-            group=estimator_cls.__name__,
-            job_type="benchmark",
-            config=wandb_config,
-        ) as run:
-            log_input_artifacts(run, args.yolo, args.dataset)
+        with run_ctx as run:
+            if run is not None:
+                log_input_artifacts(run, args.yolo, args.dataset)
 
             # Pool results across internal seeds (a no-op loop of length 1 when
             # effective_n_seeds == 1) instead of trusting a single draw -- every
@@ -188,13 +181,10 @@ def main():
             pose_failed = 0
             for seed_i in internal_seeds:
                 params_i = (
-                    dataclasses.replace(args.model.profile.params, seed=seed_i)
+                    dataclasses.replace(base_estimator.params, seed=seed_i)
                     if seed_i is not None
-                    else args.model.profile.params
+                    else base_estimator.params
                 )
-                # Directly construct the chosen preset's estimator -- no
-                # _target_ string resolution needed, args.model.ESTIMATOR_CLS
-                # is already the concrete class.
                 estimator = estimator_cls(params=params_i, extrinsic=extrinsic)
                 for cart_type, mesh in meshes.items():
                     estimator.prepare(mesh, cart_type)
@@ -297,7 +287,8 @@ def main():
                 print(f"  of which true flips (|yaw| > 90°): {len(flipped)} ({flip_share:.4f})")
                 log_payload["diag/flip_share"] = flip_share
 
-            run.log(log_payload)
+            if run is not None:
+                run.log(log_payload)
             print("=" * 58)
 
 

@@ -1,53 +1,97 @@
-import ast
 import dataclasses
+from typing import Any
 
 import numpy as np
 
-from methods.base import BasePoseEstimator
-
-# tyro hands override values through as raw strings; ast.literal_eval wants the
-# Python spellings, so these three are title-cased before parsing.
-_BOOLS = {"true", "false", "none"}
+from cli_config import SweepArgs
+from methods.base import BasePoseEstimator, SearchRange
 
 
-def resolve_param_overrides(
-    estimator_cls: type[BasePoseEstimator],
-    extrinsic: np.ndarray,
-    overrides: dict | None,
-) -> dict:
-    """
-    Validates and type-coerces CLI parameter overrides against the estimator's
-    own params dataclass.
-
-    An unknown field name raises rather than warning. The whole reason this
-    mechanism exists is that a sweep silently ignored parameters set on the
-    command line; replacing one silent no-op with another (a warning nobody reads
-    in a 200-trial log) would leave the same failure available -- an arm that
-    reports it is testing something while running the control.
-
-    Values arrive as strings from tyro and are parsed as Python literals, so
-    `front_face_max_angle_deg 60.0`, `voxel_size 0.04`, `z_offset None`,
-    `icp_refine_ladder "(0.05,0.02,0.01)"` (note the syntax for tuple values)
-    all land as the right type; anything unparseable is kept as the raw string.
-    """
+def resolve_param_overrides(estimator_cls, overrides):
+    """Validate and coerce CLI overrides. Returns {name: coerced value}."""
     if not overrides:
         return {}
+    coerced = estimator_cls.params_cls().with_overrides(**overrides)
+    return {k: getattr(coerced, k) for k in overrides}
 
-    probe_params = estimator_cls(extrinsic=extrinsic).params
-    valid_fields = {f.name for f in dataclasses.fields(probe_params)}
 
-    resolved = {}
-    for name, raw in overrides.items():
-        if name not in valid_fields:
-            raise ValueError(
-                f"Unknown parameter override '{name}' for {estimator_cls.__name__}. "
-                f"Available: {sorted(valid_fields)}"
-            )
-        if isinstance(raw, str):
-            try:
-                resolved[name] = ast.literal_eval(raw.capitalize() if raw in _BOOLS else raw)
-            except (ValueError, SyntaxError):
-                resolved[name] = raw
-        else:
-            resolved[name] = raw
-    return resolved
+@dataclasses.dataclass(frozen=True)
+class RunConfig:
+    """Everything decided BEFORE any compute. Assembled once, then read-only."""
+
+    estimator_cls: type[BasePoseEstimator]
+    params: Any  # fully resolved estimator params
+    depth_trunc: float
+    extrinsic: np.ndarray
+    resolved_overrides: dict[str, Any]
+    eval_size: int
+    seed: int
+    n_seeds: int
+    o3d_seed: int | None
+    dataset_path: str
+    dataset_glob: str
+    name: str
+    use_wandb: bool
+    dump_frames: bool = True
+
+
+@dataclasses.dataclass(frozen=True)
+class SweepConfig(RunConfig):
+    """Configuration specific to hyperparameter sweep mode."""
+
+    n_trials: int = 30
+    study_name: str = "Sweep"
+    search_space: dict[str, SearchRange] = dataclasses.field(default_factory=dict)
+
+
+def resolve_run_config(args) -> RunConfig:
+    """The single entry point. Everything else reads the RunConfig it returns."""
+    extrinsic = np.array(args.camera.extrinsic, dtype=np.float64)
+    estimator_cls = args.model.ESTIMATOR_CLS
+    overrides = resolve_param_overrides(estimator_cls, args.overrides)
+
+    seed = args.seed
+    if seed is None:
+        seed = int(np.random.SeedSequence().entropy % (2**31 - 1))
+
+    search_space = {
+        k: v for k, v in estimator_cls.params_cls.search_space().items() if k not in overrides
+    }
+
+    if isinstance(args, SweepArgs) or getattr(args, "sweep", False):
+        return SweepConfig(
+            estimator_cls=estimator_cls,
+            params=args.model.profile.params.with_overrides(**overrides),
+            depth_trunc=args.model.profile.depth_trunc,
+            extrinsic=extrinsic,
+            resolved_overrides=overrides,
+            eval_size=args.eval_size,
+            seed=seed,
+            n_seeds=args.n_seeds,
+            o3d_seed=args.o3d_seed,
+            dataset_path=args.dataset.path,
+            dataset_glob=args.dataset.test_glob,
+            name=getattr(args, "name", "Sweep"),
+            use_wandb=not args.no_wandb,
+            dump_frames=args.dump_frames,
+            n_trials=getattr(args, "trials", 30),
+            study_name=getattr(args, "study_name", getattr(args, "name", "Sweep")),
+            search_space=search_space,
+        )
+
+    return RunConfig(
+        estimator_cls=estimator_cls,
+        params=args.model.profile.params.with_overrides(**overrides),
+        depth_trunc=args.model.profile.depth_trunc,
+        extrinsic=extrinsic,
+        resolved_overrides=overrides,
+        eval_size=args.eval_size,
+        seed=seed,
+        n_seeds=args.n_seeds,
+        o3d_seed=args.o3d_seed,
+        dataset_path=args.dataset.path,
+        dataset_glob=args.dataset.test_glob,
+        name=getattr(args, "name", "Benchmark"),
+        use_wandb=not args.no_wandb,
+        dump_frames=args.dump_frames,
+    )

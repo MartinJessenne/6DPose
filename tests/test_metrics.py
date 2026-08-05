@@ -5,7 +5,8 @@ import numpy as np
 import open3d as o3d
 from pydantic import ValidationError
 
-from benchmark import (
+from methods.base import prepare_scene_point_cloud, refine_pose_dual_hypothesis
+from metrics import (
     GROSS_YAW_DEG,
     PoseErrorMetrics,
     compute_average_recall,
@@ -13,7 +14,6 @@ from benchmark import (
     extract_pose_errors,
     finite_or_none,
 )
-from methods.base import prepare_scene_point_cloud, refine_pose_dual_hypothesis
 
 
 def _err(trans_xy: float, yaw: float) -> PoseErrorMetrics:

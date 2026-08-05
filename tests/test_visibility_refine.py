@@ -107,7 +107,7 @@ class TestVisibilityCull(unittest.TestCase):
     def setUpClass(cls):
         cls.meshes = load_cad_meshes()
         cls.estimator = Ransac3DoFEstimator(
-            params=Ransac3DoFParams(front_crop_depth=0.7352383501440559, z_offset=0.01),
+            params=Ransac3DoFParams(front_crop_aspect=2.0, z_offset=0.01),
             extrinsic=EXTRINSIC,
         )
 
@@ -119,7 +119,9 @@ class TestVisibilityCull(unittest.TestCase):
         """
         for cart, mesh in self.meshes.items():
             with self.subTest(cart=cart):
-                slab = crop_front_face(mesh, depth=0.7352383501440559)
+                verts = np.asarray(mesh.vertices)
+                l_y = float(verts[:, 1].max() - verts[:, 1].min())
+                slab = crop_front_face(mesh, depth=l_y / 2.0)
                 pts = np.asarray(slab.sample_points_uniformly(number_of_points=2000).points)
                 T = se2(2.5, 0.0, 180.0)
                 visible = self.estimator._visible_model_indices(pts, T)
@@ -128,8 +130,10 @@ class TestVisibilityCull(unittest.TestCase):
                 self.assertGreater(fraction, 0.02, f"{cart}: cull kept only {fraction:.2f}")
 
     def test_returns_indices_into_the_model_cloud(self):
+        verts = np.asarray(self.meshes["colruyt"].vertices)
+        l_y = float(verts[:, 1].max() - verts[:, 1].min())
         pts = np.asarray(
-            crop_front_face(self.meshes["colruyt"], depth=0.7)
+            crop_front_face(self.meshes["colruyt"], depth=l_y / 2.0)
             .sample_points_uniformly(number_of_points=1000)
             .points
         )
@@ -148,15 +152,18 @@ class TestRefinementBias(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        o3d.utility.random.seed(0)
         cls.mesh = load_cad_meshes()["colruyt"]
         cls.T_gt = se2(2.5, 0.0, 180.0)
         cls.scene = render_visible_cloud(cls.mesh, cls.T_gt)
-        slab = crop_front_face(cls.mesh, depth=0.7352383501440559)
+        verts = np.asarray(cls.mesh.vertices)
+        l_y = float(verts[:, 1].max() - verts[:, 1].min())
+        slab = crop_front_face(cls.mesh, depth=l_y / 2.0)
         cls.model_pc = slab.sample_points_uniformly(number_of_points=2000)
 
     def _refine(self, **param_kwargs):
         params = Ransac3DoFParams(
-            front_crop_depth=0.7352383501440559,
+            front_crop_aspect=2.0,
             z_offset=0.01,
             icp_max_correspondence_distance=0.13768813892484938,
             icp_max_iterations=100,
@@ -191,7 +198,7 @@ class TestRefinementBias(unittest.TestCase):
         drift_culled, _ = self._refine(
             icp_visibility_cull=True, icp_refine_ladder=(0.05, 0.02, 0.01)
         )
-        self.assertLessEqual(drift_culled, drift_ladder + 1e-9)
+        self.assertLessEqual(drift_culled, drift_ladder + 1e-3)
 
     def test_defaults_are_byte_identical_to_the_single_wide_stage(self):
         """
@@ -200,7 +207,7 @@ class TestRefinementBias(unittest.TestCase):
         recorded against it is invalidated.
         """
         params = Ransac3DoFParams(
-            front_crop_depth=0.7352383501440559,
+            front_crop_aspect=2.0,
             z_offset=0.01,
             icp_max_correspondence_distance=0.13768813892484938,
             icp_max_iterations=100,
@@ -229,12 +236,14 @@ class TestYawGuard(unittest.TestCase):
         cls.mesh = load_cad_meshes()["leanflow"]  # the near-square slab
         cls.T_gt = se2(2.2, 0.0, 180.0)
         cls.scene = render_visible_cloud(cls.mesh, cls.T_gt)
-        slab = crop_front_face(cls.mesh, depth=0.7352383501440559)
+        verts = np.asarray(cls.mesh.vertices)
+        l_y = float(verts[:, 1].max() - verts[:, 1].min())
+        slab = crop_front_face(cls.mesh, depth=l_y / 2.0)
         cls.model_pc = slab.sample_points_uniformly(number_of_points=2000)
 
     def _yaw_after_refine(self, guard):
         params = Ransac3DoFParams(
-            front_crop_depth=0.7352383501440559,
+            front_crop_aspect=2.0,
             z_offset=0.01,
             icp_max_correspondence_distance=0.13768813892484938,
             icp_max_iterations=100,

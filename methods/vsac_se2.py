@@ -2,17 +2,18 @@ import logging
 from collections.abc import Generator
 from dataclasses import dataclass
 from math import comb
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated
 
 import numpy as np
 from scipy.spatial import cKDTree
 
+from methods.base import SearchRange
 from methods.constrained_ransac import RansacResult, match_correspondences_fpfh, se2_to_se3
 from methods.ransac3dof import FrontFaceGate, Ransac3DoFEstimator, Ransac3DoFParams
 from methods.se2_lie_utils import minimal_solver_se2
 
 if TYPE_CHECKING:
-    import optuna
+    pass
 
 
 @dataclass
@@ -30,14 +31,19 @@ class MatchedNpPointClouds:
 
 
 @dataclass
-class VsacParams:
+class VsacConfig:
+    """Call-time settings for vsac_se2(). NOT a CLI params class -- these are
+    computed per call by VSACSe2Estimator._global_registration (from
+    VSACSe2Params plus per-frame state), never parsed from the command line.
+    No SearchRange belongs here; VSACSe2Params owns every searchable range."""
+
     distance_threshold: float
     max_iterations: int = 10_000
     min_iterations: int = 1_000
     confidence: float = 0.999
     z_offset: float = 0.0
     z_gate_threshold: float | None = None
-    edge_length_threshold: float = 0.9  # still need to understand what that's used for
+    edge_length_tolerance: float = 0.14
     min_sample_distance: float = 0.0
     scoring_subsample_size: int = 100
     rho: float = 0.3  # Spatial independence radius for flip-disambiguation
@@ -197,8 +203,8 @@ def count_independent_inliers(
 
 
 def vsac_se2(
-    point_clouds=MatchedNpPointClouds,
-    params=VsacParams,
+    point_clouds: MatchedNpPointClouds,
+    params: VsacConfig,
     rng: np.random.Generator | None = None,
     front_face_gate: "FrontFaceGate | None" = None,
 ) -> RansacResult:
@@ -332,7 +338,7 @@ def vsac_se2(
         if len_p < params.min_sample_distance or len_q < params.min_sample_distance:
             continue
 
-        if min(len_p, len_q) / max(len_p, len_q) < params.edge_length_threshold:
+        if abs(len_p - len_q) > params.edge_length_tolerance:
             continue
 
         # Compute the candidate transformation using the minimal solver for SE(2)
@@ -477,7 +483,7 @@ def vsac_se2(
 @dataclass(frozen=True)
 class VSACSe2Params(Ransac3DoFParams):
     """Ransac3DoFParams plus the knobs specific to the VSAC global-registration
-    stage. Everything else (voxel_size, front_crop_depth, front_face_max_angle_deg,
+    stage. Everything else (voxel_size, front_crop_aspect, front_face_max_angle_deg,
     z_gate_threshold, seed, ...) is shared with Ransac3DoFEstimator, since
     VSACSe2Estimator only swaps out _global_registration.
 
@@ -497,7 +503,7 @@ class VSACSe2Params(Ransac3DoFParams):
         test reads rounding noise.
     """
 
-    rho: float = 0.3
+    rho: Annotated[float, SearchRange(min=0.05, max=0.6)] = 0.3
     normal_consistency: bool = False
 
 
@@ -518,17 +524,16 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
     ICP, on a choice the global stage had already made blind.
     """
 
+    params_cls = VSACSe2Params
     params: VSACSe2Params
 
     def __init__(
         self,
-        params: VSACSe2Params | dict | None = None,
-        extrinsic: list | np.ndarray | None = None,
+        params: VSACSe2Params | None = None,
+        extrinsic: np.ndarray | None = None,
     ):
         if params is None:
             params = VSACSe2Params()
-        elif not isinstance(params, VSACSe2Params):
-            params = VSACSe2Params(**dict(params))
         super().__init__(params=params, extrinsic=extrinsic)
 
     def _global_registration(self, model_down, pcd_down, model_fpfh, pcd_fpfh):
@@ -549,13 +554,13 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
             model_normals=(np.asarray(model_down.normals) if model_down.has_normals() else None),
             scene_normals=(np.asarray(pcd_down.normals) if pcd_down.has_normals() else None),
         )
-        vsac_params = VsacParams(
+        vsac_params = VsacConfig(
             distance_threshold=distance_threshold,
             max_iterations=self.params.ransac_max_iterations,
             confidence=self.params.ransac_confidence,
             z_offset=self._active_z_offset,
             z_gate_threshold=self.params.z_gate_threshold,
-            edge_length_threshold=self.params.edge_length_threshold,
+            edge_length_tolerance=self.params.edge_length_tolerance,
             # Short sample baselines give yaw hypotheses dominated by voxel
             # noise; require the 2 sampled model points to span a few voxels
             # (matches Ransac3DoFEstimator._global_registration's own rule).
@@ -589,17 +594,3 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
             camera_xy=np.asarray(self.extrinsic, dtype=float)[:3, 3][:2],
             max_angle_deg=float(self.params.front_face_max_angle_deg),
         )
-
-    @classmethod
-    def suggest_params(
-        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
-    ) -> dict[str, Any]:
-        """Suggests parameters for the VSAC-based SE(2) RANSAC + ICP registration."""
-        # For documentation purposes, it would be good to detail the params that are being suggested here through the parent class.
-        params = super().suggest_params(trial, fixed=fixed)
-        # rho ~ a few voxels to a few tens of cm: too small and every inlier
-        # looks independent (the tiebreak never fires); too large and the
-        # whole cart collapses to ~1 independent cluster (same failure mode).
-        if "rho" not in fixed:
-            params["rho"] = trial.suggest_float("rho", 0.05, 0.6)
-        return params

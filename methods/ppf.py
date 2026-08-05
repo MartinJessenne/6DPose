@@ -1,31 +1,39 @@
 import copy
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import cv2
 import numpy as np
 import open3d as o3d
 
-from methods.base import BasePoseEstimator, prepare_scene_point_cloud, refine_pose_dual_hypothesis
+from methods.base import (
+    BaseParams,
+    BasePoseEstimator,
+    SearchRange,
+    prepare_scene_point_cloud,
+    refine_pose_dual_hypothesis,
+)
 
 if TYPE_CHECKING:
-    import optuna
+    pass
 
 
 # =====================================================================
 # 1. PARAMETER CLASS
 # =====================================================================
 @dataclass(frozen=True)
-class PPFParams:
+class PPFParams(BaseParams):
     """Hyperparameters specific to the PPF matching method."""
 
-    ppf_sampling_step: float = 0.1
-    ppf_distance_step: float = 0.02
-    ppf_match_threshold: float = 0.06
+    ppf_sampling_step: Annotated[float, SearchRange(min=0.02, max=0.10, step=0.01)] = 0.1
+    ppf_distance_step: Annotated[float, SearchRange(min=0.02, max=0.10, step=0.01)] = 0.02
+    ppf_match_threshold: Annotated[float, SearchRange(min=0.02, max=0.10, step=0.01)] = 0.06
     ppf_match_tolerance: float = 0.03
     # Optimized value obtained from Optuna hyperparameter sweep (Pareto front candidate)
-    icp_max_correspondence_distance: float = 0.17528702727791115
+    icp_max_correspondence_distance: Annotated[float, SearchRange(min=0.05, max=0.30)] = (
+        0.17528702727791115
+    )
     icp_max_iterations: int = 10
 
 
@@ -57,62 +65,17 @@ def o3d_to_ppf_format(pcd: o3d.geometry.PointCloud) -> np.ndarray:
 class PPFEstimator(BasePoseEstimator):
     """6D Pose Estimator using Point Pair Features (PPF) and Dual ICP refinement."""
 
-    def __init__(self, params: PPFParams | dict = None, extrinsic: list | np.ndarray = None):
+    params_cls = PPFParams  # Associate the parameter dataclass with this estimator
+
+    def __init__(self, params: PPFParams | None = None, extrinsic: np.ndarray | None = None):
         """
         Initializes the PPF Estimator with matching parameters.
 
         Args:
             params (PPFParams, optional): Dedicated parameters. If None, uses defaults.
         """
-        if params is not None:
-            if not isinstance(params, PPFParams):
-                self.params = PPFParams(**dict(params))
-            else:
-                self.params = params
-        else:
-            self.params = PPFParams()
-
-        if extrinsic is not None:
-            self.extrinsic = np.asarray(extrinsic, dtype=np.float64)
-        else:
-            self.extrinsic = None
-
-    @classmethod
-    def suggest_params(
-        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
-    ) -> dict[str, Any]:
-        """Suggests parameters for PPF + ICP registration."""
-        params = {}
-
-        if "ppf_sampling_step" not in fixed:
-            params["ppf_sampling_step"] = trial.suggest_float(
-                "ppf_sampling_step", 0.02, 0.10, step=0.01
-            )
-
-        if "ppf_distance_step" not in fixed:
-            params["ppf_distance_step"] = trial.suggest_float(
-                "ppf_distance_step", 0.02, 0.10, step=0.01
-            )
-
-        if "ppf_match_threshold" not in fixed:
-            params["ppf_match_threshold"] = trial.suggest_float(
-                "ppf_match_threshold", 0.02, 0.10, step=0.01
-            )
-
-        if "ppf_match_tolerance" not in fixed:
-            params["ppf_match_tolerance"] = trial.suggest_float(
-                "ppf_match_tolerance", 0.01, 0.08, step=0.01
-            )
-
-        if "icp_max_correspondence_distance" not in fixed:
-            params["icp_max_correspondence_distance"] = trial.suggest_float(
-                "icp_max_correspondence_distance", 0.02, 0.20
-            )
-
-        if "icp_max_iterations" not in fixed:
-            params["icp_max_iterations"] = trial.suggest_int("icp_max_iterations", 10, 100, step=10)
-
-        return params
+        self.params = params or PPFParams()
+        self.extrinsic = np.asarray(extrinsic, dtype=np.float64) if extrinsic is not None else None
 
     def _get_prep_params_key(self) -> tuple:
         """Returns only the parameters affecting offline preparation."""

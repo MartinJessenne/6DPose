@@ -44,3 +44,6 @@ inspect_crop.py
 scratch/DIFF_WALKTHROUGH.md
 
 scratch
+benchmark_runs/
+sweeps/*_frames/
+log_*.txt

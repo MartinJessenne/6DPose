@@ -1,7 +1,13 @@
+import ast
 import copy
+import dataclasses
+import inspect
 import logging
+import types
+import typing
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 import open3d as o3d
@@ -9,11 +15,208 @@ import open3d as o3d
 if TYPE_CHECKING:
     import optuna
 
+_BOOLS = {"true", "false", "none"}
+
+
+# Defining custom error types
+class ConfigError(Exception):
+    """Base for every configuration-resolution failure.
+
+    Having a base class means a caller can catch every failure from this module
+    with one `except ConfigError`, without also swallowing unrelated ValueErrors.
+    """
+
+
+class UnknownOverrideError(ConfigError):
+    def __init__(self, name: str, valid: set[str]) -> None:
+        self.name = name
+        self.valid = valid
+        super().__init__(f"Unknown parameter override '{name!r}'. Available: {sorted(valid)}")
+
+
+@dataclass(frozen=True)
+class SearchRange:
+    """
+    Search range descriptor for optuna metadata.
+    """
+
+    min: float
+    max: float
+    step: float | None = None  # Optional step size for discrete search spaces
+    log: bool = False  # Whether to keep logs of the parameter values
+
+    def suggest(self, trial: "optuna.Trial", name: str, annotation) -> Any:
+        """
+        Suggests a value for this parameter using an Optuna trial.
+
+        Args:
+            trial: The active Optuna trial.
+            name: The name of the parameter to suggest.
+            annotation: The type annotation of the parameter, used to determine
+                whether to suggest a float or int value.
+
+        Returns:
+            Any: The suggested value for the parameter.
+        """
+        target = _unwrap_optional(annotation)
+        if target is int:
+            step = int(self.step) if self.step is not None else 1
+            return trial.suggest_int(name, int(self.min), int(self.max), step=step, log=self.log)
+        return trial.suggest_float(
+            name, float(self.min), float(self.max), step=self.step, log=self.log
+        )
+
+
+_NoneType = type(None)  # For type hinting of optional fields
+
+
+def _unwrap_optional(annotation):
+    """
+    Annotated[T, ...] -> T and X | None -> X.
+
+    The Annotated unwrap must happen first.
+    """
+
+    if hasattr(annotation, "__metadata__"):
+        annotation = typing.get_args(annotation)[0]
+
+    if typing.get_origin(annotation) in (typing.Union, types.UnionType):
+        real = [a for a in typing.get_args(annotation) if a is not _NoneType]
+        if len(real) == 1:
+            return real[0]
+
+    return annotation
+
+
+def coerce_override(raw, annotation, name: str):
+    """One CLI string -> the value the field is declared to hold.
+
+    Parse first, narrow second. Parsing with ast.leteral_eval means `None`,
+    `True`, `(0.05, 0.02)`, `1e-3` and `40` all become the right Python object
+    without this function knowing which fields exist. Narrowing then rejects
+    what the field cannot hold, at startup rather than mid-sweep.
+    """
+
+    if not isinstance(raw, str):
+        return raw
+
+    text = raw.strip()
+
+    # tyro hands through the shell's spelling; literal_eval wants Python's.
+    parsed_source = text.capitalize() if text.lower() in {"true", "false", "none"} else text
+    try:
+        value = ast.literal_eval(parsed_source)
+    except (ValueError, SyntaxError) as exc:
+        raise ValueError(f"{name}={raw!r} is not a Python literal") from exc
+
+    target = _unwrap_optional(annotation)
+
+    if value is None:
+        return None
+
+    if target is bool and not isinstance(value, bool):
+        raise ValueError(f"{name}={raw!r} is not a boolean")
+
+    if target is float and isinstance(value, int) and not isinstance(value, bool):
+        return float(value)
+    if target is int and isinstance(value, bool):
+        raise ValueError(f"{name}={raw!r} is not an integer")
+    return value
+
+
+@dataclass(frozen=True)
+class BaseParams:
+    seed: int | None = 0
+
+    def with_overrides(self, **overrides: Any) -> Self:
+        """
+        Returns a new instance of the dataclass with specified fields overridden.
+        Validates parameter names and coerces string CLI values to field target types.
+        """
+        if not overrides:
+            return self
+
+        hints = typing.get_type_hints(type(self))
+        valid = {f.name for f in dataclasses.fields(self)}
+        coerced = {}
+        for name, raw in overrides.items():
+            if name not in valid:
+                raise UnknownOverrideError(name, valid)
+            coerced[name] = coerce_override(raw, hints[name], name)
+        return dataclasses.replace(self, **coerced)
+
+    @classmethod
+    def search_space(cls) -> dict[str, SearchRange]:
+        """Every field this params class declares as searchable, by name.
+        Returns:
+            dict[str, SearchRange]: Mapping of field names to their SearchRange metadata.
+        """
+        hints = typing.get_type_hints(cls, include_extras=True)
+        out = {}
+
+        for f in dataclasses.fields(cls):
+            meta = getattr(
+                hints[f.name], "__metadata__", ()
+            )  # __metadata__ is a tuple of all Annotated metadata
+            rng = next((m for m in meta if isinstance(m, SearchRange)), None)
+            if rng:
+                out[f.name] = rng
+
+        return out
+
+    @classmethod
+    def sample_optuna(cls, trial: "optuna.Trial", base: Self | None = None, fixed=()) -> Self:
+        """
+        `base` (default: class defaults) with every non-fixed searchable field resampled.
+        """
+        base = base if base else cls()
+        hints = typing.get_type_hints(cls, include_extras=True)
+        sampled = {
+            name: rng.suggest(trial, name, hints[name])
+            for name, rng in cls.search_space().items()
+            if name not in fixed
+        }
+        return dataclasses.replace(base, **sampled)
+
+    def __post_init__(self):
+        hints = typing.get_type_hints(type(self), include_extras=True)
+
+        for name, rng in self.search_space().items():
+            v = getattr(self, name)
+            if v is None:
+                continue
+
+            declared = _unwrap_optional(hints[name])
+            if not isinstance(v, declared) or isinstance(v, bool) is not (declared is bool):
+                raise TypeError(f"{type(self).__name__}.{name} = {v!r} is not {declared.__name__}")
+
+            if not (rng.min <= v <= rng.max):
+                raise ValueError(
+                    f"{type(self).__name__}.{name} = {v} outside [{rng.min}, {rng.max}]"
+                )
+
 
 class BasePoseEstimator(ABC):
     """Abstract base class representing a 6D Pose Estimation method."""
 
     _PREPARATION_CACHE = {}  # Global cache: (class_name, cart_type, prep_params_tuple) -> prepared_dict
+
+    # Each subclass must define its own dataclass for parameters, which will be used for validation and type coercion.
+    params_cls: type[BaseParams]
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        profile_params: BaseParams | None = None,
+        overrides: dict[str, Any] | None = None,
+        extrinsic: np.ndarray,
+    ) -> Self:
+        """1-line construction: loads baseline profile, applies overrides, and instantiates the estimator."""
+        base = cls.params_cls() if profile_params is None else profile_params
+        if overrides:
+            base = base.with_overrides(**overrides)
+        return cls(params=base, extrinsic=extrinsic)
 
     @abstractmethod
     def estimate_pose(
@@ -49,29 +252,13 @@ class BasePoseEstimator(ABC):
         # Default implementation for estimators that do not require pre-computation.
         pass
 
-    @classmethod
-    def suggest_params(
-        cls, trial: "optuna.Trial", fixed: frozenset[str] = frozenset()
-    ) -> dict[str, Any]:
-        """
-        Suggests hyperparameters for this matching method using an Optuna trial.
-
-        Args:
-            trial: The active Optuna trial.
-            fixed: Parameter names already pinned for this arm (via --param-overrides)
-                and which must therefore NOT be suggested. Suggesting one anyway costs
-                a TPE dimension that cannot affect the objective, and makes Optuna's
-                parameter-importance output meaningless for that field.
-
-        Returns:
-            dict[str, Any]: Suggested parameter dictionary.
-
-        Raises:
-            NotImplementedError: If not overridden by the subclass.
-        """
-        raise NotImplementedError(
-            f"Estimator class '{cls.__name__}' does not implement 'suggest_params' for parameter sweeps."
-        )
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if not inspect.isabstract(cls) and not isinstance(getattr(cls, "params_cls", None), type):
+            raise TypeError(
+                f"Concrete subclass {cls.__name__} must define a 'params_cls' attribute "
+                f"that is a dataclass type inheriting from BaseParams."
+            )
 
 
 def reorient_normals_to_reference(

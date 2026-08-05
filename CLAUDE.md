@@ -65,7 +65,7 @@ So:
 ### Verification is read-only, and is taught rather than performed
 
 Claude may run anything that does not mutate the tree: pytest, `benchmark.py`,
-`scripts/local_eval.py`, scratch experiments, git reads. **Default to handing the
+`benchmark.py --no-wandb`, scratch experiments, git reads. **Default to handing the
 owner the exact command and explaining how to read its output**, rather than running
 it for them — the point is that they can reproduce it alone. Claude runs it directly
 when a measurement is needed for Claude's own reasoning, and says so.

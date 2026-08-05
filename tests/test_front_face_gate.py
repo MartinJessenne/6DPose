@@ -62,9 +62,7 @@ def load_fixture_frames():
     extrinsic = np.array(CameraConfig().extrinsic, dtype=float)
     frames = []
     for split in ("test", "validation", "train"):
-        ds = load_parquet_dataset(
-            dataset_path=str(FIXTURES), test_glob=f"data/{split}-*.parquet"
-        )
+        ds = load_parquet_dataset(dataset_path=str(FIXTURES), test_glob=f"data/{split}-*.parquet")
         for row in ds:
             t_world_camera = np.asarray(row["camera_view_transform"], dtype=float).reshape(4, 4).T
             t_world_cart = np.asarray(row["bbox_3d_transform"][0], dtype=float).reshape(4, 4).T
@@ -83,9 +81,7 @@ class TestFrontFaceGateOnFixtures(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not (FIXTURES / "data").exists():
-            raise unittest.SkipTest(
-                "fixtures missing; run: uv run scripts/fetch_test_samples.py"
-            )
+            raise unittest.SkipTest("fixtures missing; run: uv run scripts/fetch_test_samples.py")
         cls.meshes = load_cad_meshes()
         cls.front_faces = {k: front_face_from_mesh(m) for k, m in cls.meshes.items()}
         cls.camera_xy = np.array(CameraConfig().extrinsic, dtype=float)[:3, 3][:2]
@@ -160,7 +156,9 @@ class TestFrontFaceGateOnFixtures(unittest.TestCase):
                 expected = wrap180(gt_angle - theta)
                 # The rotation identity itself: exact up to float round-off.
                 self.assertAlmostEqual(
-                    wrap180(measured - expected), 0.0, places=6,
+                    wrap180(measured - expected),
+                    0.0,
+                    places=6,
                     msg=f"{cart} theta={theta}: angle identity broken",
                 )
                 self.assertEqual(
@@ -179,16 +177,14 @@ class TestFrontFaceGateOnFixtures(unittest.TestCase):
         cart, T_gt = self.frames[0]
         ff = self.front_faces[cart]
         anchor_xy = (T_gt[:3, :3] @ np.asarray(ff.anchor) + T_gt[:3, 3])[:2]
-        arrow_xy = (T_gt[:2, :2] @ np.asarray(ff.normal)[:2])
+        arrow_xy = T_gt[:2, :2] @ np.asarray(ff.normal)[:2]
 
         # A camera placed straight along the arrow reads 0; one placed behind
         # reads 180 -- for the identical pose.
         cam_ahead = anchor_xy + 3.0 * arrow_xy
         cam_behind = anchor_xy - 3.0 * arrow_xy
         self.assertAlmostEqual(front_face_angle_deg(T_gt, ff, cam_ahead), 0.0, places=6)
-        self.assertAlmostEqual(
-            abs(front_face_angle_deg(T_gt, ff, cam_behind)), 180.0, places=6
-        )
+        self.assertAlmostEqual(abs(front_face_angle_deg(T_gt, ff, cam_behind)), 180.0, places=6)
 
 
 class TestFrontFaceGeometry(unittest.TestCase):

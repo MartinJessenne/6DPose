@@ -7,7 +7,10 @@ import unittest
 
 import numpy as np
 
-from .base.py import resolve_param_overrides
+from cli_config import CameraConfig
+from methods.base import UnknownOverrideError
+from methods.vsac_se2 import VSACSe2Estimator
+from run_config import resolve_param_overrides
 
 
 class RecordingTrial:
@@ -30,14 +33,14 @@ class ResolveParamOverridesTest(unittest.TestCase):
         self.extrinsic = np.array(CameraConfig().extrinsic, dtype=np.float64)
 
     def resolve(self, overrides):
-        return resolve_param_overrides(VSACSe2Estimator, self.extrinsic, overrides)
+        return resolve_param_overrides(VSACSe2Estimator, overrides)
 
     def test_unknown_name_raises(self):
-        with self.assertRaises(ValueError) as ctx:
+        with self.assertRaises(UnknownOverrideError) as ctx:
             self.resolve({"icp_visibility_culll": "true"})  # deliberate typo to test unknown name
-        self.assertIn("icp_visibility_culll", str(ctx.exception))
+        self.assertEqual(ctx.exception.name, "icp_visibility_culll")
 
     def test_bools_become_real_bools(self):
-        out = self.resolve({"icp_visibility_cull": "true", "hoppe_normal_estimation": "false"})
-        self.assertIsInstance(out["icp_visibility_culling"], bool)
-        self.assertTrue(out["icp_visibility_culling"])
+        out = self.resolve({"icp_visibility_cull": "true", "hoppe_normal_orientation": "false"})
+        self.assertIsInstance(out["icp_visibility_cull"], bool)
+        self.assertTrue(out["icp_visibility_cull"])

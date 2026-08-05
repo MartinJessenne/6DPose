@@ -98,9 +98,7 @@ def build_scatter_figure(study: optuna.Study, trials: list[optuna.trial.FrozenTr
                 # Abstention rides along in the tooltip: a point sitting at low
                 # gross_yaw_rate AND high accuracy loss is almost always a trial
                 # that abstained its way out of trouble.
-                customdata=[
-                    [t.number, t.user_attrs.get("abstention_rate")] for t in group
-                ],
+                customdata=[[t.number, t.user_attrs.get("abstention_rate")] for t in group],
                 hovertemplate=(
                     "<b>Trial %{customdata[0]}</b><br>"
                     "accuracy loss (1 - pose_ar): %{x:.4f}<br>"
@@ -124,7 +122,9 @@ def build_scatter_figure(study: optuna.Study, trials: list[optuna.trial.FrozenTr
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("study_name", help="Optuna study name (matches --name used with --sweep)")
     parser.add_argument("--plot", default=None, help="Optional path to save an HTML scatter plot")
     args = parser.parse_args()
@@ -154,8 +154,7 @@ def main():
     abstentions = abstentions[~np.isnan(abstentions)]
     if abstentions.size:
         print(
-            f"abstention_rate -- median={np.median(abstentions):.3f}  "
-            f"max={abstentions.max():.3f}"
+            f"abstention_rate -- median={np.median(abstentions):.3f}  max={abstentions.max():.3f}"
         )
 
     if len(pareto_trials) < 3:

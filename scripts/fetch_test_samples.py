@@ -183,9 +183,7 @@ def stratify(candidates: list[dict], per_cart: int) -> list[dict]:
             key=lambda c: abs(c["bearing_deg"]),
         )
         if len(pool) < per_cart:
-            raise RuntimeError(
-                f"only {len(pool)} '{cart}' frames in this shard, need {per_cart}"
-            )
+            raise RuntimeError(f"only {len(pool)} '{cart}' frames in this shard, need {per_cart}")
         half = per_cart // 2
         picked += pool[:half] + pool[-(per_cart - half) :]
     return picked

@@ -220,13 +220,8 @@ Ransac3DoFProfileSelect = Union[
         Ransac3DoFProfile,
         tyro.conf.subcommand(
             name="default",
-            # NOTE: this is NOT just Ransac3DoFParams()'s bare class defaults --
-            # config/model/ransac3dof.yaml pins concrete measured/tuned values
-            # for z_offset and front_crop_depth rather than leaving them at the
-            # class's None/"auto-derive" placeholders. Caught by
-            # tests/test_cli_config.py during the tyro migration.
             default=Ransac3DoFProfile(
-                params=Ransac3DoFParams(z_offset=0.01, front_crop_depth=0.35),
+                params=Ransac3DoFParams(z_offset=0.01),
                 depth_trunc=3.0,
             ),
         ),
@@ -244,8 +239,6 @@ Ransac3DoFProfileSelect = Union[
                     icp_max_iterations=70,
                     z_offset=0.01,
                     z_gate_threshold=0.30986258444115694,
-                    edge_length_threshold=0.85427888273254,
-                    front_crop_depth=0.8092762136127303,
                     ransac_confidence=0.999,
                     seed=0,
                 ),
@@ -266,8 +259,6 @@ Ransac3DoFProfileSelect = Union[
                     icp_max_iterations=10,
                     z_offset=0.01,
                     z_gate_threshold=0.1343018655763445,
-                    edge_length_threshold=0.826763881996128,
-                    front_crop_depth=1.5094694353528446,
                     ransac_confidence=0.999,
                     seed=0,
                 ),
@@ -295,7 +286,7 @@ VSACSe2ProfileSelect = Union[
             # z_offset/front_crop_depth) plus VSACSe2Params.rho at its own
             # class default -- not yet re-tuned by a dedicated sweep.
             default=VSACSe2Profile(
-                params=VSACSe2Params(z_offset=0.01, front_crop_depth=0.35),
+                params=VSACSe2Params(z_offset=0.01),
                 depth_trunc=3.0,
             ),
         ),
@@ -340,16 +331,14 @@ VSACSe2ProfileSelect = Union[
             default=VSACSe2Profile(
                 params=VSACSe2Params(
                     voxel_size=0.02,
-                    front_crop_depth=0.7352383501440559,
                     z_gate_threshold=0.34896831026780845,
                     ransac_max_iterations=46940,
                     icp_max_iterations=100,
                     icp_max_correspondence_distance=0.13768813892484938,
-                    edge_length_threshold=0.8960310052849256,
                     rho=0.108351160884956,
                     z_offset=0.01,
                 ),
-                depth_trunc=4.6,
+                depth_trunc=5.5,
             ),
         ),
     ],
@@ -375,16 +364,14 @@ VSACSe2ProfileSelect = Union[
             default=VSACSe2Profile(
                 params=VSACSe2Params(
                     voxel_size=0.02,
-                    front_crop_depth=0.8340255546463509,
                     z_gate_threshold=0.10155507475760123,
                     ransac_max_iterations=2575,
                     icp_max_iterations=50,
                     icp_max_correspondence_distance=0.07362195960602905,
-                    edge_length_threshold=0.8764833108790312,
                     rho=0.49565427444240406,
                     z_offset=0.01,
                 ),
-                depth_trunc=4.6,
+                depth_trunc=5.5,
             ),
         ),
     ],
@@ -410,19 +397,17 @@ VSACSe2ProfileSelect = Union[
             default=VSACSe2Profile(
                 params=VSACSe2Params(
                     voxel_size=0.02,
-                    front_crop_depth=0.7352383501440559,
                     z_gate_threshold=0.34896831026780845,
                     ransac_max_iterations=46940,
                     icp_max_iterations=100,
                     icp_max_correspondence_distance=0.13768813892484938,
-                    edge_length_threshold=0.8960310052849256,
                     rho=0.108351160884956,
                     z_offset=0.01,
                     icp_visibility_cull=True,
                     icp_refine_ladder=(0.05, 0.02, 0.01),
                     icp_yaw_guard_deg=5.0,
                 ),
-                depth_trunc=4.6,
+                depth_trunc=5.5,
             ),
         ),
     ],
@@ -449,12 +434,10 @@ VSACSe2ProfileSelect = Union[
             default=VSACSe2Profile(
                 params=VSACSe2Params(
                     voxel_size=0.02,
-                    front_crop_depth=0.7352383501440559,
                     z_gate_threshold=0.34896831026780845,
                     ransac_max_iterations=46940,
                     icp_max_iterations=100,
                     icp_max_correspondence_distance=0.13768813892484938,
-                    edge_length_threshold=0.8960310052849256,
                     rho=0.108351160884956,
                     z_offset=0.01,
                     icp_visibility_cull=True,
@@ -462,63 +445,7 @@ VSACSe2ProfileSelect = Union[
                     icp_yaw_guard_deg=5.0,
                     front_face_max_angle_deg=60.0,
                 ),
-                depth_trunc=4.6,
-            ),
-        ),
-    ],
-]
-
-
-Ransac3DoFFullMeshProfileSelect = Union[
-    Annotated[
-        Ransac3DoFProfile,
-        tyro.conf.subcommand(
-            name="default",
-            default=Ransac3DoFProfile(
-                params=Ransac3DoFParams(z_offset=0.01),
-                depth_trunc=3.0,
-            ),
-        ),
-    ],
-    Annotated[
-        Ransac3DoFProfile,
-        tyro.conf.subcommand(
-            name="acc_opt",
-            # Optuna sweep optuna_Ransac3DofFullMesh_Sweep Trial #25: accuracy-focused full mesh profile
-            default=Ransac3DoFProfile(
-                params=Ransac3DoFParams(
-                    voxel_size=0.04,
-                    ransac_max_iterations=39267,
-                    icp_max_correspondence_distance=0.07851111384977721,
-                    icp_max_iterations=40,
-                    z_offset=0.01,
-                    z_gate_threshold=0.3186998846185683,
-                    edge_length_threshold=0.8389466396574985,
-                    ransac_confidence=0.999,
-                    seed=0,
-                ),
-                depth_trunc=3.0,
-            ),
-        ),
-    ],
-    Annotated[
-        Ransac3DoFProfile,
-        tyro.conf.subcommand(
-            name="rt_opt",
-            # Optuna sweep optuna_Ransac3DofFullMesh_Sweep Trial #34: real-time full mesh profile
-            default=Ransac3DoFProfile(
-                params=Ransac3DoFParams(
-                    voxel_size=0.06,
-                    ransac_max_iterations=2847,
-                    icp_max_correspondence_distance=0.08274659221521605,
-                    icp_max_iterations=50,
-                    z_offset=0.01,
-                    z_gate_threshold=0.17182370500647015,
-                    edge_length_threshold=0.8556119078087416,
-                    ransac_confidence=0.999,
-                    seed=0,
-                ),
-                depth_trunc=4.1,
+                depth_trunc=5.5,
             ),
         ),
     ],
@@ -609,58 +536,42 @@ ModelPreset = Union[
 #    explicitly. No more implicit "if you don't say model=X you get ppf".
 # =====================================================================
 @dataclass(frozen=True)
-class BenchmarkArgs:
-    """Example: uv run benchmark.py --eval-size 30 model:ransac3dof model.profile:acc-opt
-
-    TWO subcommand tokens are ALWAYS required together: model:<algo> AND
-    model.profile:<tuning>. Forgetting model.profile:<tuning> is the single
-    most common mistake here -- if you see "Missing subcommand: Expected one
-    of {model.profile:default, model.profile:acc-opt, ...}", that's it, you
-    picked model:<algo> but forgot to also pick model.profile:<tuning>.
-
-    Available algorithms: model:ppf, model:ransac, model:ransac3dof.
-    To see an algorithm's profile choices before running: model:<algo> --help
-    """
+class CommonArgs:
+    """Everything both eval and sweep commands need."""
 
     model: ModelPreset
     yolo: YoloConfig = field(default_factory=YoloConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     eval_size: int = 20
-    sweep: bool = False
-    trials: int = 30
-    name: str = "Sweep"
     seed: int | None = None
-    # Sweep-only: each trial's estimator-internal RANSAC seed is otherwise
-    # pinned at the estimator params' class default (e.g. Ransac3DoFParams.seed
-    # = 0) for every trial, so a "best" trial could just be a lucky seed draw
-    # rather than a genuinely better hyperparameter setting. n_seeds > 1
-    # evaluates each trial across that many internal seeds and optimizes the
-    # mean, at roughly an n_seeds-fold increase in per-trial cost -- dial down
-    # to 1 for quick iteration, use 3+ for a trustworthy search.
     n_seeds: int = 1
-    # Per-frame CSV (sample_idx, outcome, abstention cause, flip-disambiguation
-    # diagnostics where available) written next to the run, for offline auditing
-    # (e.g. "is a persistent set of frames driving gross_yaw_rate?", or "did
-    # this config starve at the FPFH stage or reject its own candidates?").
-    # Cheap relative to the pose-estimation compute itself; --no-dump-frames opts out.
+    o3d_seed: int | None = 0
+    split: Literal["all", "test", "validation", "train"] = "test"
+    overrides: dict[str, str] = field(default_factory=dict)
     dump_frames: bool = True
-    # Sweep-only: estimator params forced to a fixed value in EVERY trial,
-    # overriding whatever suggest_params proposed. This is how an A/B arm is
-    # declared in a sweep -- e.g. --param-overrides front_face_max_angle_deg 60.0
-    # Note the syntax for tuple values e.g. : --param-overrides icp_refine_ladder "(0.05, 0.02, 0.01)"
-    #
-    # It exists because a sweep trial's params come from suggest_params alone
-    # (see benchmark.py's objective); model.profile.params is consulted only on
-    # the single-evaluation path. Without this, naming a flag on the command
-    # line of a --sweep run is silently a no-op and the "treatment" arm runs the
-    # control a second time while its name and logs claim otherwise.
-    #
-    # Values are parsed as Python literals where possible (true/false/1/0.5/None),
-    # falling back to the raw string. Unknown parameter names are a hard error,
-    # not a warning: a typo here would silently produce exactly the phantom
-    # comparison this field exists to prevent.
-    param_overrides: dict[str, str] = field(default_factory=dict)
+    no_wandb: bool = False
+
+
+@dataclass(frozen=True)
+class EvalArgs(CommonArgs):
+    """Evaluate one configuration."""
+
+    name: str = "Benchmark"
+
+
+@dataclass(frozen=True)
+class SweepArgs(CommonArgs):
+    """Search hyperparameters with Optuna."""
+
+    trials: int = 30
+    study_name: str = "Sweep"
+
+
+Command = Union[
+    Annotated[EvalArgs, tyro.conf.subcommand(name="eval")],
+    Annotated[SweepArgs, tyro.conf.subcommand(name="sweep")],
+]
 
 
 @dataclass(frozen=True)
@@ -687,41 +598,3 @@ class InspectArgs:
     random_samples: int = 10
     indices: tuple[int, ...] = ()
     output_dir: str = "debug_output/"
-
-
-@dataclass(frozen=True)
-class LocalEvalArgs:
-    """Example: uv run scripts/local_eval.py model:vsac3dof model.profile:default
-
-    TWO subcommand tokens are ALWAYS required together: model:<algo> AND
-    model.profile:<tuning>. Forgetting model.profile:<tuning> is the single
-    most common mistake here -- if you see "Missing subcommand: Expected one
-    of {model.profile:default, model.profile:acc-opt, ...}", that's it, you
-    picked model:<algo> but forgot to also pick model.profile:<tuning>.
-
-    Runs the full pipeline over the committed fixtures (tests/fixtures, produced
-    by scripts/fetch_test_samples.py) and prints the headline metrics. This is
-    the pre-push gate: it exists because three flip-disambiguation mechanisms
-    each shipped after improving a headline rate, and each turned out to have
-    done so by converting flips into abstentions -- all three detectable on a
-    handful of frames, none detected, because the only way to run the real
-    pipeline was a multi-hour remote sweep.
-    """
-
-    model: ModelPreset
-    yolo: YoloConfig = field(default_factory=YoloConfig)
-    camera: CameraConfig = field(default_factory=CameraConfig)
-    # Which fixture split(s) to evaluate. "all" pools the 18 frames; the single
-    # splits are for iterating faster on one slice.
-    split: Literal["all", "test", "validation", "train"] = "all"
-    fixtures_path: str = "tests/fixtures"
-    # Same mechanism and validation as BenchmarkArgs.param_overrides: this is how
-    # an A/B arm is declared, e.g. --param-overrides front_face_max_angle_deg=60.0
-    param_overrides: dict[str, str] = field(default_factory=dict)
-    # Open3D keeps its OWN global RNG, and prepare() calls sample_points_uniformly
-    # to build the model cloud. Left unseeded, that cloud -- and therefore FPFH
-    # and the entire result -- differs on every run: measured gross_yaw_rate
-    # swinging 0.556-0.833 across three identical invocations. Seed it, or the
-    # arms of an A/B are not comparable.
-    o3d_seed: int | None = 0
-    csv: str | None = None
