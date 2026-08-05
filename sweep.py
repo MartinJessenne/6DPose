@@ -16,7 +16,7 @@ from metrics import (
     finite_or_none,
     write_frame_records_csv,
 )
-from reporting import log_input_artifacts
+from reporting import log_frame_records_dir, log_input_artifacts
 from run_config import resolve_param_overrides
 
 # Set logging level for Optuna
@@ -316,6 +316,15 @@ def run_parameter_sweep(
                         ),
                         "pareto_table": wandb.Table(columns=columns, data=rows),
                     }
+                )
+
+            # Every trial's frames as ONE artifact. Inside `finally` and outside
+            # `if completed:` on purpose: a sweep interrupted mid-trial still
+            # publishes the frames it already wrote, which is exactly the case
+            # where losing them hurts most.
+            if dump_frames:
+                log_frame_records_dir(
+                    run, study_name, os.path.join(sweep_dir, f"{study_name}_frames")
                 )
 
     print("\n" + "=" * 50)

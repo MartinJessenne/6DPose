@@ -69,7 +69,7 @@ from pipeline import (
     load_hf_model,
     load_parquet_dataset,
 )
-from reporting import log_input_artifacts
+from reporting import log_frame_records, log_input_artifacts
 from run_config import SweepConfig, resolve_run_config
 from sweep import run_parameter_sweep
 
@@ -208,9 +208,11 @@ def main():
                 frames_dir = os.path.join(
                     os.path.dirname(os.path.abspath(__file__)), "benchmark_runs"
                 )
-                write_frame_records_csv(
-                    os.path.join(frames_dir, f"{args.name}_frames.csv"), frame_records
-                )
+                frames_csv = os.path.join(frames_dir, f"{cfg.name}_frames.csv")
+                write_frame_records_csv(frames_csv, frame_records)
+                # No-op when --no-wandb (run is None). The local CSV is written
+                # either way, so this only ever adds a durable copy.
+                log_frame_records(run, cfg.name, frames_csv, frame_records)
 
             m = compute_trial_metrics(error_metrics, times, det_failed, pose_failed)
 
