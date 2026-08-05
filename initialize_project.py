@@ -2,18 +2,28 @@
 # dependencies = [
 #   "httpx",
 #   "huggingface-hub",
-#   "tqdm"
+#   "tqdm",
+#   "tyro",
 # ]
 # ///
+
+"""
+Usage of this script :
+    uv run initialize_project.py --profile molab # for capped donwload
+    uv run initialize_project.py # for uncapped download
+"""
 
 import asyncio
 import os
 import socket
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import httpx
+import tyro
 from huggingface_hub import HfApi
 from tqdm import tqdm
 
@@ -42,6 +52,13 @@ if not HF_TOKEN:
 AUTH_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 
+@dataclass(frozen=True)
+class Args:
+    # "molab" profile caps the download bandwith at MAX_BANDWIDTH
+    # "default" profile does not cap bandwidth
+    profile: Literal["default", "molab"] = "default"
+
+
 class AsyncTokenBucket:
     """Aggregate rate limiter shared by all active segments across all files."""
 
@@ -68,10 +85,7 @@ class AsyncTokenBucket:
             await asyncio.sleep(wait_time)
 
 
-rate_limiter = AsyncTokenBucket(MAX_BANDWIDTH)
-
-
-async def download_segment(client, url, start, end, fd, progress_bar):
+async def download_segment(client, url, start, end, fd, progress_bar, rate_limiter):
     """Download one byte range and pwrite() it at its offset. Resumable retries."""
     for attempt in range(5):
         offset = start
@@ -91,7 +105,8 @@ async def download_segment(client, url, start, end, fd, progress_bar):
                         response=r,
                     )
                 async for chunk in r.aiter_bytes(chunk_size=CHUNK_SIZE):
-                    await rate_limiter.consume(len(chunk))
+                    if rate_limiter is not None:
+                        await rate_limiter.consume(len(chunk))
                     os.pwrite(fd, chunk, offset)
                     offset += len(chunk)
                     progress_bar.update(len(chunk))
@@ -109,7 +124,7 @@ def compute_segments(size):
     return [(i * base, size - 1 if i == n - 1 else (i + 1) * base - 1) for i in range(n)]
 
 
-async def download_file(client, filename, size, progress_bar, sem):
+async def download_file(client, filename, size, progress_bar, sem, rate_limiter):
     """Download a single file (segmented), gated by the concurrency semaphore."""
     dest_path = DEST_DIR / filename
 
@@ -127,7 +142,7 @@ async def download_file(client, filename, size, progress_bar, sem):
             os.ftruncate(fd, size)
             await asyncio.gather(
                 *[
-                    download_segment(client, url, s, e, fd, progress_bar)
+                    download_segment(client, url, s, e, fd, progress_bar, rate_limiter)
                     for s, e in compute_segments(size)
                 ]
             )
@@ -139,6 +154,10 @@ async def download_file(client, filename, size, progress_bar, sem):
 
 
 async def main():
+    args = tyro.cli(Args)
+    capped = args.profile == "molab"
+    rate_limiter = AsyncTokenBucket(MAX_BANDWIDTH) if capped else None
+
     print(f"Fetching manifest for {DATASET}...")
     api = HfApi()
     info = api.repo_info(DATASET, repo_type="dataset", files_metadata=True)
@@ -146,10 +165,9 @@ async def main():
 
     total_size = sum(s.size for s in shards)
     print(f"Found {len(shards)} shards. Total size: {total_size / (1024**3):.2f} GB")
-    print(
-        f"{CONCURRENT_FILES} files in flight x {SEGMENTS_PER_FILE} segments, "
-        f"capped at {MAX_BANDWIDTH / 1024**2:.0f} MB/s aggregate"
-    )
+
+    cap_msg = f"capped at {MAX_BANDWIDTH / 1024**2:.0f} MB/s aggregate" if capped else "uncapped"
+    print(f"{CONCURRENT_FILES} files in flight x {SEGMENTS_PER_FILE} segments, {cap_msg}")
 
     max_conns = CONCURRENT_FILES * SEGMENTS_PER_FILE
     limits = httpx.Limits(
@@ -163,10 +181,14 @@ async def main():
     transport = httpx.AsyncHTTPTransport(limits=limits, socket_options=custom_socket_options)
 
     sem = asyncio.Semaphore(CONCURRENT_FILES)
+    rate_limiter = AsyncTokenBucket(MAX_BANDWIDTH)
     async with httpx.AsyncClient(transport=transport) as client:
         with tqdm(total=total_size, unit="B", unit_scale=True, desc="Downloading") as pbar:
             await asyncio.gather(
-                *[download_file(client, s.rfilename, s.size, pbar, sem) for s in shards]
+                *[
+                    download_file(client, s.rfilename, s.size, pbar, sem, rate_limiter)
+                    for s in shards
+                ]
             )
 
 
