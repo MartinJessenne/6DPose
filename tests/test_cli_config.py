@@ -188,7 +188,7 @@ class TestRansac3DoFProfiles(unittest.TestCase):
         self.assertEqual(p.z_offset, 0.01)
         self.assertEqual(p.z_gate_threshold, 0.09)
         self.assertEqual(p.edge_length_tolerance, 0.14)
-        self.assertEqual(p.front_crop_aspect, 2.0)
+        self.assertEqual(p.front_crop_aspect, 1.0)
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
 
@@ -203,7 +203,7 @@ class TestRansac3DoFProfiles(unittest.TestCase):
         self.assertEqual(p.z_offset, 0.01)
         self.assertEqual(p.z_gate_threshold, 0.30986258444115694)
         self.assertEqual(p.edge_length_tolerance, 0.14)
-        self.assertEqual(p.front_crop_aspect, 2.0)
+        self.assertEqual(p.front_crop_aspect, 1.0)
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
 
@@ -218,7 +218,7 @@ class TestRansac3DoFProfiles(unittest.TestCase):
         self.assertEqual(p.z_offset, 0.01)
         self.assertEqual(p.z_gate_threshold, 0.1343018655763445)
         self.assertEqual(p.edge_length_tolerance, 0.14)
-        self.assertEqual(p.front_crop_aspect, 2.0)
+        self.assertEqual(p.front_crop_aspect, 1.0)
         self.assertEqual(p.ransac_confidence, 0.999)
         self.assertEqual(p.seed, 0)
 
@@ -233,7 +233,7 @@ class TestVSACSe2Profiles(unittest.TestCase):
         self.assertEqual(r.profile.depth_trunc, 3.0)
         p = r.profile.params
         self.assertEqual(p.z_offset, 0.01)
-        self.assertEqual(p.front_crop_aspect, 2.0)
+        self.assertEqual(p.front_crop_aspect, 1.0)
         self.assertEqual(p.rho, 0.3)
 
     def test_bare_uses_unmeasured_class_defaults(self):
@@ -241,7 +241,7 @@ class TestVSACSe2Profiles(unittest.TestCase):
         self.assertEqual(r.profile.depth_trunc, 3.0)
         p = r.profile.params
         self.assertIsNone(p.z_offset)
-        self.assertEqual(p.front_crop_aspect, 2.0)
+        self.assertEqual(p.front_crop_aspect, 1.0)
         self.assertEqual(p.rho, 0.3)
 
 

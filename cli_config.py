@@ -309,25 +309,30 @@ VSACSe2ProfileSelect = Union[
         VSACSe2Profile,
         tyro.conf.subcommand(
             name="tuned",
-            # Optuna study VSAC_NullOff_M2 (W&B s3zi4564) trial #33: the sweep's
-            # pose_ar argmax (0.2833, good_rate 0.7246) and the configuration the
-            # roadmap's standing conclusion quotes.
+            # The best configuration measured on this project: 70 frames, seed
+            # 2144065271, --o3d-seed 0, n_seeds 1.
             #
-            # This exists because "default" is NOT a tuned configuration -- it
-            # carries voxel_size 0.06 while every good trial in that sweep sits at
-            # 0.02 (median good_rate by voxel: 0.02 -> 0.681, 0.06 -> 0.304). Every
-            # local number recorded so far ran at "default" and is therefore
-            # systematically pessimistic relative to the sweep.
+            #   good_rate        0.5143 -> 0.9429   (McNemar +30, p < 0.0001)
+            #   gross_yaw_rate   0.4783 -> 0.0435
+            #   pose_ar          0.2050 -> 0.3620
+            #   p95              19.07s -> 7.36s    (the cull and veto prune the search)
             #
-            # ADDED rather than folded into "default" on purpose: changing what
-            # "default" means would silently invalidate the local numbers already
-            # recorded against it (E03's control arm, E04's `default` row).
+            # against the same profile with hoppe_normal_orientation,
+            # icp_visibility_cull, normal_consistency and the front-face veto all
+            # off. 32 frames fixed, 2 broken (both leanflow). hoppe/cull now come
+            # from Ransac3DoFParams' defaults -- see the comment there for why
+            # they are corrections rather than arms.
             #
-            # Not the configuration to deploy. Trial #28 reaches a HIGHER
-            # good_rate (0.744) at 2575 iterations and 2.03s p95; #33 wins on
-            # pose_ar while costing 5.65s. Within this sweep's voxel_size 0.02
-            # bucket, Spearman(ransac_max_iterations, good_rate) = -0.006 --
-            # iterations buy latency, not accuracy.
+            # The continuous values below are Optuna study VSAC_NullOff_M2 (W&B
+            # s3zi4564) trial #33, found BEFORE those four landed, so they are
+            # stale by construction and are what the next sweep re-tunes:
+            # z_gate_threshold, rho, icp_max_correspondence_distance are the
+            # three remaining free parameters.
+            #
+            # ransac_max_iterations 46940 is an upper bound, not a tuned value:
+            # 150000 changes literally zero frames of 70 (McNemar b=0, c=0) while
+            # doubling p95, so the curve has saturated somewhere below it. The
+            # downward ladder has not been run yet.
             default=VSACSe2Profile(
                 params=VSACSe2Params(
                     voxel_size=0.02,
@@ -337,6 +342,8 @@ VSACSe2ProfileSelect = Union[
                     icp_max_correspondence_distance=0.13768813892484938,
                     rho=0.108351160884956,
                     z_offset=0.01,
+                    front_face_max_angle_deg=60.0,
+                    normal_consistency=True,
                 ),
                 depth_trunc=5.5,
             ),

@@ -24,6 +24,15 @@ False, so the mesh's own winding -- the reference these tests check against --
 is itself arbitrary, and no amount of faithful propagation makes a normal point
 outward. See methods/base.py orient_normals_hoppe. These tests remain valid as
 what they are: a check that the propagation is faithful.
+
+That is also why the end-to-end class below no longer checks model_down against
+the dense model_pc. prepare() deliberately applies Hoppe to model_down ONLY
+(hoppe on model_down scores 0.953/0.988/0.982 against 0.783/0.769/0.705 for
+hoppe on model_pc), so the two clouds now carry different sign conventions and
+cross-cloud agreement is false BY DESIGN. Harmless downstream: model_pc feeds
+point-to-plane ICP, whose residual ((p-q).n)^2 is invariant under n -> -n,
+while model_down feeds FPFH and the normal-consistency test, which do read
+direction. The invariant that survives is internal to model_down.
 """
 
 import unittest
@@ -54,6 +63,65 @@ def two_walled_slab(thickness: float = 0.01, n_per_wall: int = 400) -> o3d.geome
     pcd.points = o3d.utility.Vector3dVector(np.vstack([front, back]))
     pcd.normals = o3d.utility.Vector3dVector(normals)
     return pcd
+
+
+def same_sheet_dissenter_fraction(
+    pcd: o3d.geometry.PointCloud,
+    tangency: float = 0.3,
+    k: int = 12,
+    min_support: int = 3,
+) -> float:
+    """
+    Fraction of points whose normal disagrees in sign with its own neighbourhood.
+
+    A globally consistent orientation cannot be checked directly without a
+    trusted reference, and on a non-orientable mesh no such reference exists.
+    What CAN be checked is the property Hoppe's MST propagation actually
+    delivers: neighbouring points on the same surface sheet end up on the same
+    side of it.
+
+    "Same sheet" is the load-bearing qualifier. On a thin shell the opposite
+    wall is a near neighbour in space while carrying a legitimately opposite
+    normal, so a naive k-nearest vote would score correct geometry as broken.
+    Neighbour j is admitted only when the separation is nearly tangential to
+    i's normal:
+
+        |(p_j - p_i) . n_i| < tangency * ||p_j - p_i||
+
+    The ratio is |cos| of the angle between the separation and n_i, so
+    tangency=0.3 admits neighbours lying within arccos(0.3) = 72.5 deg of the
+    normal, i.e. within 17.5 deg of i's tangent plane, and rejects the opposite
+    wall (separation parallel to n_i, ratio ~1.0). Measured insensitive over
+    tangency in [0.2, 0.5]: the result moves by <0.002.
+
+    k=12 spans roughly a two-voxel disc at voxel-size point spacing -- enough
+    votes for a majority to mean something without reaching across the shell.
+    Points with fewer than min_support admitted neighbours are excluded rather
+    than counted as passing: a two-vote majority is noise.
+    """
+    points = np.asarray(pcd.points)
+    normals = np.asarray(pcd.normals)
+
+    tree = o3d.geometry.KDTreeFlann(pcd)
+    neighbours = np.array(
+        [
+            [j for j in tree.search_knn_vector_3d(p, k + 1)[1] if j != i][:k]
+            for i, p in enumerate(points)
+        ]
+    )
+
+    delta = points[neighbours] - points[:, None, :]
+    distance = np.linalg.norm(delta, axis=2)
+    along_normal = np.abs(np.einsum("ik,ijk->ij", normals, delta))
+    same_sheet = along_normal < tangency * np.maximum(distance, 1e-12)
+
+    agrees = np.einsum("ik,ijk->ij", normals, normals[neighbours]) > 0
+    support = same_sheet.sum(axis=1)
+    in_favour = (same_sheet & agrees).sum(axis=1)
+
+    testable = support >= min_support
+    dissents = testable & (in_favour * 2 < support)
+    return float(dissents.sum() / max(int(testable.sum()), 1))
 
 
 class TestVoxelAveragingDefect(unittest.TestCase):
@@ -133,6 +201,11 @@ class TestPreparedModelNormals(unittest.TestCase):
         cls.mesh.compute_vertex_normals()
 
     def prepared(self, voxel_size: float) -> dict:
+        # Open3D keeps its OWN global RNG, separate from numpy's, and prepare()
+        # draws from it via sample_points_uniformly. Unseeded, the dissenter
+        # fraction below wanders over 0.018-0.036 across repeats, which is not a
+        # band a threshold can sit in. Seeding pins prepare() bit-for-bit.
+        o3d.utility.random.seed(0)
         estimator = Ransac3DoFEstimator(
             params=Ransac3DoFParams(voxel_size=voxel_size, front_crop_aspect=None),
             extrinsic=np.eye(4),
@@ -149,17 +222,41 @@ class TestPreparedModelNormals(unittest.TestCase):
                 normals = np.asarray(self.prepared(voxel_size)["model_down"].normals)
                 np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1e-9)
 
-    def test_all_model_normals_agree_with_the_mesh(self):
+    def test_model_normals_are_locally_sign_coherent(self):
+        """
+        The surviving direction invariant, once cross-cloud agreement is gone.
+
+        The bound is 5%, and it is not arbitrary at either end.
+
+        Floor -- the fixture is a 2.0 x 1.0 x 0.02 box, so at voxel_size 0.02
+        the shell thickness EQUALS the voxel. The local covariance is then one
+        voxel thick and a few voxels wide, its smallest eigenvalue is not
+        cleanly separated, and a few percent of normals come out with an
+        ill-defined AXIS -- 53 of 64 dissenters at that setting have x/y-facing
+        normals on a box whose large faces are z-facing. Hoppe re-signs, it
+        cannot re-aim (see ransac3dof.py, the comment above the
+        reorient_normals_to_reference call), so those points stay. Measured
+        with the seed above: 0.037 at voxel 0.02, exactly 0.000 at 0.06, where
+        the voxel is 3x the thickness and the fit is well conditioned.
+
+        Ceiling -- corrupting the same seeded cloud reads 0.310 (voxel 0.02) /
+        0.375 (0.06) with hoppe_normal_orientation off, 0.172 for 15% of signs
+        flipped, and 0.43 for pure noise directions. The defect class this test
+        exists for therefore clears the bound by 6-8x.
+
+        Known blind spot: a 5% random sign flip reads 0.086 at voxel 0.02
+        (caught) but 0.040 at 0.06 (MISSED) -- that cloud is only 582 points,
+        so the bound is ~29 of them and the detection floor there is around 6%
+        of points. One bound is set from the worst case rather than a per-voxel
+        pair, which leaves 0.06 loose against corruptions no mechanism in this
+        codebase actually produces.
+
+        This is the test that fails if prepare() stops orienting model_down, or
+        orients the wrong cloud. It does NOT check unit length -- that is
+        test_all_model_normals_are_unit_length, and it is the magnitude half of
+        the same voxel-averaging defect.
+        """
         for voxel_size in (0.02, 0.06):
             with self.subTest(voxel_size=voxel_size):
-                prep = self.prepared(voxel_size)
-                down, dense = prep["model_down"], prep["model_pc"]
-
-                tree = o3d.geometry.KDTreeFlann(dense)
-                dense_normals = np.asarray(dense.normals)
-                nearest = np.array(
-                    [tree.search_knn_vector_3d(p, 1)[1][0] for p in np.asarray(down.points)]
-                )
-                dots = np.einsum("ij,ij->i", np.asarray(down.normals), dense_normals[nearest])
-
-                self.assertTrue(np.all(dots >= 0.0))
+                down = self.prepared(voxel_size)["model_down"]
+                self.assertLess(same_sheet_dissenter_fraction(down), 0.05)

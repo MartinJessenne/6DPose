@@ -337,13 +337,26 @@ class Ransac3DoFParams(RansacParams):
     edge_length_tolerance: float = 0.14
     ransac_confidence: float = 0.999
     seed: int | None = 0
-    front_crop_aspect: float | None = 2.0
-    # The five below are deliberately NOT searchable: each is an A/B arm's
+    # 1.0 (slab depth = full y-extent) beat 2.0 in the 70-frame ablation:
+    # equal good_rate, pose_ar 0.362 vs 0.299 at aspect 0.7, and 2.0 was only
+    # ever measured with every arm below switched OFF.
+    front_crop_aspect: float | None = 1.0
+    # The three below are deliberately NOT searchable: each is an A/B arm's
     # independent variable, set per-arm via --overrides or selected by profile.
     # Letting Optuna tune one turns an on/off contrast into a nuisance parameter.
     front_face_max_angle_deg: float | None = None
-    hoppe_normal_orientation: bool = False
-    icp_visibility_cull: bool = False
+    # hoppe_normal_orientation and icp_visibility_cull default to True because
+    # they are CORRECTIONS, not arms. All three cart meshes report
+    # is_orientable() == False, so the mesh winding gives arbitrary normal signs
+    # and anything reading a normal's direction reads noise without Hoppe. And
+    # the meshes are zero-thickness shells, so ~2/3 of uniformly sampled model
+    # points sit on surfaces the depth camera cannot see; left in, they still
+    # demand correspondences and drag ICP toward the sensor. Measured together
+    # on 70 frames: good_rate 0.514 -> 0.943, gross_yaw 0.478 -> 0.044,
+    # p95 19.1s -> 7.4s (the cull and veto prune the search). Set False only to
+    # reproduce a pre-fix historical number.
+    hoppe_normal_orientation: bool = True
+    icp_visibility_cull: bool = True
     icp_refine_ladder: tuple[float, ...] | None = None
     icp_yaw_guard_deg: float | None = 5.0
 
