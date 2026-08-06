@@ -6,34 +6,27 @@ contradicts it.**
 
 ---
 
-## 1. The owner writes all tracked code. No exceptions.
+## 1. Interactive Git Worktree Sandboxing Workflow
 
-The owner is rebuilding first-hand understanding of this codebase after a period of
-vibe-coding, and is doing this project to learn. Every line that lands in git must
-have been typed and understood by them. Therefore:
+The agent and user collaborate interactively using a **Git Worktree Sandbox** for development and refactoring:
 
-**Claude never creates, edits, or deletes any tracked file in this repository.**
+1. **Git Worktree Isolation**: For any multi-file refactor, new feature, or architectural change, work takes place in a Git Worktree or dedicated feature branch (e.g., `git worktree add ../6DPose-sandbox -b sandbox/<feature>`).
+2. **Interactive Pair-Programming**: The agent works directly in the sandbox environment — creating files, editing code, running pytest suites, and executing end-to-end pipeline commands interactively with the user.
+3. **Full End-to-End Verification**: No task is declared complete until unit tests (`PYTHONPATH="" uv run pytest`) and end-to-end execution checks (`uv run main.py eval` and `uv run main.py sweep`) run to completion with zero errors.
+4. **Pristine Main Workspace**: The user's primary working tree remains untouched until changes in the worktree sandbox are verified and approved for merge (`git merge sandbox/<feature>`).
 
-Not a feature. Not a bugfix. Not a one-character typo. Not a stale-line deletion.
-There is no size threshold below which the rule relaxes — the carve-out is where the
-rule erodes.
+### What "tracked" covers in the Sandbox
 
-### What "tracked" covers
-
-| Path | Claude may edit? |
+| Path | Agent may edit in Sandbox Worktree? |
 |---|---|
-| `methods/`, `pipeline.py`, `benchmark.py`, `inspect_pose.py`, `analyze_sweep.py` | **No** |
-| `cli_config.py` (profiles/params are data, but it is Python) | **No** |
-| `tests/` — the owner writes every test | **No** |
-| `scripts/` | **No** |
-| `pyproject.toml`, `uv.lock`, `.gitignore`, CI config | **No** |
-| `docs/`, `README.md`, `*.md` at repo root | Yes |
-| `dev-notes/` (see §3) | Yes — this is Claude's deliverable |
-| `scratch/` (untracked) | Yes — unrestricted, see §2 |
-| Git operations (commit, branch, push, PR) | Only when explicitly asked |
-
-If the owner asks for a code change, the answer is a note (§3), not an edit — even
-if they phrase it as "just fix it". Say so in one sentence and write the note.
+| `methods/`, `pipeline.py`, `main.py`, `eval_runner.py`, `sweep_runner.py`, `benchmark.py`, `inspect_pose.py`, `analyze_sweep.py` | **Yes (inside Sandbox)** |
+| `cli_config.py` | **Yes (inside Sandbox)** |
+| `tests/` | **Yes (inside Sandbox)** |
+| `pyproject.toml`, `uv.lock`, `.gitignore` | **Yes (inside Sandbox)** |
+| `docs/`, `README.md`, `*.md` at repo root | **Yes** |
+| `dev-notes/` | **Yes** |
+| `scratch/` | **Yes** |
+| Git operations (commit, branch, worktree, merge) | **Yes (with user permission)** |
 
 ### The rule constrains who types, never what gets recommended
 
@@ -42,7 +35,7 @@ keyboard. It does **not** say the codebase should change less, or that a fix sho
 be avoided because proposing it is more work than working around it.
 
 The failure mode to avoid: reaching for a runtime workaround — a CLI flag, a
-stratified set of runs, a monkey-patch, a "you could also just…" — when the honest
+stratified set of runs, a temporary workaround, a "you could also just…" — when the honest
 answer is *this code is wrong and should be edited*, and then presenting that
 workaround as a methodological preference. That silently converts Claude's write
 restriction into an architectural constraint on the project, which is exactly
@@ -61,6 +54,10 @@ So:
 * **Volunteer robustness and correctness problems** found in passing, even when
   unasked and outside the current arm's scope. Under-reporting is the real risk
   here, not over-reporting.
+* **Zero tolerance for bad design & technical debt.** Never propose `@property` aliases, fallback shims, `getattr` chaining, wrapper functions, or compatibility band-aids to paper over bad design decisions or legacy debt. This applies ALWAYS across all code, signatures, abstractions, and recommendations.
+* **Immediate identification & prioritization.** The moment a poor design choice, redundant representation, or architectural flaw is identified, it MUST be pointed out immediately and tackled first.
+* **No refactor is "too costly".** No refactor is ever considered too long, too hard, or too costly. Always recommend the cleanest, most uncompromising fix at the exact site where the defect lives, regardless of how many files or modules it touches.
+* **Purge redundancy completely.** When identifying competing conventions or duplicate attributes (e.g., `name` vs `study_name`), purge the redundant representation cleanly and completely across all entry points, CLI arguments, functions, and documentation.
 
 ### Verification is read-only, and is taught rather than performed
 
@@ -73,29 +70,17 @@ when a measurement is needed for Claude's own reasoning, and says so.
 After the owner implements a note, Claude's role is **read-only review**: correctness,
 then architecture and code-quality advice. Point at the diff, do not apply to it.
 
----
+## 2. Sandbox Lifecycle & Interactive Pair-Programming
 
-## 2. Experiments live in `scratch/`, via monkey-patching
+All experimental work, refactoring, and feature prototyping take place inside an isolated **Git Worktree Sandbox** (`../6DPose-sandbox`):
 
-All experimental work — new features, ablations, alternative algorithms, debugging
-instrumentation — happens in throwaway scripts under `scratch/` (untracked) that
-import the real modules and rebind names at runtime:
-
-```python
-import methods.vsac_se2 as V
-_orig = V.score_msac
-def score_msac_experimental(...): ...
-V.score_msac = score_msac_experimental   # the tree is untouched
-```
-
-`scratch/` is unrestricted. Copy-pasting a whole function to modify its loop body,
-reimplementing an Open3D or `cKDTree` call that cannot be patched, or rewriting an
-entire module from scratch are all fine there — the purpose of that code is to
-produce a **measurement**, not a diff, and none of it ever lands. Prefer a genuine
-monkey-patch over a fork when both work, only because a patch stays honest about
-what it changed.
-
-Never `sys.path` -hack or write into `.venv/` to achieve the same effect.
+1. **Clean Worktree Setup**: For every new task or feature, a fresh worktree is created from the owner's latest `main` branch (`git worktree add ../6DPose-sandbox -b sandbox/<feature>`).
+2. **Interactive Development**: The agent implements code, creates diagnostic probes, runs unit tests (`pytest`), and executes end-to-end evaluation scripts directly in `../6DPose-sandbox`. No monkey-patching or `scratch/` hacks required — the agent edits real files directly inside the sandbox environment.
+3. **Teaching Note / Implementation Guide**: Once the feature is verified 100% end-to-end, the agent writes a step-by-step implementation guide in `dev-notes/<branch>/NN-<slug>.md`.
+4. **Owner Hand-off & Clean Slate**:
+   - The owner reads the guide and implements the verified code into their primary codebase (`/home/martin/6DPose`).
+   - Once implemented, the sandbox worktree is removed (`git worktree remove ../6DPose-sandbox`), completely wiping all temporary diagnostic probes and scratch scripts.
+   - The next feature starts with a brand new, clean worktree pulled from the updated `main` branch.
 
 ---
 

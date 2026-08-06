@@ -27,6 +27,8 @@ def log_input_artifacts(run, yolo_cfg, dataset_cfg):
     modification mints one. That version bump is the "was this input touched?"
     signal for the cross-commit report.
     """
+    if run is None:
+        return
     model_art = wandb.Artifact(
         "yolo-detector", type="model", metadata={"hf_repo": yolo_cfg.repo, "hf_file": yolo_cfg.file}
     )

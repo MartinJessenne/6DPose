@@ -10,11 +10,12 @@ maps onto the old Hydra config groups, and why it's structured this way.
 """
 
 from dataclasses import dataclass, field
-from typing import Annotated, ClassVar, Literal, Union
+from typing import Annotated, Any, ClassVar, Literal, Union
 
+import numpy as np
 import tyro
 
-from methods.base import BasePoseEstimator
+from methods.base import BasePoseEstimator, SearchRange
 from methods.ppf import PPFEstimator, PPFParams
 from methods.ransac import RansacEstimator, RansacParams
 from methods.ransac3dof import (
@@ -542,6 +543,16 @@ ModelPreset = Union[
 #    here too), so `model:<algo> profile:<tuning>` must always be given
 #    explicitly. No more implicit "if you don't say model=X you get ppf".
 # =====================================================================
+def resolve_param_overrides(
+    estimator_cls: type[BasePoseEstimator], overrides: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate and coerce CLI overrides. Returns {name: coerced value}."""
+    if not overrides:
+        return {}
+    coerced = estimator_cls.params_cls().with_overrides(**overrides)
+    return {k: getattr(coerced, k) for k in overrides}
+
+
 @dataclass(frozen=True)
 class CommonArgs:
     """Everything both eval and sweep commands need."""
@@ -559,6 +570,34 @@ class CommonArgs:
     dump_frames: bool = True
     no_wandb: bool = False
 
+    @property
+    def extrinsic(self) -> np.ndarray:
+        return np.array(self.camera.extrinsic, dtype=np.float64)
+
+    @property
+    def estimator_cls(self) -> type[BasePoseEstimator]:
+        return self.model.ESTIMATOR_CLS
+
+    @property
+    def depth_trunc(self) -> float:
+        return self.model.profile.depth_trunc
+
+    @property
+    def resolved_overrides(self) -> dict[str, Any]:
+        return resolve_param_overrides(self.estimator_cls, self.overrides)
+
+    @property
+    def resolved_params(self):
+        return self.model.profile.params.with_overrides(**self.resolved_overrides)
+
+    @property
+    def resolved_seed(self) -> int:
+        return self.seed if self.seed is not None else int(np.random.SeedSequence().entropy % (2**31 - 1))
+
+    @property
+    def use_wandb(self) -> bool:
+        return not self.no_wandb
+
 
 @dataclass(frozen=True)
 class EvalArgs(CommonArgs):
@@ -571,8 +610,16 @@ class EvalArgs(CommonArgs):
 class SweepArgs(CommonArgs):
     """Search hyperparameters with Optuna."""
 
+    name: str = "Sweep"
     trials: int = 30
-    study_name: str = "Sweep"
+
+    @property
+    def search_space(self) -> dict[str, SearchRange]:
+        return {
+            k: v
+            for k, v in self.estimator_cls.params_cls.search_space().items()
+            if k not in self.resolved_overrides
+        }
 
 
 Command = Union[

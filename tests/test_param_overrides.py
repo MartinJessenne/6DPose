@@ -7,10 +7,9 @@ import unittest
 
 import numpy as np
 
-from cli_config import CameraConfig
+from cli_config import CameraConfig, resolve_param_overrides
 from methods.base import UnknownOverrideError
 from methods.vsac_se2 import VSACSe2Estimator
-from run_config import resolve_param_overrides
 
 
 class RecordingTrial:
