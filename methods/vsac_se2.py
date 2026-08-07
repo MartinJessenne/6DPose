@@ -8,9 +8,10 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from methods.base import SearchRange
-from methods.constrained_ransac import RansacResult, match_correspondences_fpfh, se2_to_se3
+from methods.constrained_ransac import match_correspondences_fpfh
 from methods.ransac3dof import FrontFaceGate, Ransac3DoFEstimator, Ransac3DoFParams
-from methods.se2_lie_utils import minimal_solver_se2
+from methods.registration_result import RegistrationResult
+from methods.se2_lie_utils import minimal_solver_se2, se2_matrix, se2_to_se3
 
 if TYPE_CHECKING:
     pass
@@ -207,7 +208,7 @@ def vsac_se2(
     params: VsacConfig,
     rng: np.random.Generator | None = None,
     front_face_gate: "FrontFaceGate | None" = None,
-) -> RansacResult:
+) -> RegistrationResult:
     """SE(2) PROSAC + MSAC global registration.
 
     front_face_gate, when given, vetoes any candidate whose towing face points
@@ -244,7 +245,7 @@ def vsac_se2(
     )
 
     if len(correspondences) < DOF:  # Not enough correspondence found to compute a transform
-        return RansacResult(np.eye(4), 0.0, np.inf, reason="fpfh_insufficient")
+        return RegistrationResult(np.eye(4), 0.0, np.inf, reason="fpfh_insufficient")
 
     MODEL_COL = 0
     SCENE_COL = 1
@@ -268,7 +269,7 @@ def vsac_se2(
     gated_distances = distances[dz < z_gate]
 
     if len(gated_correspondences) < DOF:
-        return RansacResult(np.eye(4), 0.0, np.inf, reason="z_gate_insufficient")
+        return RegistrationResult(np.eye(4), 0.0, np.inf, reason="z_gate_insufficient")
 
     # Sort the correspondences by distances
     sort_order = np.argsort(gated_distances)
@@ -348,7 +349,7 @@ def vsac_se2(
             continue
 
         theta, t_xy = sol
-        T_candidate = se2_to_se3(theta, t_xy, z=params.z_offset)  # 4x4 SE(3) matrix
+        T_candidate = se2_to_se3(se2_matrix(theta, t_xy), z=params.z_offset)  # 4x4 SE(3) matrix
         n_candidates_valid += 1
 
         # Orientation veto, before any scoring. See the docstring for why here
@@ -475,9 +476,9 @@ def vsac_se2(
         # inside no_inliers -- that is precisely how the earlier gates looked
         # healthy in the logs while emptying the eval set.
         reason = "orientation_rejected" if n_orientation_rejected > 0 else "no_inliers"
-        return RansacResult(np.eye(4), 0.0, np.inf, reason=reason)
+        return RegistrationResult(np.eye(4), 0.0, np.inf, reason=reason)
 
-    return RansacResult(best_transformation, best_fitness, best_rmse)
+    return RegistrationResult(best_transformation, best_fitness, best_rmse)
 
 
 @dataclass(frozen=True)

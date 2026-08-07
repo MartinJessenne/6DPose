@@ -199,7 +199,7 @@ class RansacEstimator(BasePoseEstimator):
         T_init = result_ransac.transformation
 
         # If RANSAC global registration has 0 fitness, it abstained. Carry out
-        # WHICH check rejected the frame (see RansacResult.reason) rather than a
+        # WHICH check rejected the frame (see RegistrationResult.reason) rather than a
         # bare None -- "not enough FPFH correspondences" and "the null gate
         # vetoed the best pose" are different bugs with different fixes.
         if result_ransac.fitness == 0.0:

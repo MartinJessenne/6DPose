@@ -97,7 +97,7 @@ def evaluate_pipeline(
             T_final = estimator.estimate_pose(pcd, cad_mesh, cart_type=cart_type, frame=frame)
             if T_final is None:
                 # The estimator names WHICH check rejected the frame (see
-                # RansacResult.reason -> RansacEstimator._last_failure_reason).
+                # RegistrationResult.reason -> RansacEstimator._last_failure_reason).
                 # Estimators that aren't instrumented fall back to "estimator_none".
                 reason = getattr(estimator, "_last_failure_reason", None) or "estimator_none"
                 logging.error(f"Pose estimator abstained on index {sample_idx}: {reason}")

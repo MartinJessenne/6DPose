@@ -9,8 +9,8 @@ import dataclasses
 import os
 
 import numpy as np
-import wandb
 
+import wandb
 from cli_config import EvalArgs
 from evaluation import derive_internal_seeds, draw_eval_indices, evaluate_pipeline
 from metrics import (

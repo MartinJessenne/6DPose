@@ -20,72 +20,8 @@ import logging
 import numpy as np
 from scipy.spatial import cKDTree
 
-from methods.se2_lie_utils import minimal_solver_se2
-
-# ---------------------------------------------------------------------------
-# Result container, API-compatible with the open3d registration result
-# (T_init = result.transformation ; result.fitness)
-# ---------------------------------------------------------------------------
-
-
-class RansacResult:
-    """
-    Result container returned by RANSAC registration.
-
-    Attributes:
-        transformation (np.ndarray): 4x4 homogeneous transformation matrix
-            representing the estimated 6D/SE(2) pose of the CAD model in the
-            scene frame (base_link).
-        fitness (float): Fraction of downsampled model points that fall within
-            `distance_threshold` of a scene point after applying `transformation`
-            (in range [0.0, 1.0]).
-        inlier_rmse (float): Root Mean Square Error (RMSE) of Euclidean distances
-            for all inlier model points (points within `distance_threshold`).
-        reason (str | None): On abstention (fitness == 0.0), WHICH check rejected
-            the frame -- one of ABSTENTION_REASONS. Every abstention path used to
-            collapse into the same anonymous `fitness == 0.0`, which made
-            "the FPFH stage found no correspondences" indistinguishable from
-            "every candidate pose was rejected" in the sweep logs. None on
-            success.
-    """
-
-    def __init__(
-        self,
-        transformation: np.ndarray,
-        fitness: float,
-        inlier_rmse: float,
-        reason: str | None = None,
-    ):
-        self.transformation = transformation
-        self.fitness = fitness
-        self.inlier_rmse = inlier_rmse
-        self.reason = reason
-
-
-# Abstention causes reported by the registration stage (RansacResult.reason).
-# Kept as a flat tuple of plain strings rather than an Enum so they survive the
-# trip into a CSV column / W&B table unchanged.
-ABSTENTION_REASONS = (
-    "fpfh_insufficient",  # fewer than DOF mutual FPFH correspondences
-    "z_gate_insufficient",  # z-gate left fewer than DOF correspondences
-    "no_inliers",  # no candidate pose scored a single inlier
-    # VSAC only, and deliberately separate from "no_inliers": the pose WAS
-    # scored, the Poisson null gate then vetoed it. Disappears if that gate is
-    # ablated -- which is exactly why it needs its own bucket while it exists.
-    # Emitted only by the ablated Poisson null gate. Kept in the list because
-    # sweeps run before the ablation (e.g. study VSAC_NullOn_M2) have frame CSVs
-    # full of it, and a reader of those files needs the name to mean something.
-    "null_rejected",
-    # VSAC only: every candidate that fit was vetoed by FrontFaceGate for pointing
-    # its towing face away from the camera. Separate from "no_inliers" because the
-    # two demand opposite responses -- no_inliers means the scene gave nothing to
-    # work with, this means the gate refused what it was given, and if it appears
-    # in bulk the gate is misconfigured (see the rejection-ratio log in vsac_se2).
-    "orientation_rejected",
-    "empty_scene_cloud",  # segmentation/reprojection produced no scene points
-    "registration",  # abstained without naming a cause (estimator not yet instrumented)
-)
-
+from methods.registration_result import RegistrationResult
+from methods.se2_lie_utils import minimal_solver_se2, se2_matrix, se2_to_se3
 
 # ---------------------------------------------------------------------------
 # Mutual FPFH matching -- numpy equivalent of mutual_filter=True
@@ -141,54 +77,6 @@ def match_correspondences_fpfh(
         return corr, dist[mutual]
     else:
         return corr
-
-
-# ---------------------------------------------------------------------------
-# Lift (theta, t_xy) into a 4x4 homogeneous transform with fixed z
-# ---------------------------------------------------------------------------
-
-
-def se2_to_se3(theta: float, t_xy: np.ndarray, z: float = 0.0) -> np.ndarray:
-    """
-    Embeds 2D planar pose parameters (theta, x, y) into a 3D 4x4 SE(3) homogeneous
-    transformation matrix with fixed elevation `z` and zero roll/pitch angles.
-
-    The 6D pose pipeline operates using 4x4 matrices in 3D robot frame (base_link).
-    This function converts the 2D solver results (yaw rotation `theta` and 2D translation `t_xy`)
-    into the standard 4x4 matrix format expected by downstream components.
-    """
-    T = np.eye(4)
-    T[:3, :3] = np.array(
-        [
-            [np.cos(theta), -np.sin(theta), 0.0],
-            [np.sin(theta), np.cos(theta), 0.0],
-            [0.0, 0.0, 1.0],
-        ]
-    )
-    T[0, 3], T[1, 3], T[2, 3] = t_xy[0], t_xy[1], z
-    R = T[:3, :3]
-    assert np.linalg.norm(R.T @ R - np.eye(3)) < 1e-6, "Rotation matrix orthogonality check failed"
-    assert np.abs(np.linalg.det(R) - 1.0) < 1e-6, "Rotation matrix determinant must be +1"
-    assert abs(R[2, 0]) < 1e-6 and abs(R[2, 1]) < 1e-6 and abs(R[2, 2] - 1.0) < 1e-6, (
-        "SE(2) Z-axis alignment failed"
-    )
-    return T
-
-
-def project_to_se2(T: np.ndarray, z_offset: float = 0.0) -> np.ndarray:
-    """
-    Projects an arbitrary SE(3) 4x4 matrix onto the SE(2) ground-plane manifold.
-
-    Computes the closest planar yaw angle (Frobenius norm projection of the upper-left
-    2x2 block onto SO(2)), sets roll = pitch = 0, and pins z to `z_offset`.
-
-    Caller trace:
-    - Called by `Ransac3DoFEstimator._project_pose` as a final safety-net assertion
-      to guarantee that planar invariants are strictly preserved.
-    """
-    R = T[:3, :3]
-    theta = np.arctan2(R[1, 0] - R[0, 1], R[0, 0] + R[1, 1])
-    return se2_to_se3(theta, T[:2, 3], z_offset)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +145,7 @@ def constrained_ransac_se2(
     min_sample_distance: float = 0.0,
     scoring_subsample_size: int = 100,
     rng: np.random.Generator | None = None,
-) -> RansacResult:
+) -> RegistrationResult:
     """
     SE(2)-constrained (3 DoF: x, y, yaw) RANSAC global registration algorithm.
 
@@ -291,7 +179,7 @@ def constrained_ransac_se2(
     correspondences = match_correspondences_fpfh(model_fpfh, scene_fpfh)
     n_matched = len(correspondences)
     if n_matched < 2:
-        return RansacResult(np.eye(4), 0.0, np.inf, reason="fpfh_insufficient")
+        return RegistrationResult(np.eye(4), 0.0, np.inf, reason="fpfh_insufficient")
 
     # Z-consistency gate: Rotation about +Z preserves Z coordinates.
     # Any valid correspondence pair (model_i, scene_j) must satisfy:
@@ -313,7 +201,7 @@ def constrained_ransac_se2(
             "SE(2) RANSAC: z-consistency gate removed (almost) all correspondences. "
             "Check that scene cloud is in Z-up frame and z_offset is correct."
         )
-        return RansacResult(np.eye(4), 0.0, np.inf, reason="z_gate_insufficient")
+        return RegistrationResult(np.eye(4), 0.0, np.inf, reason="z_gate_insufficient")
 
     scene_tree = cKDTree(scene_points)
     n_model = len(model_points)
@@ -353,7 +241,7 @@ def constrained_ransac_se2(
 
         # 2. Solve 2D minimal pose (theta, tx, ty) and embed into 4x4 SE(3) matrix with fixed z_offset
         theta, t_xy = minimal_solver_se2(p1, p2, q1, q2)
-        T = se2_to_se3(theta, t_xy, z_offset)
+        T = se2_to_se3(se2_matrix(theta, t_xy), z_offset)
 
         # 3. Fast pre-scoring on subsample
         sub_transformed = sub_points @ T[:3, :3].T + T[:3, 3]
@@ -400,7 +288,7 @@ def constrained_ransac_se2(
     # best_fitness stays 0.0 when no candidate pose landed a single inlier --
     # same abstention the caller sees, but a different cause than the two
     # correspondence-starvation exits above, so name it.
-    return RansacResult(
+    return RegistrationResult(
         best_T,
         best_fitness,
         best_rmse,

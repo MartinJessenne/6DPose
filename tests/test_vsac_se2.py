@@ -3,7 +3,6 @@ import unittest
 import numpy as np
 from scipy.spatial import cKDTree
 
-from methods.constrained_ransac import se2_to_se3
 from methods.vsac_se2 import (
     MatchedNpPointClouds,
     VsacConfig,
@@ -12,6 +11,7 @@ from methods.vsac_se2 import (
     score_msac,
     vsac_se2,
 )
+from tests.helpers import se2_pose
 
 
 class TestProsacPairs(unittest.TestCase):
@@ -79,7 +79,7 @@ class TestVsacSe2(unittest.TestCase):
         model_points = rng.uniform(-1, 1, size=(n, 3))
         model_points[:, 2] = rng.uniform(0.0, 0.5, size=n)
 
-        T_true = se2_to_se3(theta_true, t_true, z_offset)
+        T_true = se2_pose(theta_true, t_true, z_offset)
         scene_points = model_points @ T_true[:3, :3].T + T_true[:3, 3]
         scene_points += rng.normal(scale=noise, size=scene_points.shape)
 
@@ -159,8 +159,8 @@ class TestVsacSe2(unittest.TestCase):
 
         theta_spread, t_spread = np.deg2rad(20.0), np.array([1.0, -0.5])
         theta_clustered, t_clustered = np.deg2rad(-40.0), np.array([-3.0, 2.0])
-        T_spread = se2_to_se3(theta_spread, t_spread)
-        T_clustered = se2_to_se3(theta_clustered, t_clustered)
+        T_spread = se2_pose(theta_spread, t_spread)
+        T_clustered = se2_pose(theta_clustered, t_clustered)
 
         scene_points = np.vstack(
             [

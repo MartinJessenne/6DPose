@@ -5,19 +5,26 @@ import numpy as np
 from methods.constrained_ransac import (
     constrained_ransac_se2,
     match_correspondences_fpfh,
-    project_to_se2,
-    se2_to_se3,
 )
-from methods.se2_icp import icp_point_to_plane_se2
+from methods.se2_icp import GncSchedule, icp_se2
 from methods.se2_lie_utils import (
     minimal_solver_se2,
+    project_to_se2,
     se2_exp,
+    se2_exp_about,
     se2_hat,
     se2_log,
     se2_matrix,
     se2_vee,
     so2_exp,
 )
+from tests.helpers import se2_pose
+
+# The rig's depth-noise floor (see Ransac3DoFParams.icp_gnc_scale_min). These
+# scenes carry 1 mm of noise, far inside it, so the Geman-McClure weights
+# stay near 1 and the solver behaves as plain least squares -- which is what
+# lets these tests keep asserting exact convergence.
+TEST_GNC = GncSchedule(scale_min=0.0148)
 
 
 class TestSe2LieUtils(unittest.TestCase):
@@ -62,10 +69,121 @@ class TestSe2LieUtils(unittest.TestCase):
         T_comp = T2 @ T1
         np.testing.assert_allclose(T_comp[:2, 2], [0.0, 0.0], atol=1e-12)
 
+    def test_exp_about_is_conjugation_by_translation(self):
+        # se2_exp_about(xi, c) is exp(xi) sandwiched between a move to c and back.
+        # Checking it against the definition catches a sign slip in the
+        # c - R c + t translation column, which no convergence test would.
+        xi = np.array([0.6, 0.3, -0.2])
+        c = np.array([3.1, -1.7])
+        to_c = se2_matrix(0.0, c)
+        from_c = se2_matrix(0.0, -c)
+        np.testing.assert_allclose(se2_exp_about(xi, c), to_c @ se2_exp(xi) @ from_c, atol=1e-12)
+
+    def test_exp_about_leaves_centre_fixed_for_pure_rotation(self):
+        # With no linear velocity the centre is a fixed point of the increment:
+        # the object spins in place. This is the property the ICP relies on.
+        c = np.array([2.5, 4.0])
+        for omega in [0.2, -1.3, np.pi]:
+            T = se2_exp_about(np.array([omega, 0.0, 0.0]), c)
+            moved = T[:2, :2] @ c + T[:2, 2]
+            np.testing.assert_allclose(moved, c, atol=1e-12, err_msg=f"omega={omega}")
+
+    def test_exp_about_origin_reduces_to_exp(self):
+        xi = np.array([0.4, 1.2, -0.7])
+        np.testing.assert_allclose(se2_exp_about(xi, np.zeros(2)), se2_exp(xi), atol=1e-14)
+
+
+class TestRotationCentreConditioning(unittest.TestCase):
+    """
+    Pins the ONLY thing centring the rotation actually buys.
+
+    It does not improve convergence: recentring is an invertible
+    reparameterisation of the tangent space, Gauss-Newton is equivariant under
+    that, and the composed increment is the same group element either way (see
+    se2_exp_about's docstring for the measurements). What it buys is a
+    condition number that does not grow with how far the object sits from the
+    frame origin. That is what is asserted here, because it is what is true.
+
+    The Jacobian is rebuilt locally rather than imported: assembling it is
+    currently inlined in icp_point_to_plane_se2's loop. If that ever gets
+    extracted into its own function, this test should call it instead.
+    """
+
+    def _jacobian(self, p, n, centre):
+        return np.column_stack(
+            [
+                n[:, 1] * (p[:, 0] - centre[0]) - n[:, 0] * (p[:, 1] - centre[1]),
+                n[:, 0],
+                n[:, 1],
+            ]
+        )
+
+    def _fixture(self, standoff, n_per=200):
+        # Three mutually perpendicular faces, so all three DoF are observable.
+        rng = np.random.default_rng(3)
+        p = np.vstack(
+            [
+                np.column_stack(
+                    [rng.uniform(-1, 1, n_per), rng.uniform(-1, 1, n_per), np.zeros(n_per)]
+                ),
+                np.column_stack(
+                    [np.full(n_per, 1.0), rng.uniform(-1, 1, n_per), rng.uniform(0, 0.5, n_per)]
+                ),
+                np.column_stack(
+                    [rng.uniform(-1, 1, n_per), np.full(n_per, 1.0), rng.uniform(0, 0.5, n_per)]
+                ),
+            ]
+        )
+        n = np.vstack(
+            [
+                np.tile([0.0, 0.0, 1.0], (n_per, 1)),
+                np.tile([1.0, 0.0, 0.0], (n_per, 1)),
+                np.tile([0.0, 1.0, 0.0], (n_per, 1)),
+            ]
+        )
+        p[:, :2] += standoff
+        return p, n
+
+    def test_centroid_centring_is_standoff_independent(self):
+        # The object's own radius is ~1 m here, so the centred condition number
+        # is set by the shape and must not move as the object is pushed away.
+        conds = []
+        for standoff in [np.array([0.0, 0.0]), np.array([3.0, 2.0]), np.array([30.0, 20.0])]:
+            p, n = self._fixture(standoff)
+            J = self._jacobian(p, n, p[:, :2].mean(axis=0))
+            conds.append(np.linalg.cond(J.T @ J))
+
+        for cond in conds:
+            self.assertLess(cond, 10.0, f"centred conditioning degraded: {conds}")
+        self.assertLess(max(conds) / min(conds), 1.1, f"centred cond varies with standoff: {conds}")
+
+    def test_origin_centring_degrades_with_standoff(self):
+        # The failure the centring exists to prevent. At 36 m the origin-centred
+        # normal equations are ~1e6 -- still solvable in float64, which is why
+        # this is insurance rather than a bug fix, but it is unbounded.
+        p_near, n_near = self._fixture(np.array([0.0, 0.0]))
+        p_far, n_far = self._fixture(np.array([30.0, 20.0]))
+
+        cond_near = np.linalg.cond(
+            self._jacobian(p_near, n_near, np.zeros(2)).T
+            @ self._jacobian(p_near, n_near, np.zeros(2))
+        )
+        cond_far = np.linalg.cond(
+            self._jacobian(p_far, n_far, np.zeros(2)).T @ self._jacobian(p_far, n_far, np.zeros(2))
+        )
+
+        self.assertGreater(cond_far / cond_near, 1e4)
+        # And the centred form at the same standoff is orders of magnitude better.
+        cond_far_centred = np.linalg.cond(
+            self._jacobian(p_far, n_far, p_far[:, :2].mean(axis=0)).T
+            @ self._jacobian(p_far, n_far, p_far[:, :2].mean(axis=0))
+        )
+        self.assertGreater(cond_far / cond_far_centred, 1e4)
+
 
 class TestSe2Se3Embedding(unittest.TestCase):
     def test_se2_to_se3_structure(self):
-        T = se2_to_se3(0.7, np.array([1.0, 2.0]), z=0.3)
+        T = se2_pose(0.7, np.array([1.0, 2.0]), z=0.3)
         np.testing.assert_allclose(T[2, :3], [0.0, 0.0, 1.0], atol=1e-12)
         np.testing.assert_allclose(T[:3, 2], [0.0, 0.0, 1.0], atol=1e-12)
         np.testing.assert_allclose(T[:3, 3], [1.0, 2.0, 0.3], atol=1e-12)
@@ -73,7 +191,7 @@ class TestSe2Se3Embedding(unittest.TestCase):
 
     def test_project_to_se2_recovers_yaw_under_roll_perturbation(self):
         theta, z_offset = 0.8, 0.3
-        T = se2_to_se3(theta, np.array([1.5, -0.4]), z=z_offset)
+        T = se2_pose(theta, np.array([1.5, -0.4]), z=z_offset)
 
         # Perturb with a roll rotation and a z drift, as an unconstrained ICP would.
         roll = 0.1
@@ -121,7 +239,7 @@ class TestConstrainedRansac(unittest.TestCase):
         model_points = rng.uniform(-1, 1, size=(n, 3))
         model_points[:, 2] = rng.uniform(0.0, 0.5, size=n)
 
-        T_true = se2_to_se3(theta_true, t_true, z_offset)
+        T_true = se2_pose(theta_true, t_true, z_offset)
         scene_points = model_points @ T_true[:3, :3].T + T_true[:3, 3]
         scene_points += rng.normal(scale=noise, size=scene_points.shape)
 
@@ -296,7 +414,7 @@ class TestSe2Icp(unittest.TestCase):
 
     def _make_problem(self, rng, theta_true, t_true, z_offset, noise=0.001):
         model_points, model_normals = self._make_corner_scene(rng)
-        T_true = se2_to_se3(theta_true, t_true, z_offset)
+        T_true = se2_pose(theta_true, t_true, z_offset)
         scene_points = model_points @ T_true[:3, :3].T + T_true[:3, 3]
         scene_points += rng.normal(scale=noise, size=scene_points.shape)
         scene_normals = model_normals @ T_true[:3, :3].T
@@ -309,12 +427,13 @@ class TestSe2Icp(unittest.TestCase):
             rng, theta_true, t_true, z_offset
         )
 
-        T_init = se2_to_se3(theta_true - 0.1, t_true + [-0.05, 0.1], z_offset)
-        result = icp_point_to_plane_se2(
+        T_init = se2_pose(theta_true - 0.1, t_true + [-0.05, 0.1], z_offset)
+        result = icp_se2(
             model_points,
             scene_points,
             scene_normals,
             T_init,
+            gnc=TEST_GNC,
             max_correspondence_distance=0.3,
             max_iterations=50,
         )
@@ -331,12 +450,13 @@ class TestSe2Icp(unittest.TestCase):
         model_points, scene_points, scene_normals, _ = self._make_problem(
             rng, -0.7, np.array([-0.2, 0.4]), z_offset
         )
-        T_init = se2_to_se3(-0.55, np.array([-0.1, 0.3]), z_offset)
-        result = icp_point_to_plane_se2(
+        T_init = se2_pose(-0.55, np.array([-0.1, 0.3]), z_offset)
+        result = icp_se2(
             model_points,
             scene_points,
             scene_normals,
             T_init,
+            gnc=TEST_GNC,
             max_correspondence_distance=0.3,
             max_iterations=50,
         )
@@ -354,18 +474,18 @@ class TestSe2Icp(unittest.TestCase):
         model_points, scene_points, scene_normals, _ = self._make_problem(
             rng, 0.0, np.array([0.0, 0.0]), 0.0
         )
-        T_init = se2_to_se3(0.0, np.array([100.0, 100.0]), 0.0)  # far off the scene
-        result = icp_point_to_plane_se2(
+        T_init = se2_pose(0.0, np.array([100.0, 100.0]), 0.0)  # far off the scene
+        result = icp_se2(
             model_points,
             scene_points,
             scene_normals,
             T_init,
+            gnc=TEST_GNC,
             max_correspondence_distance=0.05,
             max_iterations=20,
         )
         self.assertEqual(result.fitness, 0.0)
         np.testing.assert_array_equal(result.transformation, T_init)
-
 
 if __name__ == "__main__":
     unittest.main()

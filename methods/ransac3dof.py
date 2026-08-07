@@ -8,9 +8,10 @@ import open3d as o3d
 import trimesh
 
 from methods.base import SearchRange, orient_normals_hoppe, reorient_normals_to_reference
-from methods.constrained_ransac import constrained_ransac_se2, project_to_se2
+from methods.constrained_ransac import constrained_ransac_se2
 from methods.ransac import RansacEstimator, RansacParams
-from methods.se2_icp import icp_point_to_plane_se2, icp_translation_only
+from methods.se2_icp import GncSchedule, icp_se2
+from methods.se2_lie_utils import project_to_se2
 
 if TYPE_CHECKING:
     pass
@@ -20,13 +21,6 @@ if TYPE_CHECKING:
 # a meaningful subset, and refining against a handful of points is worse than
 # refining against a biased many.
 _MIN_VISIBLE_MODEL_POINTS = 50
-
-
-def _yaw_delta_deg(T_a: np.ndarray, T_b: np.ndarray) -> float:
-    """Absolute yaw difference between two SE(2) poses, wrapped to [0, 180]."""
-    yaw_a = float(np.arctan2(T_a[1, 0], T_a[0, 0]))
-    yaw_b = float(np.arctan2(T_b[1, 0], T_b[0, 0]))
-    return abs(float(np.degrees(np.arctan2(np.sin(yaw_b - yaw_a), np.cos(yaw_b - yaw_a)))))
 
 
 @dataclass(frozen=True)
@@ -286,7 +280,12 @@ class Ransac3DoFParams(RansacParams):
             benchmark sweeps stay deterministic per trial; pass None
             explicitly for non-deterministic runs.
         front_crop_aspect: Aspect ratio divisor for towing face slab depth
-            (depth = l_y / front_crop_aspect). None uses the full mesh.
+            (depth = l_y / front_crop_aspect). None uses the full mesh. The
+            value IS the slab's plan-view aspect ratio, since the width is l_y
+            by construction -- so 1.0 asks for a square slab, and a square slab
+            has a genuine 90-degree minimum in the registration objective. See
+            the comment on the field for why the default is 2.0, and
+            scripts/inspect_front_slab.py to see the crops.
         front_face_max_angle_deg: Largest angle (degrees) permitted between the
             cart's outward towing-face arrow and the direction to the camera.
             None (the default) disables the constraint entirely, which is the
@@ -315,21 +314,30 @@ class Ransac3DoFParams(RansacParams):
             initialising ICP AT the ground truth and watching it walk away.
             False (the default) keeps today's behaviour. See vault note
             "30.06 - T0 Translation Error and the Visibility Cull".
-        icp_refine_ladder: Extra refinement stages run after the shipped wide
-            stage, as decreasing correspondence distances in meters, e.g.
-            (0.05, 0.02, 0.01). The wide stage keeps its large capture basin;
-            these only tighten. None (the default) runs the single wide stage
-            alone. Nearly all of the benefit needs icp_visibility_cull too --
-            tightening against a cloud that is two thirds fictional just finds
-            the same biased minimum more precisely.
-        icp_yaw_guard_deg: Largest yaw change a ladder stage may make. A tight
-            culled objective is sharp enough to fall into a symmetry twin: the
-            leanflow slab is 0.735 x 0.704 m, near-square in plan, and the tight
-            stage snapped every correct leanflow frame to ~90 degrees without
-            this. When a stage exceeds the guard its rotation is discarded and
-            the stage is re-run in translation only, which keeps the precision
-            and forbids the jump. None disables the guard (not recommended with
-            a ladder). Ignored when icp_refine_ladder is None.
+        icp_gnc_scale_min: Residual scale in meters the GNC anneal finishes at --
+            the point past which a correspondence stops being treated as
+            noise-plausible. Fixed by the depth sensor, NOT tuned: for a stereo
+            pair sigma_z = z^2 * sigma_d / (f * B), and this rig has
+            f * B = 639.99768 px * 0.095 m = 60.80 px.m. At a typical cart range
+            z = 3.0 m and a subpixel disparity accuracy sigma_d = 0.1 px,
+            sigma_z = 9.0 * 0.1 / 60.80 = 0.0148 m. Annealing below the noise
+            floor cannot help -- it down-weights correspondences whose residual
+            IS the measurement noise, which discards signal.
+
+            This replaced icp_refine_ladder, which was the same idea expressed
+            as three or four hand-picked correspondence distances. A ladder is a
+            coarse discrete GNC schedule over a DISCONTINUOUS cost: at each rung
+            a correspondence flips from full weight to none, so the objective
+            jumps between stages and the solver can be thrown by the jump
+            itself. Worse, a ladder shrinks the KD-tree RADIUS to tighten, which
+            re-couples the capture basin to the outlier threshold -- the exact
+            coupling GNC exists to break. The shipped ladder's last rung was
+            0.01 m, below this noise floor, so it retrieved almost no
+            correspondences at all. See GncSchedule in methods/se2_icp.py.
+        icp_gnc_shrink: Divisor applied to the kernel scale per annealing
+            iteration. sqrt(1.4) = 1.1832 reproduces the mu / 1.4 schedule of
+            Yang et al. (RA-L 2020); see GncSchedule, which also documents when
+            this gets clamped upward to fit icp_max_iterations.
     """
 
     z_offset: float | None = None
@@ -337,10 +345,26 @@ class Ransac3DoFParams(RansacParams):
     edge_length_tolerance: float = 0.14
     ransac_confidence: float = 0.999
     seed: int | None = 0
-    # 1.0 (slab depth = full y-extent) beat 2.0 in the 70-frame ablation:
-    # equal good_rate, pose_ar 0.362 vs 0.299 at aspect 0.7, and 2.0 was only
-    # ever measured with every arm below switched OFF.
-    front_crop_aspect: float | None = 1.0
+    # 2.0, because 1.0 made the slab square BY CONSTRUCTION and that is what
+    # creates the 90-degree symmetry twin the yaw guard exists to catch.
+    # depth = l_y / aspect, and the slab's width is l_y, so `aspect` IS the
+    # plan-view aspect ratio. Measured on all three meshes (see
+    # scripts/inspect_front_slab.py):
+    #
+    #     aspect   colruyt   leanflow   picanol
+    #       1.0     1.043      1.013     1.000   <- square, degenerate
+    #       1.5     1.611      1.481     1.500
+    #       2.0     2.214      1.974     2.000
+    #
+    # picanol lands at exactly 1.000 at aspect 1.0. This was never a property of
+    # the fleet; it was the default asking for it.
+    #
+    # The ablation that previously selected 1.0 is superseded: its own note
+    # recorded that 2.0 "was only ever measured with every arm below switched
+    # OFF", and hoppe_normal_orientation and icp_visibility_cull have since
+    # become True by default. Same pattern as the front-face gate, which read
+    # negative before the Hoppe fix and positive after.
+    front_crop_aspect: float | None = 2.0
     # The three below are deliberately NOT searchable: each is an A/B arm's
     # independent variable, set per-arm via --overrides or selected by profile.
     # Letting Optuna tune one turns an on/off contrast into a nuisance parameter.
@@ -357,8 +381,13 @@ class Ransac3DoFParams(RansacParams):
     # reproduce a pre-fix historical number.
     hoppe_normal_orientation: bool = True
     icp_visibility_cull: bool = True
-    icp_refine_ladder: tuple[float, ...] | None = None
-    icp_yaw_guard_deg: float | None = 5.0
+    # Neither is searchable. scale_min is a sensor noise floor, not a free
+    # parameter -- letting Optuna tune it would let it buy accuracy on THIS
+    # dataset by pretending the depth camera is quieter than it is. shrink is a
+    # convergence-schedule constant from the GNC paper; it is exposed so an
+    # anneal-rate A/B can be run from --overrides, not so a sweep can tune it.
+    icp_gnc_scale_min: float = 0.0148
+    icp_gnc_shrink: float = 1.1832
 
 
 # =====================================================================
@@ -580,13 +609,26 @@ class Ransac3DoFEstimator(RansacEstimator):
         Every increment is composed through the se(2) exponential map, so the
         refined pose never leaves the planar manifold.
 
-        One wide stage always runs, at icp_max_correspondence_distance and over
-        the full model cloud -- that is the stage with the capture basin, and it
-        is bit-identical to what shipped before. icp_refine_ladder then adds
-        optional tightening stages on top; params.icp_visibility_cull decides
-        whether they see the whole model or only the part of it the camera can
-        actually observe. Ordering matters: culling first and tightening after
-        would hand the tight stage a smaller basin than the geometry warrants.
+        Two stages, and they differ ONLY in which model points they see.
+
+        Stage 1 runs over the full model cloud. Its job is to produce a pose at
+        all, and it has to use every point because the visibility cull is
+        pose-dependent -- hidden-point removal needs a pose to remove from, so
+        there is nothing to cull with until stage 1 has finished.
+
+        Stage 2 (params.icp_visibility_cull) re-runs against only the points the
+        camera can actually observe. The meshes are zero-thickness shells, so
+        roughly two thirds of the model is far-sheet fiction that still demands
+        correspondences and drags the fit toward the sensor; removing it is what
+        the ~2.2 cm bias measurement in vault note 30.06 is about.
+
+        BOTH stages use the SAME KD-tree radius, icp_max_correspondence_distance,
+        and both anneal the kernel over it. That is the whole point of the split:
+        the radius is now purely the capture basin, and the tightening that used
+        to be done by shrinking it is done by the Geman-McClure scale instead.
+        Shrinking both -- which is what icp_refine_ladder did -- re-couples the
+        two jobs, and its tightest rung ended up below the sensor noise floor,
+        where almost nothing retrieves a correspondence at all.
 
         There is deliberately no second, 180-degree-flipped hypothesis here. The
         flip is settled upstream by FrontFaceGate, geometrically, before a
@@ -605,61 +647,41 @@ class Ransac3DoFEstimator(RansacEstimator):
 
         T_init = np.asarray(T_init)
         model_points = np.asarray(model_pc.points)
-        result = icp_point_to_plane_se2(
+        # One schedule for both stages: scale_min is a property of the sensor
+        # and the radius is the same, so there is nothing left to vary.
+        gnc = GncSchedule(
+            scale_min=self.params.icp_gnc_scale_min,
+            shrink=self.params.icp_gnc_shrink,
+        )
+        result = icp_se2(
             model_points=model_points,
             scene_points=scene_points,
             scene_normals=scene_normals,
             T_init=T_init,
             max_correspondence_distance=self.params.icp_max_correspondence_distance,
+            gnc=gnc,
             max_iterations=self.params.icp_max_iterations,
         )
 
-        n_guard_trips = 0
-        for stage_distance in self.params.icp_refine_ladder or ():
+        if self.params.icp_visibility_cull:
             T_stage = result.transformation
-            stage_points = model_points
-            if self.params.icp_visibility_cull:
-                visible = self._visible_model_indices(model_points, T_stage)
-                # A near-empty visible set means the pose is nowhere near the
-                # scene (a flipped or runaway candidate). Falling back to the
-                # full cloud keeps such a frame on exactly the code path it
-                # would have taken before the cull existed, rather than
-                # refining against a handful of points.
-                if len(visible) >= _MIN_VISIBLE_MODEL_POINTS:
-                    stage_points = model_points[visible]
-
-            stage = icp_point_to_plane_se2(
-                model_points=stage_points,
-                scene_points=scene_points,
-                scene_normals=scene_normals,
-                T_init=T_stage,
-                max_correspondence_distance=stage_distance,
-                max_iterations=self.params.icp_max_iterations,
-            )
-
-            guard = self.params.icp_yaw_guard_deg
-            if guard is not None and _yaw_delta_deg(T_stage, stage.transformation) > guard:
-                # The stage tried to jump to a symmetry twin. Discard its
-                # rotation, keep its translation: the gain this ladder exists
-                # for is positional, and yaw was already settled upstream.
-                n_guard_trips += 1
-                stage = icp_translation_only(
-                    model_points=stage_points,
+            visible = self._visible_model_indices(model_points, T_stage)
+            # A near-empty visible set means the pose is nowhere near the scene
+            # (a flipped or runaway candidate). Skipping the second stage keeps
+            # such a frame on exactly the code path it would have taken before
+            # the cull existed, rather than refining against a handful of points.
+            if len(visible) >= _MIN_VISIBLE_MODEL_POINTS:
+                result = icp_se2(
+                    model_points=model_points[visible],
                     scene_points=scene_points,
                     scene_normals=scene_normals,
                     T_init=T_stage,
-                    max_correspondence_distance=stage_distance,
+                    max_correspondence_distance=self.params.icp_max_correspondence_distance,
+                    gnc=gnc,
                     max_iterations=self.params.icp_max_iterations,
                 )
-            result = stage
 
         diagnostics = {"fitness": result.fitness, "inlier_rmse": result.inlier_rmse}
-        if self.params.icp_refine_ladder:
-            # How often the tight stages tried to rotate away. Non-zero is not a
-            # fault -- it is the guard doing its job -- but a frame where it
-            # trips on every stage is a frame whose slab is symmetric enough
-            # that front_crop_depth should be revisited for that cart.
-            diagnostics["icp_yaw_guard_trips"] = n_guard_trips
         if self._front_face is not None:
             camera_xy = np.asarray(self.extrinsic, dtype=float)[:3, 3][:2]
             diagnostics["front_face_angle_deg"] = front_face_angle_deg(

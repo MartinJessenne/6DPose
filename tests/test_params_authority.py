@@ -34,8 +34,8 @@ class TestParamsAuthority(unittest.TestCase):
             "front_face_max_angle_deg",
             "hoppe_normal_orientation",
             "icp_visibility_cull",
-            "icp_refine_ladder",
-            "icp_yaw_guard_deg",
+            "icp_gnc_scale_min",
+            "icp_gnc_shrink",
         }
         self.assertEqual(r3dof_fields, expected_r3dof)
 
@@ -101,13 +101,13 @@ class TestParamsAuthority(unittest.TestCase):
             front_face_max_angle_deg="60.0",
             z_offset="None",
             front_crop_aspect="2.5",
-            icp_refine_ladder="(0.05,0.02,0.01)",
+            icp_gnc_scale_min="0.0148",
         )
         self.assertIs(p.icp_visibility_cull, True)
         self.assertEqual(p.front_face_max_angle_deg, 60.0)
         self.assertIsNone(p.z_offset)
         self.assertEqual(p.front_crop_aspect, 2.5)
-        self.assertEqual(p.icp_refine_ladder, (0.05, 0.02, 0.01))
+        self.assertEqual(p.icp_gnc_scale_min, 0.0148)
 
     def test_t6_unknown_name_raises(self):
         with self.assertRaises(UnknownOverrideError) as ctx:
