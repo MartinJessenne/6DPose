@@ -367,10 +367,13 @@ signature of a kernel that discarded its own inliers.
 
 ## 7. Deriving the Capture Radius
 
-With Job A handled by the kernel, the radius is answerable from first
-principles. It must cover the pose error the global stage leaves, which displaces
-a *model point* by both the translation error and the yaw error acting through a
-lever arm:
+With Job A handled by the kernel, the radius *ought* to be answerable from first
+principles. The attempt below is recorded because it was shipped, believed, and
+then falsified by measurement — the radius is still the Optuna constant.
+
+The reasoning was: the basin must cover the pose error the global stage leaves,
+which displaces a *model point* by both the translation error and the yaw error
+acting through a lever arm:
 
 $$r_{\text{capture}} = \lVert \Delta t \rVert_{p95} \;+\; L \, \lvert \Delta\theta \rvert_{p95} \;+\; k\,\sigma_z$$
 
@@ -380,22 +383,53 @@ $$r_{\text{capture}} = \lVert \Delta t \rVert_{p95} \;+\; L \, \lvert \Delta\the
   over the model cloud, ~0.5 m for these slabs. From the mesh, not a guess.
 - $k = 3$ — the only free constant, and a familiar one.
 
-On the six local fixtures: $\lVert \Delta t \rVert$ reaches 0.037 m,
-$\lvert \Delta\theta \rvert$ reaches 7.0° = 0.122 rad, and $3\sigma_z \approx 0.04$ m
-at the observed scales. That gives
+### 7.1 The formula is wrong, and the measurement says so
 
-$$r_{\text{capture}} \approx 0.037 + 0.5 \times 0.122 + 0.04 = 0.138 \ \text{m}$$
+On six local fixtures the formula returned 0.138 m against the shipped,
+Optuna-tuned 0.1377 m, and that agreement was read as confirmation. It was
+coincidence. On 100 samples × 3 seeds the same formula gives
 
-against the shipped, Optuna-tuned $0.1377$ m. The sweep found the physically
-correct answer; the formula says *why*, which the 17-digit constant did not.
+$$r_{\text{capture}} = 0.2548 + 0.5 \times 0.1267 + 3 \times 0.0121 = 0.3555 \ \text{m}$$
 
-**This is six frames and must be confirmed on the full set before the constant is
-replaced by the formula.** The supporting claim — that under GNC the error as a
-function of the radius is a *step*, not a peak, so any radius above the knee is
-equally good — is asserted by
+— 2.6× the shipped 0.1377 m, which on that same run produced
+`abstention_rate = 0` and `good_rate = 0.9899`. A basin cannot be starving
+frames when nothing abstains and 99% converge. The formula overestimates.
+
+**Why it overestimates.** It conflates two different distances. `trans_xy_pre_icp`
+is the error of the pose *origin*; the KD-tree radius gates the distance from a
+transformed *model point* to its *nearest scene point*. Those come apart because
+the nearest scene point is not the true correspondent. Slide a flat slab 20 cm
+along its own face and every model point still lands within millimetres of
+*some* scene point, with a point-to-plane residual near zero — the surface is
+extended, so tangential displacement costs nothing in either the association or
+the cost. Only the component of displacement along the local surface normal
+actually separates a point from the cloud, and on these carts most of the
+pre-ICP error is tangential.
+
+So the formula charges the full pose displacement against a basin that only ever
+sees its normal component. It is a valid *upper* bound on what the basin would
+need in the worst case (a compact, curvature-rich model where every direction is
+normal to something); it is not a prediction for slab geometry.
+
+### 7.2 What the correct instrument is
+
+The quantity to measure is the one the radius actually gates: the distribution of
+model-point-to-nearest-scene-point distances at ICP entry, over all model points
+of all frames. The radius should sit above its p95. That is a direct measurement
+from inside `_refine_pose`, not a formula over pose errors — and it is not yet
+instrumented.
+
+Until it is, the radius stays at its Optuna value, with the honest label that
+nobody can re-derive it.
+
+### 7.3 The plateau, which does hold
+
+The supporting claim — that under GNC the error as a function of the radius is a
+*step*, not a peak, so any radius above the knee is equally good — is asserted by
 `tests/test_gnc_icp.py::test_gnc_error_is_flat_across_the_radius`, which scans 25
-radii and requires the spread above the knee to stay under 1 mm. If that plateau
-holds on real data too, the radius should leave the Optuna search space
-entirely: maximising an objective over a flat region returns a draw from
-evaluation noise, which is what a 17-digit constant that nobody can re-derive
-actually is.
+radii and requires the spread above the knee to stay under 1 mm. It passes, and
+nothing above falsifies it: the correction is to the *location* of the knee, not
+to the existence of the plateau. That still argues the radius should leave the
+Optuna search space, because maximising an objective over a flat region returns a
+draw from evaluation noise. What it no longer supplies is the number to replace
+it with.
