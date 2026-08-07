@@ -42,6 +42,7 @@ import open3d as o3d
 
 from methods.base import reorient_normals_to_reference
 from methods.ransac3dof import Ransac3DoFEstimator, Ransac3DoFParams
+from tests.helpers import depth_sensor
 
 
 def two_walled_slab(thickness: float = 0.01, n_per_wall: int = 400) -> o3d.geometry.PointCloud:
@@ -208,7 +209,7 @@ class TestPreparedModelNormals(unittest.TestCase):
         o3d.utility.random.seed(0)
         estimator = Ransac3DoFEstimator(
             params=Ransac3DoFParams(voxel_size=voxel_size, front_crop_aspect=None),
-            extrinsic=np.eye(4),
+            sensor=depth_sensor(),
         )
         cart_type = f"unit_test_{voxel_size}"
         estimator.prepare(self.mesh, cart_type)

@@ -244,11 +244,10 @@ class FrameRecord:
     identically across trials with no way to tell whether it was the same
     frames or not).
 
-    fitness_1/2, viol_ratio_1/2, selected, and decision come from whatever
-    flip-disambiguation diagnostics the estimator exposes via a
-    `_last_diagnostics` attribute (see Ransac3DoFEstimator._refine_pose,
-    methods/ransac3dof.py) -- estimators that don't set one (PPF, the SE(3)
-    RansacEstimator) just leave those fields None.
+    The icp_*, scene_depth_* and front_face_angle_deg fields come from whatever
+    the estimator exposes via a `_last_diagnostics` attribute (see
+    Ransac3DoFEstimator._refine_pose, methods/ransac3dof.py) -- estimators that
+    don't set one (PPF, the SE(3) RansacEstimator) just leave them None.
 
     FAILED frames get a record too, with outcome != "good" and the pose fields
     left None. They used to be dropped on the floor (evaluate_pipeline simply
@@ -268,8 +267,23 @@ class FrameRecord:
     flipped: bool | None = None
     trans_xy: float | None = None
     yaw_err: float | None = None
-    fitness: float | None = None
-    inlier_rmse: float | None = None
+    # The same two errors measured at ICP's INPUT, i.e. what the global stage
+    # left behind. These size the capture basin: the KD-tree radius must cover
+    # the translation error plus the yaw error acting through the model's lever
+    # arm, or a correct hypothesis retrieves no correspondences.
+    trans_xy_pre_icp: float | None = None
+    yaw_err_pre_icp: float | None = None
+    # GNC refinement quality (see IcpResult, methods/se2_icp.py). Not the old
+    # fitness/inlier_rmse: those counted points inside the capture radius, which
+    # measures basin coverage and saturates once the radius is generous.
+    icp_effective_inlier_fraction: float | None = None
+    icp_robust_rmse: float | None = None
+    icp_median_kernel_scale: float | None = None
+    # Camera-frame depth spread of the scene cloud. The noise bound goes as z^2,
+    # so this is what says whether a per-point kernel scale mattered on a frame
+    # or whether one number would have done.
+    scene_depth_p05: float | None = None
+    scene_depth_p95: float | None = None
     # Signed angle between the final pose's towing-face arrow and the direction
     # to the camera. Signed on purpose: a cluster near +/-180 is a flip that got
     # through, a spread around +/-30 is ordinary yaw error, and the unsigned

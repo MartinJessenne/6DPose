@@ -9,6 +9,7 @@ import trimesh
 
 from methods.base import SearchRange, orient_normals_hoppe, reorient_normals_to_reference
 from methods.constrained_ransac import constrained_ransac_se2
+from methods.depth_noise import DepthSensor
 from methods.ransac import RansacEstimator, RansacParams
 from methods.se2_icp import GncSchedule, icp_se2
 from methods.se2_lie_utils import project_to_se2
@@ -90,7 +91,7 @@ def front_face_angle_deg(T: np.ndarray, front_face: FrontFace, camera_xy: np.nda
     Args:
         T: (4, 4) candidate pose, CAD frame -> robot base_link frame.
         front_face: The cart's arrow in the CAD frame.
-        camera_xy: (2,) camera centre in base_link, i.e. extrinsic[:3, 3][:2].
+        camera_xy: (2,) camera centre in base_link, i.e. sensor.camera_origin[:2].
     """
     R2 = T[:2, :2]
     n2 = R2 @ front_face.normal[:2]  # (2,) rotated arrow, unit for any SE(2) pose
@@ -314,30 +315,18 @@ class Ransac3DoFParams(RansacParams):
             initialising ICP AT the ground truth and watching it walk away.
             False (the default) keeps today's behaviour. See vault note
             "30.06 - T0 Translation Error and the Visibility Cull".
-        icp_gnc_scale_min: Residual scale in meters the GNC anneal finishes at --
-            the point past which a correspondence stops being treated as
-            noise-plausible. Fixed by the depth sensor, NOT tuned: for a stereo
-            pair sigma_z = z^2 * sigma_d / (f * B), and this rig has
-            f * B = 639.99768 px * 0.095 m = 60.80 px.m. At a typical cart range
-            z = 3.0 m and a subpixel disparity accuracy sigma_d = 0.1 px,
-            sigma_z = 9.0 * 0.1 / 60.80 = 0.0148 m. Annealing below the noise
-            floor cannot help -- it down-weights correspondences whose residual
-            IS the measurement noise, which discards signal.
+        icp_gnc_mu_shrink: Divisor applied to the GNC control parameter per
+            annealing iteration, mu <- mu / shrink. 1.4 is Yang et al. (RA-L
+            2020) Remark 5 verbatim. See GncSchedule in methods/se2_icp.py,
+            which also documents when this gets clamped upward to fit
+            icp_max_iterations.
 
-            This replaced icp_refine_ladder, which was the same idea expressed
-            as three or four hand-picked correspondence distances. A ladder is a
-            coarse discrete GNC schedule over a DISCONTINUOUS cost: at each rung
-            a correspondence flips from full weight to none, so the objective
-            jumps between stages and the solver can be thrown by the jump
-            itself. Worse, a ladder shrinks the KD-tree RADIUS to tighten, which
-            re-couples the capture basin to the outlier threshold -- the exact
-            coupling GNC exists to break. The shipped ladder's last rung was
-            0.01 m, below this noise floor, so it retrieved almost no
-            correspondences at all. See GncSchedule in methods/se2_icp.py.
-        icp_gnc_shrink: Divisor applied to the kernel scale per annealing
-            iteration. sqrt(1.4) = 1.1832 reproduces the mu / 1.4 schedule of
-            Yang et al. (RA-L 2020); see GncSchedule, which also documents when
-            this gets clamped upward to fit icp_max_iterations.
+            There is no companion "scale_min": the anneal terminates at mu = 1,
+            where the kernel scale IS the sensor's per-point noise bound (see
+            DepthSensor.noise_bound). That used to be a configured constant,
+            which was wrong twice over -- fixed at one range for a quantity that
+            grows as z^2, and collapsing to one number a bound that varies
+            across a single cart's own depth extent.
     """
 
     z_offset: float | None = None
@@ -381,13 +370,11 @@ class Ransac3DoFParams(RansacParams):
     # reproduce a pre-fix historical number.
     hoppe_normal_orientation: bool = True
     icp_visibility_cull: bool = True
-    # Neither is searchable. scale_min is a sensor noise floor, not a free
-    # parameter -- letting Optuna tune it would let it buy accuracy on THIS
-    # dataset by pretending the depth camera is quieter than it is. shrink is a
-    # convergence-schedule constant from the GNC paper; it is exposed so an
-    # anneal-rate A/B can be run from --overrides, not so a sweep can tune it.
-    icp_gnc_scale_min: float = 0.0148
-    icp_gnc_shrink: float = 1.1832
+    # Not searchable: a convergence-schedule constant from the GNC paper,
+    # exposed so an anneal-rate A/B can be run from --overrides, not so a sweep
+    # can tune it. The sensor noise bound that used to sit beside it now lives
+    # on DepthSensor, where it is physics rather than a hyperparameter.
+    icp_gnc_mu_shrink: float = 1.4
 
 
 # =====================================================================
@@ -402,9 +389,10 @@ class Ransac3DoFEstimator(RansacEstimator):
     SE(2)-constrained RANSAC and projects the final refined pose back onto
     the SE(2) manifold (roll = pitch = 0, z = z_offset).
 
-    The SE(2) assumption is only valid in a Z-up frame, so the camera-to-robot
-    extrinsic is mandatory: without it the scene cloud would stay in the
-    camera frame (Z-forward) and the XY projection would be meaningless.
+    The SE(2) assumption is only valid in a Z-up frame, so the sensor (which
+    carries the camera-to-robot transform) is mandatory: without it the scene
+    cloud would stay in the camera frame (Z-forward) and the XY projection would
+    be meaningless.
     """
 
     params_cls = Ransac3DoFParams
@@ -413,18 +401,13 @@ class Ransac3DoFEstimator(RansacEstimator):
     def __init__(
         self,
         params: Ransac3DoFParams | None = None,
-        extrinsic: list | np.ndarray | None = None,
+        *,
+        sensor: DepthSensor,
     ):
         if params is None:
             params = Ransac3DoFParams()
 
-        if extrinsic is None:
-            raise ValueError(
-                "Ransac3DoFEstimator requires the camera-to-robot extrinsic: the SE(2) "
-                "constraint only holds once the scene cloud is in the Z-up robot base frame."
-            )
-
-        super().__init__(params=params, extrinsic=extrinsic)
+        super().__init__(params=params, sensor=sensor)
         self._active_z_offset = 0.0
         self._active_frame = None
         self._active_cart_type = None
@@ -599,7 +582,7 @@ class Ransac3DoFEstimator(RansacEstimator):
         world = model_points @ T[:3, :3].T + T[:3, 3]
         pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(world))
         diameter = float(np.linalg.norm(pc.get_max_bound() - pc.get_min_bound()))
-        camera = np.asarray(self.extrinsic, dtype=float)[:3, 3]
+        camera = self.sensor.camera_origin
         _mesh, kept = pc.hidden_point_removal(camera.tolist(), diameter * 100.0)
         return np.asarray(kept, dtype=int)
 
@@ -647,18 +630,16 @@ class Ransac3DoFEstimator(RansacEstimator):
 
         T_init = np.asarray(T_init)
         model_points = np.asarray(model_pc.points)
-        # One schedule for both stages: scale_min is a property of the sensor
-        # and the radius is the same, so there is nothing left to vary.
-        gnc = GncSchedule(
-            scale_min=self.params.icp_gnc_scale_min,
-            shrink=self.params.icp_gnc_shrink,
-        )
+        # One schedule for both stages: the radius is the same and the terminal
+        # scale is the sensor's, so there is nothing left to vary.
+        gnc = GncSchedule(shrink=self.params.icp_gnc_mu_shrink)
         result = icp_se2(
             model_points=model_points,
             scene_points=scene_points,
             scene_normals=scene_normals,
             T_init=T_init,
             max_correspondence_distance=self.params.icp_max_correspondence_distance,
+            sensor=self.sensor,
             gnc=gnc,
             max_iterations=self.params.icp_max_iterations,
         )
@@ -677,13 +658,25 @@ class Ransac3DoFEstimator(RansacEstimator):
                     scene_normals=scene_normals,
                     T_init=T_stage,
                     max_correspondence_distance=self.params.icp_max_correspondence_distance,
+                    sensor=self.sensor,
                     gnc=gnc,
                     max_iterations=self.params.icp_max_iterations,
                 )
 
-        diagnostics = {"fitness": result.fitness, "inlier_rmse": result.inlier_rmse}
+        scene_depth = self.sensor.depth(scene_points)
+        diagnostics = {
+            "icp_effective_inlier_fraction": result.effective_inlier_fraction,
+            "icp_robust_rmse": result.robust_rmse,
+            "icp_median_kernel_scale": result.median_kernel_scale,
+            # The pose ICP was handed. The estimator has no ground truth, so it
+            # reports what it DID and the evaluation harness computes the error
+            # against GT -- see evaluate_pipeline in evaluation.py.
+            "T_icp_init": T_init,
+            "scene_depth_p05": float(np.percentile(scene_depth, 5)),
+            "scene_depth_p95": float(np.percentile(scene_depth, 95)),
+        }
         if self._front_face is not None:
-            camera_xy = np.asarray(self.extrinsic, dtype=float)[:3, 3][:2]
+            camera_xy = self.sensor.camera_origin[:2]
             diagnostics["front_face_angle_deg"] = front_face_angle_deg(
                 result.transformation, self._front_face, camera_xy
             )

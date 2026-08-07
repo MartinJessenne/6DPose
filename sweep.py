@@ -122,7 +122,7 @@ def run_parameter_sweep(
                     if seed_i is not None
                     else trial_params
                 )
-                trial_estimator = cfg.estimator_cls(params=params_i, extrinsic=cfg.extrinsic)
+                trial_estimator = cfg.estimator_cls(params=params_i, sensor=cfg.camera.sensor)
 
                 for cart_type, mesh in meshes.items():
                     trial_estimator.prepare(mesh, cart_type)

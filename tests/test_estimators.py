@@ -47,9 +47,16 @@ class TestEstimatorSweeps(unittest.TestCase):
         for key, value in fixed_values.items():
             self.assertEqual(getattr(params, key), value)
 
-    def test_ransac3dof_requires_extrinsic(self):
-        with self.assertRaises(ValueError):
-            Ransac3DoFEstimator(extrinsic=None)
+    def test_ransac3dof_requires_a_sensor(self):
+        """
+        The SE(2) constraint only holds once the cloud is in the Z-up robot
+        frame, so the camera pose is mandatory. It used to be an optional
+        argument with a runtime None-check in the body; it is now a required
+        keyword, so the language enforces it and the failure is a TypeError at
+        the call site rather than a ValueError deep inside.
+        """
+        with self.assertRaises(TypeError):
+            Ransac3DoFEstimator()
 
     def test_ransac3dof_derive_z_offset_from_mesh(self):
         # A unit box translated so its lowest vertex sits at z = -0.07: the

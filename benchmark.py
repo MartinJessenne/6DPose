@@ -34,7 +34,7 @@ def run_benchmark_eval(
     """Orchestrates a single benchmark evaluation run across dataset samples."""
     seed = cfg.resolved_seed
     estimator_cls = cfg.estimator_cls
-    extrinsic = cfg.extrinsic
+    sensor = cfg.camera.sensor
 
     total_samples = len(dataset)
     eval_indices = draw_eval_indices(total_samples, cfg.eval_size, seed)
@@ -56,7 +56,7 @@ def run_benchmark_eval(
     base_estimator = estimator_cls.build(
         profile_params=cfg.model.profile.params,
         overrides=cfg.overrides,
-        extrinsic=extrinsic,
+        sensor=sensor,
     )
 
     if not cfg.use_wandb:
@@ -92,7 +92,7 @@ def run_benchmark_eval(
                 if seed_i is not None
                 else base_estimator.params
             )
-            estimator = estimator_cls(params=params_i, extrinsic=extrinsic)
+            estimator = estimator_cls(params=params_i, sensor=sensor)
             for cart_type, mesh in meshes.items():
                 estimator.prepare(mesh, cart_type)
 
@@ -112,9 +112,7 @@ def run_benchmark_eval(
             frame_records.extend(fr)
 
         if cfg.dump_frames:
-            frames_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "benchmark_runs"
-            )
+            frames_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "benchmark_runs")
             frames_csv = os.path.join(frames_dir, f"{cfg.name}_frames.csv")
             write_frame_records_csv(frames_csv, frame_records)
             log_frame_records(run, cfg.name, frames_csv, frame_records)
@@ -133,9 +131,7 @@ def run_benchmark_eval(
             if np.isfinite(m.p95_latency_s)
             else "  p95_latency_s           n/a      (no successful estimation)"
         )
-        print(
-            f"  gross_yaw_rate          {m.gross_yaw_rate:.4f}   (|yaw| > {GROSS_YAW_DEG:g}°)"
-        )
+        print(f"  gross_yaw_rate          {m.gross_yaw_rate:.4f}   (|yaw| > {GROSS_YAW_DEG:g}°)")
         print(f"  abstention_rate         {m.abstention_rate:.4f}   (no pose returned)")
         print(f"  detection_failure_rate  {m.detection_failure_rate:.4f}   (YOLO, upstream)")
         print("")

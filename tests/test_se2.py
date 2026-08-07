@@ -18,13 +18,14 @@ from methods.se2_lie_utils import (
     se2_vee,
     so2_exp,
 )
-from tests.helpers import se2_pose
+from tests.helpers import depth_sensor, se2_pose
 
-# The rig's depth-noise floor (see Ransac3DoFParams.icp_gnc_scale_min). These
-# scenes carry 1 mm of noise, far inside it, so the Geman-McClure weights
-# stay near 1 and the solver behaves as plain least squares -- which is what
-# lets these tests keep asserting exact convergence.
-TEST_GNC = GncSchedule(scale_min=0.0148)
+# These scenes carry 1 mm of noise, far inside the sensor's bound at the
+# fixture standoff (c_bar ~ 0.015 m), so the Geman-McClure weights stay near 1
+# and the solver behaves as plain least squares -- which is what lets these
+# tests keep asserting exact convergence.
+TEST_GNC = GncSchedule()
+TEST_SENSOR = depth_sensor()
 
 
 class TestSe2LieUtils(unittest.TestCase):
@@ -434,6 +435,7 @@ class TestSe2Icp(unittest.TestCase):
             scene_normals,
             T_init,
             gnc=TEST_GNC,
+            sensor=TEST_SENSOR,
             max_correspondence_distance=0.3,
             max_iterations=50,
         )
@@ -442,7 +444,7 @@ class TestSe2Icp(unittest.TestCase):
         theta_est = np.arctan2(T[1, 0], T[0, 0])
         self.assertAlmostEqual(theta_est, theta_true, delta=5e-3)
         np.testing.assert_allclose(T[:2, 3], t_true, atol=5e-3)
-        self.assertGreater(result.fitness, 0.95)
+        self.assertGreater(result.effective_inlier_fraction, 0.95)
 
     def test_iterates_stay_exactly_planar(self):
         rng = np.random.default_rng(5)
@@ -457,6 +459,7 @@ class TestSe2Icp(unittest.TestCase):
             scene_normals,
             T_init,
             gnc=TEST_GNC,
+            sensor=TEST_SENSOR,
             max_correspondence_distance=0.3,
             max_iterations=50,
         )
@@ -481,11 +484,13 @@ class TestSe2Icp(unittest.TestCase):
             scene_normals,
             T_init,
             gnc=TEST_GNC,
+            sensor=TEST_SENSOR,
             max_correspondence_distance=0.05,
             max_iterations=20,
         )
-        self.assertEqual(result.fitness, 0.0)
+        self.assertEqual(result.effective_inlier_fraction, 0.0)
         np.testing.assert_array_equal(result.transformation, T_init)
+
 
 if __name__ == "__main__":
     unittest.main()

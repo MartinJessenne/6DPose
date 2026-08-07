@@ -74,7 +74,8 @@ def main() -> int:
     if args.o3d_seed is not None:
         o3d.utility.random.seed(args.o3d_seed)
 
-    extrinsic = np.array(args.camera.extrinsic, dtype=np.float64)
+    sensor = args.camera.sensor
+    extrinsic = sensor.T_robot_camera
     camera = Camera(fx=args.camera.fx, fy=args.camera.fy, cx=args.camera.cx, cy=args.camera.cy)
     cam_xy = extrinsic[:3, 3][:2]
 
@@ -82,7 +83,7 @@ def main() -> int:
         local_model_path=args.yolo.local_path, repo_id=args.yolo.repo, filename=args.yolo.file
     )
     meshes = load_cad_meshes()
-    estimator = args.model.ESTIMATOR_CLS(params=args.model.profile.params, extrinsic=extrinsic)
+    estimator = args.model.ESTIMATOR_CLS(params=args.model.profile.params, sensor=sensor)
     for cart_type, mesh in meshes.items():
         estimator.prepare(mesh, cart_type)
 

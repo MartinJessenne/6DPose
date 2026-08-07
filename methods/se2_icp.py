@@ -1,59 +1,20 @@
 """
-SE(2)-constrained point-to-plane ICP (Gauss-Newton) for ground-bounded objects.
+SE(2)-constrained point-to-plane ICP (Gauss-Newton) with a GNC robust kernel.
 
-Replaces the unconstrained SE(3) ICP refinement for the 3 DoF pipeline: each
-Gauss-Newton increment xi = (omega, vx, vy) is composed onto the current pose
-through the se(2) exponential map (methods/se2_lie_utils.se2_exp), so every
-iterate stays exactly on the SE(2) manifold — roll and pitch remain zero and
-the z translation is never touched. No final re-projection is needed.
+Each Gauss-Newton increment xi = (omega, vx, vy) is composed onto the current
+pose through the se(2) exponential map, so every iterate stays exactly on the
+SE(2) manifold -- roll and pitch remain zero and z is never touched. Operates on
+raw np.ndarray inputs; no open3d. Point-to-plane residuals use the SCENE normals,
+matching Open3D's TransformationEstimationPointToPlane convention.
 
-Like the rest of the constrained pipeline, this module operates on raw
-np.ndarray inputs and does not depend on open3d. Point-to-plane residuals use
-the SCENE normals (target normals), matching Open3D's
-TransformationEstimationPointToPlane convention.
-
-There is deliberately no dual-hypothesis refinement here any more. Refining a
-180-degree-flipped copy and picking a winner on fitness or RMSE was an attempt to
-resolve the flip with scores that are symmetric under it -- the margins involved
-were 2% and less on a near-symmetric object. The flip is now settled in the
-global stage by FrontFaceGate (methods/ransac3dof.py), on geometry rather than
-on fit, before a candidate is ever scored.
-
-The single icp_max_correspondence_distance hyperparameter which was carrying all
-the importance weight in the previous parameter sweeps was in fact doing two jobs at
-the same time:
-Job 1 -- the capture basin :
-    it's the maximal distance at which a model point can be considered to have a valid
-    correspondence in the scene, and therefore the maximal distance at which a
-    model point can contribute to the residual sum-of-squares. This is the "capture basin" of the ICP refinement.
-    Heuristically, the capture basin should be set at a value large enough to get a chance to converge.
-Job 2 -- outlier rejection :
-    it's how large a residual is still noise-plausible. It must be tight enough or ICP pairs model points
-    with the wrong scene points and settles in a biased minimum. (This was the 2.2 cm fixed point of the previous iterations).
-
-Gnc splits them and schedule progressively the job 2 with a robust Geman-McClure kernel toward a minimal value.
-
-ONE SOLVER, ONE MOTION
-----------------------
 There is exactly one entry point, icp_se2, and it always solves the full 3 DoF
-increment xi = (omega, vx, vy).
+increment. There is no dual-hypothesis refinement: the flip is settled upstream
+by FrontFaceGate on geometry, not downstream on a fitness tiebreak.
 
-There used to be a second, yaw-frozen motion model, selected per call. It served
-one caller: a post-hoc yaw guard in Ransac3DoFEstimator that re-ran a refinement
-stage with rotation disabled whenever the first solve rotated too far. That guard
-existed because front_crop_aspect defaulted to 1.0, which made the front slab
-square BY CONSTRUCTION (depth = l_y, and the width is l_y) and put a genuine
-90-degree minimum in the objective.
-
-At the current default of 2.0 the slab is ~2:1 on all three carts and the twin is
-gone. Measured, RNG-free, ICP initialised at a known yaw offset: at aspect 1.0
-the guard fires at +/-70 degree starts and the frames still end 55-58 degrees
-wrong -- it froze a bad yaw, it never recovered one. At aspect 2.0 nothing fires
-out to +/-80 degrees and guarded and unguarded output is bit-identical on every
-cart. The capture basin widened from about +/-45 to at least +/-80 degrees.
-
-So the second motion model was not solving a problem, it was patching one the
-crop had created. Both are deleted.
+See docs/explanation/gnc_refinement.md for the graduated non-convexity
+derivation, why the capture radius and the outlier threshold had to be split,
+why the noise bound is per-correspondence, and the two deliberate departures
+from the paper (re-association, and c_bar = 1 sigma).
 """
 
 import logging
@@ -62,169 +23,149 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
-from methods.registration_result import RegistrationResult
+from methods.depth_noise import DepthSensor
 from methods.se2_lie_utils import se2_exp_about, se2_to_se3
+
+# Terminal control parameter: at mu = 1 the surrogate IS the Geman-McClure cost.
+# Copied into the schedule rather than divided down to, so `mu == _MU_FINAL` is
+# an exact test.
+_MU_FINAL = 1.0
+
+# Unknowns per iteration: omega, vx, vy.
+_DOF = 3
+
+# Levenberg-Marquardt damping RELATIVE to the normal matrix's own scale, which
+# caps the damped condition number at ~1/1e-6 = 1e6. Replaced an absolute
+# 1e-12 * eye(3): on a matrix with O(1) entries that is below rounding and
+# damped nothing, and np.linalg.solve raises only on EXACT singularity, so an
+# ill-conditioned system returned a huge increment silently.
+_LM_RELATIVE_DAMPING = 1e-6
+
+# Condition number of the UNDAMPED normal matrix above which the visible
+# geometry is not constraining all 3 DoF -- typically a single plane, where the
+# along-face slide and the yaw are both unobservable. A diagnostic about the
+# scene, not about numerics: the damped solve is still fine, which is why
+# nothing would otherwise notice.
+_DEGENERATE_CONDITION = 1e8
 
 
 @dataclass(frozen=True)
 class GncSchedule:
     """
-    Graduated non-convexity schedule for the robust kernel scale.
+    Annealing schedule for the Geman-McClure control parameter mu.
 
-    The kernel is Geman-McClure, whose IRLS weight at scale s is
+    The IRLS weight (Yang et al. RA-L 2020, eq. 12) for a correspondence with
+    residual r and noise bound c is
 
-        w(r; s) = ( s^2 / (s^2 + r^2) )^2
+        w = ( mu c^2 / (r^2 + mu c^2) )^2
 
-    with r the point-to-plane residual n . (T p - q). Read off the shape:
-    w(0) = 1, w(s) = 1/4, w(3s) = 1/100. So s is the residual at which a
-    correspondence is already down to quarter weight -- it is a noise scale, not
-    a cut-off, and nothing is ever discarded discontinuously.
-
-    Annealing starts at s = max_correspondence_distance (the KD-tree radius, so
-    the first pass weights everything it can even see roughly equally) and
-    divides s by `shrink` per step until it reaches `scale_min`. A large s makes
-    the cost nearly quadratic and therefore nearly convex -- one broad basin,
-    no local minima to fall into. Shrinking s progressively re-introduces the
-    non-convexity, but by then the iterate is already inside the right basin.
-    That ordering is the whole point of GNC: minimising the sharp cost directly
-    from a mediocre initialisation is exactly what falls into a symmetry twin.
+    Large mu is nearly quadratic and so nearly convex; mu = 1 recovers the true
+    Geman-McClure cost. Annealing downward re-introduces the non-convexity only
+    once the iterate is inside the right basin.
 
     Attributes:
-        scale_min: Final kernel scale in meters -- the depth-sensor noise floor
-            at the working range. Fixed by the sensor, NOT tuned: for a stereo
-            pair, sigma_z = z^2 * sigma_d / (f * B), and this rig has
-            f * B = 639.99768 px * 0.095 m = 60.80 px.m. At a typical cart range
-            z = 3.0 m and a subpixel disparity accuracy sigma_d = 0.1 px,
-            sigma_z = 9.0 * 0.1 / 60.80 = 0.0148 m. Annealing below the noise
-            floor cannot help: it down-weights correspondences whose residual is
-            real measurement noise, which throws away signal.
-        shrink: Divisor applied to s per annealing step. sqrt(1.4) = 1.1832
-            reproduces the mu / 1.4 schedule of Yang et al., "Graduated
-            Non-Convexity for Robust Spatial Perception" (RA-L 2020), because
-            their control parameter mu enters the weight as s^2 = mu * c^2 --
-            dividing mu by 1.4 divides s by sqrt(1.4). Larger values anneal
-            faster and risk overshooting the basin; smaller values cost
-            iterations for nothing. Clamped UP when the iteration budget cannot
-            fit the anneal -- see iteration_scales.
+        shrink: Divisor per step, mu <- mu / shrink. 1.4 is Yang et al. Remark 5
+            verbatim. Clamped up when the budget cannot fit the anneal; see
+            iteration_mu.
     """
 
-    scale_min: float
-    shrink: float = 1.1832  # sqrt(1.4), see Yang et al. RA-L 2020
+    shrink: float = 1.4  # Yang et al. RA-L 2020, Remark 5
 
     def __post_init__(self):
-        if self.scale_min <= 0:
-            raise ValueError(f"scale_min must be positive got {self.scale_min}")
-        if self.shrink <= 1:
-            raise ValueError(f"shrink must be greater than 1 got {self.shrink}")
+        if self.shrink <= 1.0:
+            raise ValueError(f"shrink must be greater than 1, got {self.shrink}")
 
-    def iteration_scales(self, scale_init: float, budget: int) -> list[float]:
+    def iteration_mu(self, mu_init: float, budget: int) -> list[float]:
         """
-        The kernel scale to use on each of `budget` iterations, annealing from
-        scale_init down to scale_min and then holding there.
+        The control parameter for each of `budget` iterations, annealing from
+        mu_init down to 1 and holding there. Always exactly `budget` long, so
+        the ICP loop needs no separate iteration counter.
 
-        The returned list is always exactly `budget` long, so the ICP loop can
-        iterate over it directly and needs no separate iteration counter.
+        The anneal wants N = ceil(ln(mu_init) / ln(shrink)) + 1 entries. When
+        that exceeds the budget the fix is to anneal FASTER, not to stop short:
+        stopping short leaves the kernel wide, i.e. no outlier rejection at all,
+        while still returning a pose. So shrink is clamped up to
+        mu_init ** (1/(budget-1)), the smallest value that fits, and the clamp
+        is logged because the right response is to fix the configuration.
 
-        HOW LONG THE ANNEAL WANTS TO BE
-        -------------------------------
-        Write s0 = scale_init, m = scale_min, k = shrink. The sequence is
-        s_j = s0 / k^j, and it stops at the first j with s_j <= m, then appends
-        m itself. That first index is
-
-            J = ceil( ln(s0/m) / ln(k) )
-
-        so the anneal wants N = J + 1 entries. Note what is NOT in that formula:
-        the residuals. The length depends only on the ratio s0/m and on k, so it
-        is known before the first correspondence is computed -- annealing cannot
-        run away on a hard frame.
-
-        WHEN THE BUDGET IS TOO SMALL
-        ----------------------------
-        If N > budget the anneal cannot finish. Ending it early would leave the
-        kernel wide, which means no outlier rejection at all -- the silent
-        version of this failure is worse than the loud one, because the pose
-        still comes back and merely happens to be biased.
-
-        The fix is to anneal FASTER, not to stop short, so `shrink` is clamped
-        up to whatever the budget affords. Requiring N <= budget:
-
-            J <= budget - 1
-            ln(s0/m) / ln(k) <= budget - 1
-            k >= (s0/m)^(1 / (budget - 1))
-
-        so the effective shrink is
-
-            k_eff = max( k, (s0/m)^(1 / (budget - 1)) )
-
-        which is the smallest value that both fits the budget and never anneals
-        slower than configured. The cost is real -- a coarser anneal is likelier
-        to overshoot the basin -- so it is logged at WARNING with both values,
-        because the correct response is to fix the configuration, not to rely on
-        the clamp.
-
-        The `len(out) < budget - 1` guard in the loop is belt-and-braces: the
-        formula is exact over the reals, but `ratio ** (1/(budget-1))` can round
-        down by an ulp and yield one entry more than intended. The guard makes
-        the length bound hold arithmetically rather than by trust.
-
-        Returns [scale_min] * budget when scale_init is already at or below the
-        noise floor -- a capture radius tighter than the sensor noise leaves
-        nothing to anneal, and iterating at a scale wider than the radius would
-        be a lie about what the kernel is doing.
-
-        The final element is `self.scale_min` itself, copied rather than arrived
-        at by dividing. _at_final_scale depends on that: it compares with `==`,
-        which is exact only because no arithmetic touches the value.
+        The `len(out) < budget - 1` guard is belt-and-braces against the
+        exponentiation rounding down by an ulp.
         """
         if budget < 1:
             raise ValueError(f"budget must be at least 1 iteration, got {budget}")
-        if scale_init <= self.scale_min:
-            return [self.scale_min] * budget
+        if mu_init <= _MU_FINAL:
+            return [_MU_FINAL] * budget
         if budget == 1:
             logging.warning(
-                f"GNC: a 1-iteration budget cannot anneal from {scale_init:.4g} m; "
-                f"running a single pass at scale_min={self.scale_min:.4g} m, so the "
-                "kernel does no graduated non-convexity at all."
+                f"GNC: a 1-iteration budget cannot anneal from mu={mu_init:.4g}; "
+                f"running a single pass at mu={_MU_FINAL}, so the kernel does no "
+                "graduated non-convexity at all."
             )
-            return [self.scale_min]
+            return [_MU_FINAL]
 
-        ratio = scale_init / self.scale_min
-        shrink = max(self.shrink, ratio ** (1.0 / (budget - 1)))
+        shrink = max(self.shrink, mu_init ** (1.0 / (budget - 1)))
         if shrink > self.shrink:
             logging.warning(
-                f"GNC: annealing {scale_init:.4g} m -> {self.scale_min:.4g} m at "
+                f"GNC: annealing mu={mu_init:.4g} -> {_MU_FINAL} at "
                 f"shrink={self.shrink:.4g} needs "
-                f"{int(np.ceil(np.log(ratio) / np.log(self.shrink))) + 1} iterations "
-                f"but the budget is {budget}. Using effective shrink "
-                f"{shrink:.4g} instead. This anneals faster than configured and is "
-                "likelier to overshoot the capture basin -- raise max_iterations or "
-                "lower max_correspondence_distance."
+                f"{int(np.ceil(np.log(mu_init) / np.log(self.shrink))) + 1} iterations "
+                f"but the budget is {budget}. Using effective shrink {shrink:.4g} "
+                "instead, which is likelier to overshoot the capture basin -- raise "
+                "max_iterations or lower max_correspondence_distance."
             )
 
         out: list[float] = []
-        scale = scale_init
-        while scale > self.scale_min and len(out) < budget - 1:
-            out.append(scale)
-            scale /= shrink
-        out.append(self.scale_min)
-        return out + [self.scale_min] * (budget - len(out))
+        mu = float(mu_init)
+        while mu > _MU_FINAL and len(out) < budget - 1:
+            out.append(mu)
+            mu /= shrink
+        out.append(_MU_FINAL)
+        return out + [_MU_FINAL] * (budget - len(out))
 
 
-def _geman_mcclure_weight(residuals: np.ndarray, scale: float) -> np.ndarray:
+@dataclass(frozen=True)
+class IcpResult:
     """
-    Geman-McClure IRLS weight for a given residual array and kernel scale element-wise.
+    What the GNC refinement computed. Deliberately not RegistrationResult, whose
+    `fitness` is a hard inlier count -- correct for a global stage, meaningless
+    here now that the radius is a capture basin rather than an outlier test.
 
-    w(r; s) = ( s^2 / (s^2 + r^2) )^2
+    Attributes:
+        transformation: 4x4, exactly planar.
+        effective_inlier_fraction: sum(w) / n_model at mu = 1. An effective
+            COUNT, not a residual: w = 0.5 means that correspondence counted
+            half. Strictly lower than the old hard fitness (~0.68 -> ~0.54 at
+            this rig's residuals) because points inside the radius now
+            contribute w < 1.
+        robust_rmse: sqrt(sum(w r^2) / sum(w)) over the POINT-TO-PLANE residual,
+            the quantity actually minimised. The old inlier_rmse was Euclidean
+            and so could not be compared against the kernel scale at all.
+        median_kernel_scale: median c_bar in meters at the final pose. Without
+            it the two numbers above are not interpretable, since both are
+            relative to a per-correspondence scale that varies with range.
     """
-    s2 = scale**2
-    r2 = residuals**2
-    return (s2 / (s2 + r2)) ** 2
+
+    transformation: np.ndarray
+    effective_inlier_fraction: float
+    robust_rmse: float
+    median_kernel_scale: float
+
+
+def _gnc_weight(residuals: np.ndarray, mu: float, noise_bound: np.ndarray) -> np.ndarray:
+    """
+    Geman-McClure IRLS weight (Yang et al. eq. 12), elementwise. Broadcasts over
+    an array of per-correspondence noise bounds exactly as it did over a scalar.
+    """
+    s2 = mu * noise_bound**2
+    return (s2 / (s2 + residuals**2)) ** 2
 
 
 def _make_evaluator(model_points, scene_tree, max_correspondence_distance):
     """
-    Builds the closure that given a transformation T
-    returns the results of the transform and of the kd-tree query
+    Data association. The KD-tree radius is the capture basin and nothing else.
+    Points with no neighbour come back as dists == inf and idx == len(scene),
+    cKDTree's "not found" sentinel rather than a real index, so masking on
+    np.isfinite before indexing is mandatory, not defensive.
     """
 
     def _evaluate(T):
@@ -238,32 +179,41 @@ def _make_evaluator(model_points, scene_tree, max_correspondence_distance):
     return _evaluate
 
 
-def _at_final_scale(scale: float, gnc: GncSchedule) -> bool:
+def _associate(evaluate, T, scene_points, scene_normals, sensor):
     """
-    True when `scale` is the last one the schedule will ever use.
-
-    The `==` is exact, not approximate: GncSchedule.iteration_scales puts
-    `gnc.scale_min` itself into the list, copied rather than arrived at by
-    dividing. If the tail ever becomes a computed value this must become a
-    tolerance comparison.
+    One association pass. Returns None when fewer than _DOF correspondences
+    survive the radius, otherwise (p, n, r, c_bar): transformed model points,
+    matched scene normals, point-to-plane residuals, per-correspondence noise
+    bounds.
     """
-    return scale == gnc.scale_min
+    transformed, _dists, idx, valid = evaluate(T)
+    if valid.sum() < _DOF:
+        return None
+    p = transformed[valid]
+    q = scene_points[idx[valid]]
+    n = scene_normals[idx[valid]]
+    r = np.einsum("ij,ij->i", n, p - q)
+    return p, n, r, sensor.noise_bound(q)
 
 
-# Unknowns per iteration: omega, vx, vy. Sizes both the minimum correspondence
-# count (below it the normal equations are rank-deficient) and the ridge.
-_DOF = 3
+def _initial_mu(residuals: np.ndarray, noise_bound: np.ndarray) -> float:
+    """
+    mu_0 = 2 * max(r / c_bar)^2 -- Yang et al. Remark 5's 2 r_max^2 / c_bar^2,
+    generalised to a per-correspondence c_bar by normalising each residual by
+    its own bound. Dimensionless, as mu must be.
+
+    Deriving it from the data is what makes the anneal adaptive: an easy frame
+    gets a short schedule. It cannot run away, since r <= radius by the KD-tree
+    query and c_bar is bounded below by the near-range noise.
+    """
+    return 2.0 * float(np.max((residuals / noise_bound) ** 2))
 
 
 def _jacobian_se2(p: np.ndarray, n: np.ndarray, c: np.ndarray) -> np.ndarray:
     """
-    (K, 3) Jacobian of r_i with respect to xi = (omega, vx, vy), the rotation
-    taken about `c`.
-
-    A small rotation about c displaces p_i by omega * (-(p_y - c_y), p_x - c_x),
-    perpendicular to the lever arm from the centre and proportional to its
-    length; dotting that into n_i gives the first column. The other two are the
-    translation columns above.
+    (K, 3) Jacobian of r_i with respect to xi = (omega, vx, vy), rotation taken
+    about `c`. A small rotation about c displaces p_i by
+    omega * (-(p_y - c_y), p_x - c_x); dotting that into n_i gives column one.
     """
     return np.column_stack(
         [
@@ -276,13 +226,32 @@ def _jacobian_se2(p: np.ndarray, n: np.ndarray, c: np.ndarray) -> np.ndarray:
 
 def _compose_se2(T: np.ndarray, xi: np.ndarray, c: np.ndarray) -> np.ndarray:
     """
-    Applies a full SE(2) increment on the LEFT: T <- exp_c(xi) . T.
-
-    Left composition acts in world coordinates, which is the frame p, n and c
-    are all expressed in. Composing on the right would apply the increment in
-    the model's own frame and be silently wrong.
+    Applies the increment on the LEFT: T <- exp_c(xi) . T. Left composition acts
+    in world coordinates, which is the frame p, n and c are expressed in;
+    composing on the right would apply it in the model frame and be silently
+    wrong.
     """
     return se2_to_se3(se2_exp_about(xi, c)) @ T
+
+
+def _score(T: np.ndarray, associated, n_model: int) -> IcpResult:
+    """
+    Builds the result at mu = _MU_FINAL regardless of where the loop stopped:
+    mu is a homotopy parameter, not a property of the fit, so a run that
+    exhausted its budget mid-anneal must still be scored against the true cost
+    for its numbers to mean the same thing as a converged run's.
+    """
+    if associated is None:
+        return IcpResult(T, 0.0, np.inf, np.nan)
+    _p, _n, r, c_bar = associated
+    w = _gnc_weight(r, _MU_FINAL, c_bar)
+    w_sum = float(w.sum())
+    return IcpResult(
+        transformation=T,
+        effective_inlier_fraction=w_sum / n_model if n_model else 0.0,
+        robust_rmse=float(np.sqrt(np.sum(w * r**2) / w_sum)) if w_sum > 0 else np.inf,
+        median_kernel_scale=float(np.median(c_bar)),
+    )
 
 
 def icp_se2(
@@ -292,40 +261,26 @@ def icp_se2(
     T_init,  # (4, 4) SE(2)-embedded initial pose
     max_correspondence_distance,
     *,
+    sensor: DepthSensor,
     gnc: GncSchedule,
     max_iterations: int = 100,
     tolerance: float = 1e-8,  # stop when the increment norm falls below this
-) -> RegistrationResult:
+) -> IcpResult:
     """
-    SE(2)-constrained point-to-plane ICP with a GNC-annealed robust kernel.
+    Minimizes sum_i w_i [ n_i . (T p_i - q_i) ]^2 over T in SE(2), with w_i the
+    Geman-McClure weight at the current control parameter. One iteration per
+    schedule entry: associate, build the weighted normal equations, solve,
+    compose.
 
-    Minimizes sum_i w_i [ n_i . (T p_i - q_i) ]^2 over T in SE(2) (embedded in
-    SE(3) with fixed z), where q_i / n_i are the nearest scene point and its
-    normal and w_i is the Geman-McClure weight at the current kernel scale. One
-    iteration per entry of the annealing schedule: re-associate, build the
-    weighted normal equations at that scale, solve, compose.
-
-    The linearized residual for a left increment xi = (omega, vx, vy) rotating
-    about the centroid c is
-        dr_i = omega * (n_y (p_x - c_x) - n_x (p_y - c_y)) + n_x vx + n_y vy,
-    giving a (K, 3) Jacobian solved through 3x3 normal equations.
-
-    Inputs:
-        gnc: Annealing schedule for the kernel scale, from
-            max_correspondence_distance down to gnc.scale_min, one step per
-            iteration, after which the loop keeps iterating at scale_min until
-            the increment falls below `tolerance`. See GncSchedule for why the
-            ordering (wide first) is the entire mechanism.
+    Args:
+        sensor: Supplies the per-correspondence noise bound the kernel scale is
+            measured in.
+        gnc: Anneals mu from a data-derived mu_0 down to 1, after which the loop
+            keeps iterating at mu = 1 until the increment falls below
+            `tolerance`.
 
     Returns:
-        RegistrationResult with `.transformation` (4x4, exactly planar),
-        `.fitness` (inliers / N model points) and `.inlier_rmse`
-        (Euclidean RMSE over matched pairs), all evaluated at the final pose.
-
-        fitness and inlier_rmse keep their hard-threshold definition under the
-        robust kernel, deliberately: they are cross-arm diagnostics, and
-        redefining them to be weight-based would make a GNC run's numbers
-        incomparable with every run already recorded.
+        IcpResult evaluated at the final pose.
     """
     model_points = np.asarray(model_points, dtype=float)
     scene_points = np.asarray(scene_points, dtype=float)
@@ -334,30 +289,45 @@ def icp_se2(
 
     scene_tree = cKDTree(scene_points)
     n_model = len(model_points)
-    _evaluate = _make_evaluator(model_points, scene_tree, max_correspondence_distance)
+    evaluate = _make_evaluator(model_points, scene_tree, max_correspondence_distance)
 
-    for scale in gnc.iteration_scales(max_correspondence_distance, max_iterations):
-        transformed, _dists, idx, valid = _evaluate(T)
-        if valid.sum() < _DOF:
+    # One association ahead of the loop: the schedule must exist before the
+    # first iteration, and its starting point depends on the residuals at T_init.
+    associated = _associate(evaluate, T, scene_points, scene_normals, sensor)
+    if associated is None:
+        logging.warning(
+            f"SE(2) ICP: fewer than {_DOF} correspondences within "
+            f"{max_correspondence_distance} m at the initial pose; no refinement possible."
+        )
+        return _score(T, None, n_model)
+
+    for mu in gnc.iteration_mu(_initial_mu(associated[2], associated[3]), max_iterations):
+        if associated is None:
             logging.warning(
                 f"SE(2) ICP: fewer than {_DOF} correspondences within "
                 f"{max_correspondence_distance} m; stopping refinement."
             )
             break
 
-        p = transformed[valid]
-        q = scene_points[idx[valid]]
-        n = scene_normals[idx[valid]]
+        p, n, r, c_bar = associated
         c = p[:, :2].mean(axis=0)
-
-        r = np.einsum("ij,ij->i", n, p - q)
         J = _jacobian_se2(p, n, c)
-        w = _geman_mcclure_weight(r, scale)
+        w = _gnc_weight(r, mu, c_bar)
 
-        # w[:, None] * J multiplies each ROW of J by that row's weight, which is
-        # what "down-weight this observation" means. Weighting a COLUMN would
-        # rescale a parameter instead -- a different, and wrong, operation.
-        JTJ = J.T @ (w[:, None] * J) + 1e-12 * np.eye(_DOF)
+        # w[:, None] * J scales each ROW of J by that row's weight, which is what
+        # down-weighting an observation means. Weighting a column would rescale a
+        # parameter instead.
+        JTWJ = J.T @ (w[:, None] * J)
+
+        cond = np.linalg.cond(JTWJ)
+        if cond > _DEGENERATE_CONDITION:
+            logging.warning(
+                f"SE(2) ICP: normal equations near-degenerate (cond={cond:.3g}) at "
+                f"mu={mu:.4g} with {len(p)} correspondences -- the visible model "
+                "geometry may be a single plane."
+            )
+
+        JTJ = JTWJ + (_LM_RELATIVE_DAMPING * np.trace(JTWJ) / _DOF) * np.eye(_DOF)
         try:
             xi = np.linalg.solve(JTJ, -(J.T @ (w * r)))
         except np.linalg.LinAlgError:
@@ -365,16 +335,10 @@ def icp_se2(
             break
 
         T = _compose_se2(T, xi, c)
-        # Converging mid-anneal is not convergence: the cost function is still
-        # changing under the iterate, so a small step means the solver has
-        # caught up with THIS scale, not that it has settled. Only a small step
-        # at the final scale ends the search.
-        if np.linalg.norm(xi) < tolerance and _at_final_scale(scale, gnc):
+        associated = _associate(evaluate, T, scene_points, scene_normals, sensor)
+        # Converging mid-anneal is not convergence: the cost is still changing
+        # under the iterate. Only a small step at mu = 1 ends the search.
+        if np.linalg.norm(xi) < tolerance and mu == _MU_FINAL:
             break
 
-    # Evaluate fitness/RMSE at the final pose (the loop metrics lag one update behind).
-    _, dists, _, valid = _evaluate(T)
-    n_inliers = valid.sum()
-    fitness = n_inliers / n_model if n_model else 0.0
-    inlier_rmse = np.sqrt(np.mean(dists[valid] ** 2)) if n_inliers > 0 else np.inf
-    return RegistrationResult(T, fitness, inlier_rmse)
+    return _score(T, associated, n_model)

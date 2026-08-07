@@ -28,8 +28,8 @@ from methods.ransac3dof import (
 from methods.se2_icp import GncSchedule, icp_se2
 from pipeline import load_cad_meshes
 
-EXTRINSIC = np.array(CameraConfig().extrinsic, dtype=np.float64)
-CAMERA_XY = EXTRINSIC[:3, 3]
+SENSOR = CameraConfig().sensor
+CAMERA_XY = SENSOR.camera_origin
 
 
 def se2(x: float, y: float, yaw_deg: float, z: float = 0.01) -> np.ndarray:
@@ -66,7 +66,7 @@ class TestVisibilityCull(unittest.TestCase):
         cls.meshes = load_cad_meshes()
         cls.estimator = Ransac3DoFEstimator(
             params=Ransac3DoFParams(front_crop_aspect=2.0, z_offset=0.01),
-            extrinsic=EXTRINSIC,
+            sensor=SENSOR,
         )
 
     def test_culls_most_of_the_slab(self):
@@ -127,7 +127,7 @@ class TestRefinementBias(unittest.TestCase):
             icp_max_iterations=100,
             **param_kwargs,
         )
-        estimator = Ransac3DoFEstimator(params=params, extrinsic=EXTRINSIC)
+        estimator = Ransac3DoFEstimator(params=params, sensor=SENSOR)
         estimator._front_face = None
         T = estimator._refine_pose(self.model_pc, self.scene, self.T_gt)
         return float(np.linalg.norm((T[:3, 3] - self.T_gt[:3, 3])[:2])), estimator
@@ -160,7 +160,7 @@ class TestRefinementBias(unittest.TestCase):
             icp_max_iterations=100,
             icp_visibility_cull=False,
         )
-        estimator = Ransac3DoFEstimator(params=params, extrinsic=EXTRINSIC)
+        estimator = Ransac3DoFEstimator(params=params, sensor=SENSOR)
         estimator._front_face = None
         T_new = estimator._refine_pose(self.model_pc, self.scene, self.T_gt)
 
@@ -169,9 +169,8 @@ class TestRefinementBias(unittest.TestCase):
             scene_points=np.asarray(self.scene.points),
             scene_normals=np.asarray(self.scene.normals),
             T_init=self.T_gt,
-            gnc=GncSchedule(
-                scale_min=params.icp_gnc_scale_min, shrink=params.icp_gnc_shrink
-            ),
+            gnc=GncSchedule(shrink=params.icp_gnc_mu_shrink),
+            sensor=SENSOR,
             max_correspondence_distance=params.icp_max_correspondence_distance,
             max_iterations=params.icp_max_iterations,
         ).transformation
@@ -197,7 +196,7 @@ class TestRefinementBias(unittest.TestCase):
             icp_max_iterations=100,
             icp_visibility_cull=True,
         )
-        estimator = Ransac3DoFEstimator(params=params, extrinsic=EXTRINSIC)
+        estimator = Ransac3DoFEstimator(params=params, sensor=SENSOR)
         estimator._front_face = None
         with unittest.mock.patch.object(ransac3dof, "icp_se2", spy):
             estimator._refine_pose(self.model_pc, self.scene, self.T_gt)

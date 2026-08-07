@@ -39,7 +39,6 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-import numpy as np
 import open3d as o3d
 import tyro
 
@@ -91,11 +90,11 @@ def main() -> int:
         o3d.utility.random.seed(args.o3d_seed)
 
     manifest = json.loads((fixtures / "manifest.json").read_text())
-    extrinsic = np.array(args.camera.extrinsic, dtype=np.float64)
+    sensor = args.camera.sensor
     camera = Camera(fx=args.camera.fx, fy=args.camera.fy, cx=args.camera.cx, cy=args.camera.cy)
     estimator_cls = args.model.ESTIMATOR_CLS
 
-    overrides = resolve_param_overrides(estimator_cls, extrinsic, args.param_overrides)
+    overrides = resolve_param_overrides(estimator_cls, args.param_overrides)
     params = type(args.model.profile.params)(**{**vars(args.model.profile.params), **overrides})
 
     print(
@@ -116,7 +115,7 @@ def main() -> int:
         dataset = load_parquet_dataset(
             dataset_path=str(fixtures), test_glob=f"data/{split}-*.parquet"
         )
-        estimator = estimator_cls(params=params, extrinsic=extrinsic)
+        estimator = estimator_cls(params=params, sensor=sensor)
         for cart_type, mesh in meshes.items():
             estimator.prepare(mesh, cart_type)
 

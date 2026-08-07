@@ -15,9 +15,10 @@ class TestEstimatorPreparation(unittest.TestCase):
         # Clear global cache before each test
         BasePoseEstimator._PREPARATION_CACHE.clear()
 
-        # Load extrinsic from cli_config's CameraConfig as the source of truth
+        # Load the sensor from cli_config's CameraConfig as the source of truth
         # (replaces config/camera/default.yaml, removed in the tyro migration).
-        self.extrinsic = np.array(CameraConfig().extrinsic, dtype=np.float64)
+        self.sensor = CameraConfig().sensor
+        self.extrinsic = self.sensor.T_robot_camera
 
         # Create a simple box mesh to act as a CAD model
         self.mesh = o3d.geometry.TriangleMesh.create_box(width=1.0, height=1.0, depth=1.0)
@@ -27,7 +28,7 @@ class TestEstimatorPreparation(unittest.TestCase):
     def test_ransac_cache_hit_and_parameter_isolation(self):
         # 1. Initialize RansacEstimator with first parameters
         params1 = RansacParams(voxel_size=0.06, icp_max_iterations=100)
-        est1 = RansacEstimator(params=params1)
+        est1 = RansacEstimator(params=params1, sensor=self.sensor)
 
         # Prepare mesh
         est1.prepare(self.mesh, "test_cart")
@@ -42,7 +43,9 @@ class TestEstimatorPreparation(unittest.TestCase):
         model_down1 = cached_data1["model_down"]
 
         # Call prepare again with identical prep parameters but different estimator
-        est2 = RansacEstimator(params=RansacParams(voxel_size=0.06, icp_max_iterations=50))
+        est2 = RansacEstimator(
+            params=RansacParams(voxel_size=0.06, icp_max_iterations=50), sensor=self.sensor
+        )
         est2.prepare(self.mesh, "test_cart")
 
         # Verify it was a cache hit (pointing to the exact same underlying objects)
@@ -54,7 +57,7 @@ class TestEstimatorPreparation(unittest.TestCase):
         self.assertIs(model_down1, cached_data2["model_down"])
 
         # 2. Parameter isolation: Change prep-relevant parameter (voxel_size)
-        est3 = RansacEstimator(params=RansacParams(voxel_size=0.04))
+        est3 = RansacEstimator(params=RansacParams(voxel_size=0.04), sensor=self.sensor)
         est3.prepare(self.mesh, "test_cart")
 
         cache_key3 = (RansacEstimator.__name__, "test_cart", est3._get_prep_params_key())
@@ -64,7 +67,7 @@ class TestEstimatorPreparation(unittest.TestCase):
     def test_ppf_cache_hit_and_parameter_isolation(self):
         # 1. Initialize PPFEstimator
         params1 = PPFParams(ppf_sampling_step=0.05, ppf_distance_step=0.02, icp_max_iterations=50)
-        est1 = PPFEstimator(params=params1)
+        est1 = PPFEstimator(params=params1, sensor=self.sensor)
 
         est1.prepare(self.mesh, "test_cart")
 
@@ -76,7 +79,10 @@ class TestEstimatorPreparation(unittest.TestCase):
 
         # Verify cache hit with identical prep params but different online params
         est2 = PPFEstimator(
-            params=PPFParams(ppf_sampling_step=0.05, ppf_distance_step=0.02, icp_max_iterations=100)
+            params=PPFParams(
+                ppf_sampling_step=0.05, ppf_distance_step=0.02, icp_max_iterations=100
+            ),
+            sensor=self.sensor,
         )
         est2.prepare(self.mesh, "test_cart")
 
@@ -84,7 +90,7 @@ class TestEstimatorPreparation(unittest.TestCase):
         self.assertIs(detector1, cached_data2["detector"])
 
         # 2. Parameter isolation: Change prep-relevant parameters
-        est3 = PPFEstimator(params=PPFParams(ppf_sampling_step=0.06))
+        est3 = PPFEstimator(params=PPFParams(ppf_sampling_step=0.06), sensor=self.sensor)
         est3.prepare(self.mesh, "test_cart")
         cache_key3 = (PPFEstimator.__name__, "test_cart", est3._get_prep_params_key())
         self.assertNotEqual(cache_key1, cache_key3)
@@ -92,7 +98,7 @@ class TestEstimatorPreparation(unittest.TestCase):
     def test_copy_on_retrieval_and_mutation_safety(self):
         # Ransac copy safety test
         params = RansacParams(voxel_size=0.05)
-        est = RansacEstimator(params=params, extrinsic=self.extrinsic)
+        est = RansacEstimator(params=params, sensor=self.sensor)
         est.prepare(self.mesh, "test_cart")
 
         # Retrieve representation and perform an in-place transformation (which mimics downstream mutate)
@@ -119,7 +125,7 @@ class TestEstimatorPreparation(unittest.TestCase):
     def test_local_fallback_no_side_effects(self):
         # Running estimate_pose with cart_type=None (lazy local fallback)
         params = RansacParams(voxel_size=0.06)
-        est = RansacEstimator(params=params, extrinsic=self.extrinsic)
+        est = RansacEstimator(params=params, sensor=self.sensor)
 
         # Verify cache is empty initially
         self.assertEqual(len(BasePoseEstimator._PREPARATION_CACHE), 0)
@@ -132,14 +138,14 @@ class TestEstimatorPreparation(unittest.TestCase):
 
     def test_cache_memory_eviction(self):
         params = RansacParams(voxel_size=0.06)
-        est1 = RansacEstimator(params=params)
+        est1 = RansacEstimator(params=params, sensor=self.sensor)
 
         # Prepare for 'test_cart' with voxel_size=0.06
         est1.prepare(self.mesh, "test_cart")
         self.assertEqual(len(BasePoseEstimator._PREPARATION_CACHE), 1)
 
         # Prepare for 'test_cart' with voxel_size=0.04 (should evict the 0.06 entry for 'test_cart')
-        est2 = RansacEstimator(params=RansacParams(voxel_size=0.04))
+        est2 = RansacEstimator(params=RansacParams(voxel_size=0.04), sensor=self.sensor)
         est2.prepare(self.mesh, "test_cart")
 
         self.assertEqual(len(BasePoseEstimator._PREPARATION_CACHE), 1)
@@ -180,14 +186,14 @@ class TestEstimatorPreparation(unittest.TestCase):
         empty_pcd = o3d.geometry.PointCloud()
 
         # Test RANSAC
-        ransac_est = RansacEstimator(params=RansacParams(voxel_size=0.05), extrinsic=self.extrinsic)
+        ransac_est = RansacEstimator(params=RansacParams(voxel_size=0.05), sensor=self.sensor)
         res_ransac = ransac_est.estimate_pose(empty_pcd, self.mesh, cart_type="test_cart")
         self.assertIsNone(res_ransac)
 
         # Test PPF
         ppf_est = PPFEstimator(
             params=PPFParams(ppf_sampling_step=0.05, ppf_distance_step=0.05),
-            extrinsic=self.extrinsic,
+            sensor=self.sensor,
         )
         res_ppf = ppf_est.estimate_pose(empty_pcd, self.mesh, cart_type="test_cart")
         self.assertIsNone(res_ppf)
@@ -196,7 +202,7 @@ class TestEstimatorPreparation(unittest.TestCase):
         """D2: Verify that estimate_pose correctly triggers on-the-fly preparation and hits cache on subsequent calls."""
         ppf_est = PPFEstimator(
             params=PPFParams(ppf_sampling_step=0.05, ppf_distance_step=0.05),
-            extrinsic=self.extrinsic,
+            sensor=self.sensor,
         )
         cache_key = (PPFEstimator.__name__, "test_cart", ppf_est._get_prep_params_key())
 

@@ -112,23 +112,24 @@ def evaluate_pipeline(
         elapsed_time = time.time() - start_time
 
         # 4. Calculate Ground Truth pose and compare
-        extrinsic = getattr(estimator, "extrinsic", None)
-        if extrinsic is None:
-            raise ValueError(
-                "Estimator must have an extrinsic camera-to-robot transform configured."
-            )
-
         try:
             T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
             T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
             T_ground_truth = compute_ground_truth_pose(
-                T_world_camera, T_world_cart, T_robot_camera=extrinsic
+                T_world_camera, T_world_cart, T_robot_camera=estimator.sensor.T_robot_camera
             )
             metrics = extract_pose_errors(T_final, T_ground_truth)
             error_metrics.append(metrics)
             times.append(elapsed_time)
 
             diagnostics = getattr(estimator, "_last_diagnostics", None) or {}
+            # The estimator has no ground truth, so it reports the pose ICP was
+            # HANDED and the error is computed here, against the same GT and by
+            # the same function as the final error.
+            T_icp_init = diagnostics.get("T_icp_init")
+            pre_icp = (
+                extract_pose_errors(T_icp_init, T_ground_truth) if T_icp_init is not None else None
+            )
             frame_records.append(
                 FrameRecord(
                     sample_idx=int(sample_idx),
@@ -142,8 +143,13 @@ def evaluate_pipeline(
                     flipped=abs(metrics.yaw) > 90.0,
                     trans_xy=metrics.trans_xy,
                     yaw_err=metrics.yaw,
-                    fitness=diagnostics.get("fitness"),
-                    inlier_rmse=diagnostics.get("inlier_rmse"),
+                    trans_xy_pre_icp=pre_icp.trans_xy if pre_icp else None,
+                    yaw_err_pre_icp=pre_icp.yaw if pre_icp else None,
+                    icp_effective_inlier_fraction=diagnostics.get("icp_effective_inlier_fraction"),
+                    icp_robust_rmse=diagnostics.get("icp_robust_rmse"),
+                    icp_median_kernel_scale=diagnostics.get("icp_median_kernel_scale"),
+                    scene_depth_p05=diagnostics.get("scene_depth_p05"),
+                    scene_depth_p95=diagnostics.get("scene_depth_p95"),
                     front_face_angle_deg=diagnostics.get("front_face_angle_deg"),
                     icp_yaw_delta_deg=diagnostics.get("icp_yaw_delta_deg"),
                 )

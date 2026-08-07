@@ -1,15 +1,21 @@
 """
-The result contract shared by every registration stage.
+The result contract shared by the GLOBAL registration stages.
 
-Global registration (constrained_ransac, vsac_se2) and local refinement
-(se2_icp) all return the same thing: a pose, how much of the model it explains,
-how tightly, and -- on abstention -- why not. That contract belongs to none of
-them in particular, so it lives here.
+constrained_ransac, vsac_se2 and the SE(3) ransac path all return the same
+thing: a pose, how many model points it explains, how tightly, and -- on
+abstention -- why not. That contract belongs to none of them in particular, so
+it lives here.
 
 It used to live in methods/constrained_ransac.py under the name RansacResult,
-which forced se2_icp to import from the RANSAC module to describe an ICP result.
-ICP is not RANSAC; the dependency pointed backwards and the name was wrong at
+which forced other modules to import from the RANSAC module to describe a
+non-RANSAC result. The dependency pointed backwards and the name was wrong at
 half its call sites.
+
+se2_icp deliberately does NOT use this. `fitness` here is a hard inlier count,
+which is the right definition for a global stage -- MSAC scoring is
+definitionally a count. For the GNC refinement the equivalent threshold is the
+capture radius, so a count inside it measures basin coverage and saturates; that
+stage reports a weighted summary instead (IcpResult, methods/se2_icp.py).
 
 Deliberately free of open3d and of every solver in this package, so any stage
 can import it without dragging a solver along.

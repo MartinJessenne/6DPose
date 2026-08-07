@@ -14,6 +14,7 @@ from methods.base import (
     prepare_scene_point_cloud,
     refine_pose_dual_hypothesis,
 )
+from methods.depth_noise import DepthSensor
 
 if TYPE_CHECKING:
     pass
@@ -67,15 +68,14 @@ class PPFEstimator(BasePoseEstimator):
 
     params_cls = PPFParams  # Associate the parameter dataclass with this estimator
 
-    def __init__(self, params: PPFParams | None = None, extrinsic: np.ndarray | None = None):
+    def __init__(self, params: PPFParams | None = None, *, sensor: DepthSensor):
         """
-        Initializes the PPF Estimator with matching parameters.
-
         Args:
-            params (PPFParams, optional): Dedicated parameters. If None, uses defaults.
+            params: Dedicated parameters. If None, uses defaults.
+            sensor: Camera pose and depth-noise model.
         """
         self.params = params or PPFParams()
-        self.extrinsic = np.asarray(extrinsic, dtype=np.float64) if extrinsic is not None else None
+        self.sensor = sensor
 
     def _get_prep_params_key(self) -> tuple:
         """Returns only the parameters affecting offline preparation."""
@@ -134,7 +134,7 @@ class PPFEstimator(BasePoseEstimator):
                         or None if registration fails.
         """
         # Prepare scene point cloud using factored-out utility function
-        pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
+        pcd = prepare_scene_point_cloud(pcd, self.sensor.T_robot_camera)
         if pcd.is_empty():
             logging.warning("Prepared scene point cloud is empty. Registration aborted.")
             return None

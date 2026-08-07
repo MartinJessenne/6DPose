@@ -16,6 +16,7 @@ import numpy as np
 import tyro
 
 from methods.base import BasePoseEstimator, SearchRange
+from methods.depth_noise import DepthSensor
 from methods.ppf import PPFEstimator, PPFParams
 from methods.ransac import RansacEstimator, RansacParams
 from methods.ransac3dof import (
@@ -40,12 +41,29 @@ class YoloConfig:
 
 @dataclass(frozen=True)
 class CameraConfig:
-    """Intrinsics + camera-to-robot-base extrinsic for the depth sensor."""
+    """Intrinsics, stereo geometry and camera-to-robot-base extrinsic."""
 
     fx: float = 639.99768
     fy: float = 639.99768
     cx: float = 640.0
     cy: float = 400.0
+    # Stereo baseline in meters, and the sub-pixel disparity accuracy of the
+    # matcher. Together with fx these fix the depth noise the GNC kernel is
+    # scaled by (see methods/depth_noise.py). Sensor properties, not
+    # hyperparameters, which is why they live here and not on any params class.
+    baseline: float = 0.095
+    sigma_disparity: float = 0.1
+
+    @property
+    def sensor(self) -> DepthSensor:
+        """The runtime object every estimator is constructed with."""
+        return DepthSensor(
+            fx=self.fx,
+            baseline=self.baseline,
+            sigma_disparity=self.sigma_disparity,
+            T_robot_camera=np.array(self.extrinsic, dtype=np.float64),
+        )
+
     extrinsic: tuple[tuple[float, float, float, float], ...] = (
         (0.5, 0.0, 0.8660254037844386, 0.439),
         (0.0, 1.0, -0.0, 0.0),
@@ -567,10 +585,6 @@ class CommonArgs:
     no_wandb: bool = False
 
     @property
-    def extrinsic(self) -> np.ndarray:
-        return np.array(self.camera.extrinsic, dtype=np.float64)
-
-    @property
     def estimator_cls(self) -> type[BasePoseEstimator]:
         return self.model.ESTIMATOR_CLS
 
@@ -588,7 +602,11 @@ class CommonArgs:
 
     @property
     def resolved_seed(self) -> int:
-        return self.seed if self.seed is not None else int(np.random.SeedSequence().entropy % (2**31 - 1))
+        return (
+            self.seed
+            if self.seed is not None
+            else int(np.random.SeedSequence().entropy % (2**31 - 1))
+        )
 
     @property
     def use_wandb(self) -> bool:

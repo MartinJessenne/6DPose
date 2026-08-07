@@ -14,6 +14,7 @@ from methods.base import (
     refine_pose_dual_hypothesis,
     reorient_normals_to_reference,
 )
+from methods.depth_noise import DepthSensor
 
 if TYPE_CHECKING:
     pass
@@ -47,15 +48,15 @@ class RansacEstimator(BasePoseEstimator):
 
     params_cls = RansacParams  # Associate the parameter dataclass with this estimator
 
-    def __init__(self, params: RansacParams | None = None, extrinsic: np.ndarray | None = None):
+    def __init__(self, params: RansacParams | None = None, *, sensor: DepthSensor):
         """
-        Initializes the RANSAC + ICP Estimator with matching parameters.
-
         Args:
-            params (RansacParams, optional): Dedicated parameters. If None, uses defaults.
+            params: Dedicated parameters. If None, uses defaults.
+            sensor: Camera pose and depth-noise model. Mandatory: the pose is
+                only meaningful once the scene cloud is in the robot base frame.
         """
         self.params = params or RansacParams()
-        self.extrinsic = np.asarray(extrinsic, dtype=np.float64) if extrinsic is not None else None
+        self.sensor = sensor
 
     def _get_prep_params_key(self) -> tuple:
         """Returns only the parameters affecting offline preparation."""
@@ -129,7 +130,7 @@ class RansacEstimator(BasePoseEstimator):
         self._last_failure_reason: str | None = None
 
         # Prepare scene point cloud using factored-out utility function
-        pcd = prepare_scene_point_cloud(pcd, self.extrinsic)
+        pcd = prepare_scene_point_cloud(pcd, self.sensor.T_robot_camera)
         if pcd.is_empty():
             logging.warning("Prepared scene point cloud is empty. Registration aborted.")
             self._last_failure_reason = "empty_scene_cloud"
@@ -178,13 +179,11 @@ class RansacEstimator(BasePoseEstimator):
         # near-zero. Re-imposing the towards-sensor convention afterwards is what
         # keeps the scene cloud's signs comparable with the model's outward ones
         # (they agree on the visible side of a solid). In the robot frame the
-        # camera centre is extrinsic[:3, 3], not the origin.
+        # camera centre is sensor.camera_origin, not the origin.
         pcd_down.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2.0, max_nn=30)
         )
-        pcd_down.orient_normals_towards_camera_location(
-            camera_location=np.asarray(self.extrinsic, dtype=np.float64)[:3, 3]
-        )
+        pcd_down.orient_normals_towards_camera_location(camera_location=self.sensor.camera_origin)
 
         # 2. Compute FPFH (Fast Point Feature Histograms) descriptors
         logging.info("Computing FPFH descriptors...")

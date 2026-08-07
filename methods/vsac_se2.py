@@ -9,6 +9,7 @@ from scipy.spatial import cKDTree
 
 from methods.base import SearchRange
 from methods.constrained_ransac import match_correspondences_fpfh
+from methods.depth_noise import DepthSensor
 from methods.ransac3dof import FrontFaceGate, Ransac3DoFEstimator, Ransac3DoFParams
 from methods.registration_result import RegistrationResult
 from methods.se2_lie_utils import minimal_solver_se2, se2_matrix, se2_to_se3
@@ -460,7 +461,7 @@ def vsac_se2(
         # half the candidates SHOULD point the wrong way:
         #   ~50%  healthy.
         #   ~100% the sign convention is inverted somewhere -- check the arrow is
-        #         +x and that extrinsic is camera->robot, not its inverse. Do not
+        #         +x and that T_robot_camera is camera->robot, not its inverse. Do not
         #         trust a sweep run in this state.
         #   ~0%   the gate is inert: not wired, or the arm never got its override.
         # Both the 100% and the 0% cases otherwise produce a run that looks
@@ -531,11 +532,12 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
     def __init__(
         self,
         params: VSACSe2Params | None = None,
-        extrinsic: np.ndarray | None = None,
+        *,
+        sensor: DepthSensor,
     ):
         if params is None:
             params = VSACSe2Params()
-        super().__init__(params=params, extrinsic=extrinsic)
+        super().__init__(params=params, sensor=sensor)
 
     def _global_registration(self, model_down, pcd_down, model_fpfh, pcd_fpfh):
         """VSAC replacement for constrained_ransac_se2 (same call site contract
@@ -592,6 +594,6 @@ class VSACSe2Estimator(Ransac3DoFEstimator):
             return None
         return FrontFaceGate(
             front_face=self._front_face,
-            camera_xy=np.asarray(self.extrinsic, dtype=float)[:3, 3][:2],
+            camera_xy=self.sensor.camera_origin[:2],
             max_angle_deg=float(self.params.front_face_max_angle_deg),
         )

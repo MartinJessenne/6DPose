@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any, Self
 import numpy as np
 import open3d as o3d
 
+from methods.depth_noise import DepthSensor
+
 if TYPE_CHECKING:
     import optuna
 
@@ -210,13 +212,13 @@ class BasePoseEstimator(ABC):
         *,
         profile_params: BaseParams | None = None,
         overrides: dict[str, Any] | None = None,
-        extrinsic: np.ndarray,
+        sensor: DepthSensor,
     ) -> Self:
         """1-line construction: loads baseline profile, applies overrides, and instantiates the estimator."""
         base = cls.params_cls() if profile_params is None else profile_params
         if overrides:
             base = base.with_overrides(**overrides)
-        return cls(params=base, extrinsic=extrinsic)
+        return cls(params=base, sensor=sensor)
 
     @abstractmethod
     def estimate_pose(

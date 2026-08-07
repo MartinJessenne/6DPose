@@ -206,13 +206,13 @@ def run_random_inspection(
         T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
         T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
         T_ground_truth = compute_ground_truth_pose(
-            T_world_camera, T_world_cart, T_robot_camera=estimator.extrinsic
+            T_world_camera, T_world_cart, T_robot_camera=estimator.sensor.T_robot_camera
         )
         print("Ground Truth 6D Pose Matrix:\n", T_ground_truth)
 
         # 5. Export Combined Scene to GLB (Robot Frame)
         pcd_robot = copy.deepcopy(pcd)
-        pcd_robot.transform(estimator.extrinsic)
+        pcd_robot.transform(estimator.sensor.T_robot_camera)
         output_file = os.path.join(output_dir, f"combined_scene_sample_{sample_idx}.glb")
         export_debug_scene(pcd_robot, cad_mesh, T_final, T_ground_truth, output_file)
 
@@ -271,9 +271,9 @@ def run_targeted_inspection(
         )
         print(f"Recognized class: {cart_type}")
 
-        # Transform the point cloud to the robot frame using the estimator's extrinsic
+        # Transform the point cloud to the robot frame using the estimator's sensor pose
         pcd_robot = copy.deepcopy(pcd)
-        pcd_robot.transform(estimator.extrinsic)
+        pcd_robot.transform(estimator.sensor.T_robot_camera)
 
         pcd_path = os.path.join(output_dir, f"reconstructed_pcd_{idx}.ply")
         o3d.io.write_point_cloud(pcd_path, pcd_robot)
@@ -289,7 +289,7 @@ def run_targeted_inspection(
                 T_world_camera = np.asarray(row["camera_view_transform"]).reshape(4, 4).T
                 T_world_cart = np.asarray(row["bbox_3d_transform"][0]).reshape(4, 4).T
                 T_ground_truth = compute_ground_truth_pose(
-                    T_world_camera, T_world_cart, T_robot_camera=estimator.extrinsic
+                    T_world_camera, T_world_cart, T_robot_camera=estimator.sensor.T_robot_camera
                 )
                 output_glb = os.path.join(output_dir, f"combined_scene_idx_{idx}.glb")
                 export_debug_scene(pcd_robot, cad_mesh, T_final, T_ground_truth, output_glb)
@@ -328,8 +328,8 @@ def main():
 
     # Directly construct the chosen preset's estimator -- no _target_ string
     # resolution needed, args.model.ESTIMATOR_CLS is already the concrete class.
-    extrinsic = np.array(args.camera.extrinsic, dtype=np.float64)
-    estimator = args.model.ESTIMATOR_CLS(params=args.model.profile.params, extrinsic=extrinsic)
+    sensor = args.camera.sensor
+    estimator = args.model.ESTIMATOR_CLS(params=args.model.profile.params, sensor=sensor)
 
     # Pre-prepare all meshes on estimator
     for cart_type, mesh in meshes.items():
