@@ -331,6 +331,15 @@ class Ransac3DoFParams(RansacParams):
 
     z_offset: float | None = None
     z_gate_threshold: Annotated[float, SearchRange(min=0.05, max=0.35)] = 0.09
+    # Redeclared without RansacParams' SearchRange: there the radius is a hard
+    # truncation that also rejects outliers, so it is a real tuning knob. Here
+    # the annealed GNC kernel owns rejection and the radius only has to avoid
+    # losing the true correspondent, which depth noise sets:
+    #   sigma_z = z^2 sigma_d / (f B), f B = 639.99768 * 0.095 = 60.80 px.m
+    #   3 sigma_z at the depth_trunc limit z = 5.5 m  ->  0.149 m
+    # Measured flat (trans_xy_p50 spread 0.077 mm) over 0.05-0.45 m on 99
+    # frames, so this is a plateau value, not an optimum. Not searchable.
+    icp_max_correspondence_distance: float = 0.15
     edge_length_tolerance: float = 0.14
     ransac_confidence: float = 0.999
     seed: int | None = 0
