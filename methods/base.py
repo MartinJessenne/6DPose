@@ -40,6 +40,10 @@ class UnknownOverrideError(ConfigError):
 class SearchRange:
     """
     Search range descriptor for optuna metadata.
+
+    Where Optuna looks -- not a validity bound. Values outside it construct and
+    run fine, which is what makes "is this range set right?" an answerable
+    question.
     """
 
     min: float
@@ -181,9 +185,16 @@ class BaseParams:
         return dataclasses.replace(base, **sampled)
 
     def __post_init__(self):
+        """
+        Type-checks the searchable fields. Deliberately does NOT range-check them:
+        a SearchRange says where Optuna looks, not which values are legal, and
+        conflating the two makes the range unfalsifiable -- you cannot run the
+        experiment that would show it is set wrong. Profile-vs-range coherence is
+        asserted in tests/test_params_authority.py instead.
+        """
         hints = typing.get_type_hints(type(self), include_extras=True)
 
-        for name, rng in self.search_space().items():
+        for name in self.search_space():
             v = getattr(self, name)
             if v is None:
                 continue
@@ -191,11 +202,6 @@ class BaseParams:
             declared = _unwrap_optional(hints[name])
             if not isinstance(v, declared) or isinstance(v, bool) is not (declared is bool):
                 raise TypeError(f"{type(self).__name__}.{name} = {v!r} is not {declared.__name__}")
-
-            if not (rng.min <= v <= rng.max):
-                raise ValueError(
-                    f"{type(self).__name__}.{name} = {v} outside [{rng.min}, {rng.max}]"
-                )
 
 
 class BasePoseEstimator(ABC):

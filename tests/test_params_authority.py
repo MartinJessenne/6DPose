@@ -78,9 +78,11 @@ class TestParamsAuthority(unittest.TestCase):
         self.assertEqual(sampled.ransac_max_iterations, 100000)
 
     def test_t4_no_profile_outside_its_own_range(self):
-        """Every tuned profile must construct. __post_init__ rejects a value outside
-        its own declared SearchRange, and a tuned optimum sitting outside the range
-        being searched means the sweep can never rediscover it."""
+        """A tuned optimum sitting outside the range being searched means the sweep
+        can never rediscover that profile. __post_init__ deliberately does not
+        enforce this -- a SearchRange is where Optuna looks, not a validity bound,
+        and range-checking every construction makes the range unfalsifiable. So the
+        coherence is asserted here instead, once, at test time."""
         selects = [n for n in dir(cli_config) if n.endswith("ProfileSelect")]
         self.assertGreaterEqual(len(selects), 4)
         checked = 0
@@ -89,9 +91,15 @@ class TestParamsAuthority(unittest.TestCase):
                 profile_cls, subcommand = typing.get_args(member)
                 default = subcommand.default
                 profile = default if isinstance(default, profile_cls) else profile_cls()
-                with self.subTest(select=select_name, profile=subcommand.name):
-                    type(profile.params)(**dataclasses.asdict(profile.params))
-                checked += 1
+                params = profile.params
+                for name, rng in type(params).search_space().items():
+                    v = getattr(params, name)
+                    if v is None:
+                        continue
+                    with self.subTest(select=select_name, profile=subcommand.name, field=name):
+                        self.assertGreaterEqual(v, rng.min)
+                        self.assertLessEqual(v, rng.max)
+                    checked += 1
         self.assertGreater(checked, 0)
 
     def test_t5_override_round_trip_by_type(self):
